@@ -1,0 +1,30 @@
+{
+  "name": "bote",
+  "version": "0.1.0",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:debug": "tsc --sourceMap",
+    "test": "echo \"(no tests yet)\"",
+    "lint": "oxlint src"
+  },
+  "dependencies": {
+    "@bote/native": "workspace:*"
+  },
+  "devDependencies": {
+    "oxlint": "^1.14.0",
+    "typescript": "^6.0.0"
+  }
+}
