@@ -18,7 +18,8 @@
     "build": "tsc",
     "build:debug": "tsc --sourceMap",
     "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning __test__/*.spec.ts",
-    "lint": "oxlint src"
+    "lint": "oxlint src",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "@bote/native": "workspace:*"
