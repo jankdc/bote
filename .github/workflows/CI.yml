@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: npm install -g corepack@latest && corepack enable
+      - run: npm install -g --force corepack@latest && corepack enable
         shell: bash
       - name: Setup node
         uses: actions/setup-node@v6
@@ -68,7 +68,7 @@ jobs:
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v6
-      - run: npm install -g corepack@latest && corepack enable
+      - run: npm install -g --force corepack@latest && corepack enable
         shell: bash
       - name: Setup node
         uses: actions/setup-node@v6
@@ -142,7 +142,7 @@ jobs:
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v6
-      - run: npm install -g corepack@latest && corepack enable
+      - run: npm install -g --force corepack@latest && corepack enable
         shell: bash
       - name: Setup node
         uses: actions/setup-node@v6
@@ -180,7 +180,7 @@ jobs:
     runs-on: ${{ contains(matrix.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
-      - run: npm install -g corepack@latest && corepack enable
+      - run: npm install -g --force corepack@latest && corepack enable
         shell: bash
       - name: Setup node
         uses: actions/setup-node@v6
