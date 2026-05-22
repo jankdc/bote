@@ -33,8 +33,9 @@ jobs:
           node-version: 24
           cache: yarn
       - name: Install
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-04-15
           components: clippy, rustfmt
       - name: Install dependencies
         run: yarn install
@@ -61,7 +62,7 @@ jobs:
           - host: macos-latest
             target: aarch64-apple-darwin
             build: yarn workspace @bote/native build --target aarch64-apple-darwin
-    name: stable - ${{ matrix.settings.target }} - node@22
+    name: nightly - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v6
@@ -71,9 +72,9 @@ jobs:
           node-version: 24
           cache: yarn
       - name: Install
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: nightly-2026-04-15
           targets: ${{ matrix.settings.target }}
       - name: Cache cargo
         uses: actions/cache@v5

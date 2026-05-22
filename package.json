@@ -1,7 +1,7 @@
 {
   "name": "bote-monorepo",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "license": "MIT",
   "workspaces": [
     "packages/*"
@@ -13,6 +13,7 @@
     "build": "yarn workspaces foreach -A -pt run build",
     "build:debug": "yarn workspaces foreach -A -pt run build:debug",
     "test": "yarn workspaces foreach -A -pt run test",
+    "bench": "yarn workspace @bote/bench bench",
     "lint": "yarn workspaces foreach -A -p run lint",
     "format": "run-p format:prettier format:rs",
     "format:prettier": "prettier . -w",

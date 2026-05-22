@@ -1,0 +1,32 @@
+{
+  "name": "@bote/bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+  },
+  "scripts": {
+    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning bench.ts",
+    "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning matrix.ts",
+    "bench:chunk-size": "node --experimental-strip-types --no-warnings=ExperimentalWarning chunk-size.ts",
+    "profile:rust": "node --experimental-strip-types --no-warnings=ExperimentalWarning profile-rust.ts",
+    "profile:js": "node --expose-gc --experimental-strip-types --no-warnings=ExperimentalWarning profile-js.ts",
+    "stress": "node --experimental-strip-types --no-warnings=ExperimentalWarning stress.ts",
+    "showcase": "./showcase.sh",
+    "showcase:mem": "./showcase-mem.sh",
+    "showcase:tool": "node --experimental-strip-types --no-warnings=ExperimentalWarning showcase.ts",
+    "lint": "oxlint ."
+  },
+  "dependencies": {
+    "@bote/native": "workspace:*",
+    "bote": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chalk": "^5.6.2",
+    "oxlint": "^1.14.0",
+    "tinybench": "^6.0.0"
+  }
+}

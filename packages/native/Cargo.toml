@@ -8,8 +8,25 @@ version = "0.1.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = "3.0.0"
+async-trait = "0.1"
+bytes = "1"
+dhat = { version = "0.3", optional = true }
+napi = { version = "3.0.0", features = ["async", "serde-json", "tokio_rt"] }
 napi-derive = "3.0.0"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[features]
+# Installs a heap-profiling global allocator and exposes the
+# `heapProfileStart` / `heapProfileStop` / `heapProfilePeakBytes` napi
+# functions. Off by default - the profiling allocator adds non-trivial
+# overhead and is only meant for investigative builds. The underlying
+# profiler implementation is an internal detail of this crate.
+heap-profile = ["dep:dhat"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [build-dependencies]
 napi-build = "2"

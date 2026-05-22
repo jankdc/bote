@@ -17,14 +17,26 @@
   "scripts": {
     "build": "tsc",
     "build:debug": "tsc --sourceMap",
-    "test": "echo \"(no tests yet)\"",
+    "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning __test__/*.spec.ts",
     "lint": "oxlint src"
   },
   "dependencies": {
     "@bote/native": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "oxlint": "^1.14.0",
     "typescript": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@standard-schema/spec": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@standard-schema/spec": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@standard-schema/spec": {
+      "optional": true
+    }
   }
 }

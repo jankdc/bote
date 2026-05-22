@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["packages/*"]
-exclude = ["packages/bote"]
+exclude = ["packages/bote", "packages/bench"]
 
 [profile.release]
 lto = true

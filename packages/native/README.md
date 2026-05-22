@@ -25,7 +25,7 @@ After `yarn build/npm run build` command, you can see `package-template.[darwin|
 
 ### Test
 
-With [ava](https://github.com/avajs/ava), run `yarn test/npm run test` to testing native addon. You can also switch to another testing framework if you want.
+Run `yarn test/npm run test` to test the native addon. Tests use Node.js' built-in test runner (`node:test`).
 
 ### CI
 
@@ -58,14 +58,12 @@ In this package, we choose a better way to solve this problem. We release differ
 And you will see:
 
 ```bash
-$ ava --verbose
-
+$ node --test --experimental-strip-types __test__/*.spec.ts
   ✔ sync function from native code
   ✔ sleep function from native code (201ms)
-  ─
-
-  2 tests passed
-✨  Done in 1.12s.
+  ℹ tests 2
+  ℹ pass 2
+  ℹ fail 0
 ```
 
 ## Release package

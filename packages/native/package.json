@@ -1,6 +1,6 @@
 {
   "name": "@bote/native",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Native bindings for bote via napi-rs",
   "main": "index.js",
   "types": "index.d.ts",
@@ -35,12 +35,11 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning benchmark/bench.ts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "lint": "oxlint .",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "ava",
+    "test": "cargo test",
     "preversion": "napi build --platform && git add .",
     "version": "napi version"
   },
@@ -49,19 +48,7 @@
     "@emnapi/runtime": "^1.5.0",
     "@napi-rs/cli": "^3.2.0",
     "@tybys/wasm-util": "^0.10.0",
-    "ava": "^8.0.0",
-    "chalk": "^5.6.2",
-    "tinybench": "^6.0.0"
-  },
-  "ava": {
-    "extensions": [
-      "ts"
-    ],
-    "timeout": "2m",
-    "workerThreads": false,
-    "nodeArguments": [
-      "--experimental-strip-types",
-      "--no-warnings=ExperimentalWarning"
-    ]
+    "@types/node": "^22.0.0",
+    "oxlint": "^1.14.0"
   }
 }
