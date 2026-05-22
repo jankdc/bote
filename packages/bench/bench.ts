@@ -54,7 +54,9 @@ async function runMatrix(): Promise<string> {
     )
     let buf = ''
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (d) => { buf += d })
+    child.stdout.on('data', (d) => {
+      buf += d
+    })
     child.on('error', reject)
     child.on('close', (code) => {
       // The driver exits non-zero on failures, but those are still
@@ -96,7 +98,10 @@ function summarize(r: Result): BaselineEntry {
 }
 
 function writeBaseline(current: Result[]): void {
-  const lines = current.filter((r) => !r.error).map((r) => JSON.stringify(summarize(r))).join('\n')
+  const lines = current
+    .filter((r) => !r.error)
+    .map((r) => JSON.stringify(summarize(r)))
+    .join('\n')
   writeFileSync(baselinePath, lines + '\n')
   console.error(`baseline written → ${baselinePath} (${current.length} cell(s))`)
 }
@@ -116,7 +121,9 @@ function compareCell(cur: Result, base: BaselineEntry | undefined): Verdict {
   const basePerf = useRatio ? base.reference!.ratio : base.timing.p50_ns
   const perfRatio = basePerf > 0 ? curPerf / basePerf : 1
   if (perfRatio > perfSlack) {
-    const what = useRatio ? `ratio ${curPerf.toFixed(3)} vs ${basePerf.toFixed(3)}` : `p50 ${fmtNs(curPerf)} vs ${fmtNs(basePerf)}`
+    const what = useRatio
+      ? `ratio ${curPerf.toFixed(3)} vs ${basePerf.toFixed(3)}`
+      : `p50 ${fmtNs(curPerf)} vs ${fmtNs(basePerf)}`
     return {
       cell: cur.cell.id,
       status: 'perf-regression',

@@ -141,9 +141,7 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Source {
           // body. We throw here since the point of using ranges is to not have to
           // buffer the whole thing in memory.
           if (res.status === 200) {
-            throw new Error(
-              `Range GET ${url} (bytes=${offset}-${end}) ignored Range and returned 200.`,
-            )
+            throw new Error(`Range GET ${url} (bytes=${offset}-${end}) ignored Range and returned 200.`)
           }
 
           throw new Error(`Range GET ${url} (bytes=${offset}-${end}) failed: ${res.status}`)

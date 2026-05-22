@@ -19,6 +19,7 @@ Pushes to `main` run the `release` job in CI. It calls [`changesets/action`](htt
 The action opens (or updates) a "chore(release): version packages" PR that runs `yarn version-packages` (`changeset version`). Merging that PR bumps versions and clears the `.changeset/*.md` files.
 
 ### No pending changesets
+
 The action runs `yarn release` (`changeset publish`), which publishes any workspace packages whose versions are ahead of npm. Native platform sub-packages are published via `@bote/native`'s `prepublishOnly` (`napi prepublish -t npm --no-gh-release`).
 
 `@bote/native` and `bote` are linked, so they always bump in lockstep. `@bote/bench` is ignored (private).

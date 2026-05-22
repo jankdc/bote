@@ -59,7 +59,10 @@ export declare function heapProfileStop(): void
  * The TS facade (`packages/bote`) adapts the user-facing
  * `read(offset, buf)` API to this `read({ offset, buf })` shape.
  */
-export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> }, options?: BoteOptions | undefined | null): Cursor
+export declare function open(
+  source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> },
+  options?: BoteOptions | undefined | null,
+): Cursor
 
 /**
  * Arguments passed to the JS `read(args)` callback.

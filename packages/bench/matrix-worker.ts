@@ -116,7 +116,10 @@ async function measureCell(cell: Cell): Promise<Result> {
     }
 
     let reference: Reference | undefined
-    if (cell.op === 'get' && (cell.accessPattern === 'shallow' || cell.accessPattern === 'mid' || cell.accessPattern === 'deep')) {
+    if (
+      cell.op === 'get' &&
+      (cell.accessPattern === 'shallow' || cell.accessPattern === 'mid' || cell.accessPattern === 'deep')
+    ) {
       reference = measureParseReference(fixture.buf, cell, pointer, timing.p50_ns)
     }
 

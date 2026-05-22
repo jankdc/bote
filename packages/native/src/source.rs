@@ -158,8 +158,7 @@ impl Source for JsSource {
     // implementation must not retain `buf` or read from it after the
     // returned promise resolves. The shipped factory functions
     // (`fromBuffer`, `fromFile`, `fromHttpRange`) honor this.
-    let owner =
-      Arc::new(Mutex::new(Some(vec![0u8; length].into_boxed_slice())));
+    let owner = Arc::new(Mutex::new(Some(vec![0u8; length].into_boxed_slice())));
 
     let (ptr, buf_len) = {
       let mut guard = owner.lock().unwrap();

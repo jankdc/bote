@@ -92,7 +92,9 @@ console.log(`Building doc (${HEAP_ITEMS.toLocaleString()} items, padWidth ${PAD_
 await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(`Doc size: ${fmtBytes(buf.byteLength)}`)
 
-  console.log(`\n[phase 1] heap plateau - walking ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`)
+  console.log(
+    `\n[phase 1] heap plateau - walking ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`,
+  )
   const samples = await heapPlateauPhase(path)
   for (const s of samples) {
     console.log(`  after ${s.itemsSeen.toLocaleString().padStart(8)} items : ${fmtBytes(s.heapDelta).padStart(10)}`)
@@ -106,7 +108,9 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   const tailItems = last.itemsSeen - mid.itemsSeen
   const perItem = tailGrowth / Math.max(1, tailItems)
   if (perItem < 4) {
-    verdicts.push(`PASS  heap plateau (tail ${fmtBytes(tailGrowth)} over ${tailItems.toLocaleString()} items, ${perItem.toFixed(2)} B/item)`)
+    verdicts.push(
+      `PASS  heap plateau (tail ${fmtBytes(tailGrowth)} over ${tailItems.toLocaleString()} items, ${perItem.toFixed(2)} B/item)`,
+    )
   } else {
     verdicts.push(
       `FAIL  heap grew ${fmtBytes(tailGrowth)} over last ${tailItems.toLocaleString()} items ` +
@@ -115,16 +119,22 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
     failed = true
   }
 
-  console.log(`\n[phase 2] WeakRef liveness - collecting ${WEAKREF_ITEMS.toLocaleString()} refs, forcing GC, checking deref\n`)
+  console.log(
+    `\n[phase 2] WeakRef liveness - collecting ${WEAKREF_ITEMS.toLocaleString()} refs, forcing GC, checking deref\n`,
+  )
   const wr = await weakRefPhase(path)
-  console.log(`  ${(wr.total - wr.alive).toLocaleString()} of ${wr.total.toLocaleString()} collected, ${wr.alive.toLocaleString()} still alive`)
+  console.log(
+    `  ${(wr.total - wr.alive).toLocaleString()} of ${wr.total.toLocaleString()} collected, ${wr.alive.toLocaleString()} still alive`,
+  )
   // Tolerate a tiny number alive: the final iteration's Cursor can
   // survive in an async generator slot until the loop fully unwinds.
   const tolerance = Math.max(2, Math.floor(wr.total * 0.001))
   if (wr.alive <= tolerance) {
     verdicts.push(`PASS  WeakRefs collected (${wr.alive} alive ≤ tolerance ${tolerance})`)
   } else {
-    verdicts.push(`FAIL  ${wr.alive} WeakRefs still alive (tolerance ${tolerance}) - facade is retaining yielded Cursors`)
+    verdicts.push(
+      `FAIL  ${wr.alive} WeakRefs still alive (tolerance ${tolerance}) - facade is retaining yielded Cursors`,
+    )
     failed = true
   }
 

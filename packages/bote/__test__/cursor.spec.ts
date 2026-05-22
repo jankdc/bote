@@ -179,4 +179,3 @@ test('cache_large_doc_under_tight_slot_cap', async () => {
   assert.equal(await cursor.get('/k0042'), 42)
   assert.equal(await cursor.has('/k9999'), false)
 })
-

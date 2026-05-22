@@ -64,15 +64,13 @@ interface SpawnOutcome {
 
 async function runCell(cell: Cell): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
-    const nodeArgs = [
-      '--experimental-strip-types',
-      '--no-warnings=ExperimentalWarning',
-      workerPath,
-    ]
+    const nodeArgs = ['--experimental-strip-types', '--no-warnings=ExperimentalWarning', workerPath]
     const child = spawn(process.execPath, nodeArgs, { stdio: ['pipe', 'pipe', 'inherit'] })
     let out = ''
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (d) => { out += d })
+    child.stdout.on('data', (d) => {
+      out += d
+    })
     child.on('error', (err) => resolve({ result: null, raw: out, exitCode: null, spawnError: err }))
     child.on('close', (code) => {
       const line = out.trim().split('\n').pop() ?? ''
@@ -104,8 +102,12 @@ for (const cell of cells) {
 
   if (!outcome.result) {
     failed += 1
-    const reason = outcome.spawnError ? outcome.spawnError.message : `exit ${outcome.exitCode}; output: ${outcome.raw.trim()}`
-    sink.write(JSON.stringify({ cell, meta: { ...meta, date: new Date().toISOString(), durationMs }, error: reason }) + '\n')
+    const reason = outcome.spawnError
+      ? outcome.spawnError.message
+      : `exit ${outcome.exitCode}; output: ${outcome.raw.trim()}`
+    sink.write(
+      JSON.stringify({ cell, meta: { ...meta, date: new Date().toISOString(), durationMs }, error: reason }) + '\n',
+    )
     console.error(`✗ ${cell.id}  worker failed: ${reason}`)
     continue
   }

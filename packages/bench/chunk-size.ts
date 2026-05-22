@@ -35,7 +35,12 @@ async function measure(path: string, chunkBytes: number, maxResidentChunks: numb
   }
 }
 
-function printTable(title: string, rowHeader: string, columns: string[], rows: Array<{ label: string; cells: string[] }>): void {
+function printTable(
+  title: string,
+  rowHeader: string,
+  columns: string[],
+  rows: Array<{ label: string; cells: string[] }>,
+): void {
   console.log(`\n== ${title} ==`)
   const header = [rowHeader].concat(columns).join(' | ')
   console.log(header)

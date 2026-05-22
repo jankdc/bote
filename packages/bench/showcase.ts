@@ -259,7 +259,10 @@ async function runOnce(approach: string, file: string, idx: number): Promise<num
 }
 
 function renderMemTable(jsonlPath: string): void {
-  const lines = readFileSync(jsonlPath, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
+  const lines = readFileSync(jsonlPath, 'utf8')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
   const results = lines.map((l) => JSON.parse(l) as MemResult)
   const headers = ['operation', 'approach', 'JS heap peak Δ', 'JS heap retained Δ', 'Rust peak']
   const data: string[][] = []
@@ -287,7 +290,10 @@ function renderMemTable(jsonlPath: string): void {
 }
 
 function renderTable(jsonlPath: string): void {
-  const lines = readFileSync(jsonlPath, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
+  const lines = readFileSync(jsonlPath, 'utf8')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
   const results = lines.map((l) => JSON.parse(l) as RunResult)
   const headers = ['operation', 'JSON.parse', 'bote']
   const approachKeys = ['json-parse', 'bote']
@@ -402,5 +408,7 @@ if (sub === 'render-mem') {
 }
 
 console.error('usage: showcase.ts <fixture|run|mem|render|render-mem> [args]')
-console.error('  (this is the underlying multi-tool; use ./showcase.sh or ./showcase-mem.sh to orchestrate cold-cache runs)')
+console.error(
+  '  (this is the underlying multi-tool; use ./showcase.sh or ./showcase-mem.sh to orchestrate cold-cache runs)',
+)
 process.exit(1)

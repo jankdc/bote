@@ -72,7 +72,8 @@ if (userFile) {
   await profile(path, size, outPath)
 } else {
   const items = Number(argValue('--items') ?? DEFAULT_SYNTH_ITEMS)
-  if (!Number.isFinite(items) || items <= 0) throw new Error(`--items must be a positive number, got ${argValue('--items')}`)
+  if (!Number.isFinite(items) || items <= 0)
+    throw new Error(`--items must be a positive number, got ${argValue('--items')}`)
   console.log(`Synthesizing array-of-objects doc (${items.toLocaleString()} items, padWidth ${PAD_WIDTH})…`)
   await withTempDoc(items, PAD_WIDTH, async (path, buf) => {
     await profile(path, buf.byteLength, outPath)

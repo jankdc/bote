@@ -9,11 +9,11 @@ npm install bote
 ```ts
 import { open, fromFile } from 'bote'
 
-import * as z from "zod";  // or bring your own Standard Schema validator
+import * as z from 'zod' // or bring your own Standard Schema validator
 
 const User = z.object({
   id: z.string(),
-  email: z.string()
+  email: z.string(),
 })
 
 type User = z.infer<typeof User>
@@ -21,10 +21,10 @@ type User = z.infer<typeof User>
 await using cursor = await open(fromFile('./your-big.json'))
 
 // if you want one value
-const user0: unknown = await cursor.get('/1234/users/0');
+const user0: unknown = await cursor.get('/1234/users/0')
 
 // for .get and .iter, you can supply a validator
-const user1: User = await cursor.get('/1234/users/1', User);
+const user1: User = await cursor.get('/1234/users/1', User)
 
 // if you want to iterate a list of values
 for await (const user of cursor.iter('/1234/users')) {
@@ -38,7 +38,7 @@ for await (const userCursor of cursor.walk('/1234/users')) {
 }
 
 // 'await using' would normally clean up resources for you
-// when it goes out of lexical scope. if you hate that, 
+// when it goes out of lexical scope. if you hate that,
 // you can do it explicitly as well.
 await cursor.close()
 ```
@@ -47,14 +47,14 @@ given a **seekable** source (e.g. a file, an HTTP range) and a JSON pointer, it 
 
 here's a run (Apple M1 Pro 2021, 500MB JSON array file, cold-cache, default settings):
 
-| operation | approach | time | js heap peak Δ | rust peak |
-| --- | --- | ---: | ---: | ---: |
-| items[0] | JSON.parse | 1.75 s | 1.21 GB | n/a |
-| items[len/2] | JSON.parse | 1.82 s | 1.21 GB | n/a |
-| items[len-1] | JSON.parse | 1.76 s | 1.21 GB | n/a |
-| items[0] | bote | 1.43 ms | 25.9 KB | 94.9 KB |
-| items[len/2] | bote | 328.81 ms | 1.3 MB | 56.6 MB |
-| items[len-1] | bote | 636.78 ms | 1.3 MB | 56.6 MB |
+| operation    | approach   |      time | js heap peak Δ | rust peak |
+| ------------ | ---------- | --------: | -------------: | --------: |
+| items[0]     | JSON.parse |    1.75 s |        1.21 GB |       n/a |
+| items[len/2] | JSON.parse |    1.82 s |        1.21 GB |       n/a |
+| items[len-1] | JSON.parse |    1.76 s |        1.21 GB |       n/a |
+| items[0]     | bote       |   1.43 ms |        25.9 KB |   94.9 KB |
+| items[len/2] | bote       | 328.81 ms |         1.3 MB |   56.6 MB |
+| items[len-1] | bote       | 636.78 ms |         1.3 MB |   56.6 MB |
 
 ## sources
 

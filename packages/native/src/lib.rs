@@ -40,7 +40,6 @@ static GLOBAL: dhat::Alloc = dhat::Alloc;
 #[cfg(feature = "heap-profile")]
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
-
 #[napi(object)]
 pub struct BoteOptions {
   /// Maximum number of source chunks held resident at once. Each slot

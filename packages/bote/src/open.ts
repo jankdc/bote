@@ -26,10 +26,7 @@ export interface Cursor {
   has<S extends string>(pointer: JsonPointer<S>, schema: StandardSchemaV1): Promise<boolean>
 
   get<S extends string>(pointer: JsonPointer<S>): Promise<unknown>
-  get<S extends string, Sch extends StandardSchemaV1>(
-    pointer: JsonPointer<S>,
-    schema: Sch,
-  ): Promise<InferOutput<Sch>>
+  get<S extends string, Sch extends StandardSchemaV1>(pointer: JsonPointer<S>, schema: Sch): Promise<InferOutput<Sch>>
 
   iter<S extends string>(pointer: JsonPointer<S>): AsyncIterable<unknown>
   iter<S extends string, Sch extends StandardSchemaV1>(
