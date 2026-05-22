@@ -109,10 +109,12 @@ test('await_using_cursor_disposes_reader_at_scope_exit', async () => {
       })
     },
   }
-  {
-    await using cursor = await open(source)
+  const cursor = await open(source)
+  try {
     assert.equal(await cursor.get('/users/0/name'), 'Alice')
     assert.equal(closeCalls, 0, 'reader stays open inside the scope')
+  } finally {
+    await cursor[Symbol.asyncDispose]()
   }
   assert.equal(closeCalls, 1, 'scope exit must drive Symbol.asyncDispose -> reader.close')
 })
