@@ -351,8 +351,8 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
   }
 
   /// Advance past `needed` depth-0 commas of the array currently being
-  /// scanned, returning the offset one byte past the last consumed comma
-  /// - i.e. the first byte of the next element. Caller passes the position
+  /// scanned, returning the offset one byte past the last consumed comma -
+  /// i.e. the first byte of the next element. Caller passes the position
   /// of the current element (one past `[` on first entry, or one past the
   /// previous element's terminating `,` on a mid-scan resume) and the
   /// current nesting depth relative to that array (0 on first entry).

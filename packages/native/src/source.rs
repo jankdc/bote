@@ -87,8 +87,8 @@ pub struct ReadArgs {
   pub buf: Uint8Array,
 }
 
-/// `ThreadsafeFunction` returned by `Function::build_threadsafe_function().weak::<true>().build()`
-/// - `CalleeHandled = false`, so `call_async` takes the args directly (no
+/// `ThreadsafeFunction` returned by `Function::build_threadsafe_function().weak::<true>().build()` -
+/// `CalleeHandled = false`, so `call_async` takes the args directly (no
 /// `Result` wrapper). We always pass a success value; JS-side rejections from
 /// the returned `Promise` propagate via the inner `.await`.
 ///

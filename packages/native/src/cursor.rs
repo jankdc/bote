@@ -5,8 +5,8 @@
 //! pointer resolution starts at byte 0. Sub-cursors yielded by `walk` carry
 //! an anchor and resolve pointers relative to that location.
 //!
-//! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`]
-//! - napi async-iterators that lazily resolve their pointer on first `next()`
+//! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`] -
+//! napi async-iterators that lazily resolve their pointer on first `next()`
 //! and then step through children one entry at a time. Each step retries
 //! through `Pending` by fetching chunks as needed.
 
