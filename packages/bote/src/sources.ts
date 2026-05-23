@@ -109,7 +109,9 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Source {
           userSignal.addEventListener('abort', () => controller.abort(userSignal.reason), { once: true })
         }
       }
-      const head = await fetch(url, { ...init, method: 'HEAD', signal: controller.signal })
+      const headHeaders = new Headers(init?.headers)
+      headHeaders.set('Accept-Encoding', 'identity')
+      const head = await fetch(url, { ...init, headers: headHeaders, method: 'HEAD', signal: controller.signal })
       if (!head.ok) {
         throw new Error(`HEAD ${url} failed: ${head.status} ${head.statusText}`)
       }
@@ -131,6 +133,7 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Source {
           const end = Math.min(offset + dst.byteLength, size) - 1
           const headers = new Headers(init?.headers)
           headers.set('Range', `bytes=${offset}-${end}`)
+          headers.set('Accept-Encoding', 'identity')
           const res = await fetch(url, { ...init, headers, method: 'GET', signal: controller.signal })
           if (res.status === 206) {
             const body = new Uint8Array(await res.arrayBuffer())
