@@ -10,7 +10,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "engines": {
     "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
@@ -24,7 +25,7 @@
     "build:debug": "tsc --sourceMap",
     "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning __test__/*.spec.ts",
     "lint": "oxlint src",
-    "prepublishOnly": "tsc"
+    "prepublishOnly": "cp ../../README.md ./README.md && tsc"
   },
   "dependencies": {
     "@botejs/native": "workspace:*"
