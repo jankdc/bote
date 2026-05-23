@@ -13,7 +13,7 @@
     "build": "yarn workspaces foreach -A -pt run build",
     "build:debug": "yarn workspaces foreach -A -pt run build:debug",
     "test": "yarn workspaces foreach -A -pt run test",
-    "bench": "yarn workspace @bote/bench bench",
+    "bench": "yarn workspace @botejs/bench bench",
     "lint": "yarn workspaces foreach -A -p run lint",
     "format": "run-p format:prettier format:rs",
     "format:prettier": "prettier . -w",

@@ -1,5 +1,5 @@
 {
-  "name": "@bote/bench",
+  "name": "@botejs/bench",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "lint": "oxlint ."
   },
   "dependencies": {
-    "@bote/native": "workspace:*",
+    "@botejs/native": "workspace:*",
     "bote": "workspace:*"
   },
   "devDependencies": {

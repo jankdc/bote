@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
-import { heapProfilePeakBytes, heapProfileStart, heapProfileStop } from '@bote/native'
+import { heapProfilePeakBytes, heapProfileStart, heapProfileStop } from '@botejs/native'
 import { fromFile, open } from 'bote'
 
 import { fmtBytes, fmtNs } from './format.ts'

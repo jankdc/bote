@@ -3,9 +3,9 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [],
-  "linked": [["@bote/native", "bote"]],
+  "linked": [["@botejs/native", "bote"]],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@bote/bench"]
+  "ignore": ["@botejs/bench"]
 }

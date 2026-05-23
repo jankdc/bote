@@ -20,6 +20,6 @@ The action opens (or updates) a "chore(release): version packages" PR that runs 
 
 ### No pending changesets
 
-The action runs `yarn release` (`changeset publish`), which publishes any workspace packages whose versions are ahead of npm. Native platform sub-packages are published via `@bote/native`'s `prepublishOnly` (`napi prepublish -t npm --no-gh-release`).
+The action runs `yarn release` (`changeset publish`), which publishes any workspace packages whose versions are ahead of npm. Native platform sub-packages are published via `@botejs/native`'s `prepublishOnly` (`napi prepublish -t npm --no-gh-release`).
 
-`@bote/native` and `bote` are linked, so they always bump in lockstep. `@bote/bench` is ignored (private).
+`@botejs/native` and `bote` are linked, so they always bump in lockstep. `@botejs/bench` is ignored (private).

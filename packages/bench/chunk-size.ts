@@ -1,7 +1,7 @@
 // Read perf vs chunk size. Cap is held large enough that no eviction
 // happens, so this isolates per-chunk overhead from cache-churn effects.
 
-import { open } from '@bote/native'
+import { open } from '@botejs/native'
 import { fileSource, withTempDoc, type Pattern } from './fixtures.ts'
 import { fmtBytes, fmtNs } from './format.ts'
 

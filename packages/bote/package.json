@@ -22,7 +22,7 @@
     "prepublishOnly": "tsc"
   },
   "dependencies": {
-    "@bote/native": "workspace:*"
+    "@botejs/native": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

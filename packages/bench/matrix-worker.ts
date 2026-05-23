@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { open, type Cursor } from '@bote/native'
+import { open, type Cursor } from '@botejs/native'
 
 import type { Cell, Reference, Result, Timing } from './cells.ts'
 import { buildFixture, fileSource, memorySource, type DocFixture, type Source } from './fixtures.ts'

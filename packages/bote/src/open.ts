@@ -1,4 +1,4 @@
-import { open as openNative, type Cursor as NativeCursor } from '@bote/native'
+import { open as openNative, type Cursor as NativeCursor } from '@botejs/native'
 
 import type { JsonPointer } from './pointer.ts'
 import type { Source, SourceReader } from './sources.ts'

@@ -56,16 +56,16 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: yarn workspace @bote/native build --target x86_64-apple-darwin
+            build: yarn workspace @botejs/native build --target x86_64-apple-darwin
           - host: windows-latest
-            build: yarn workspace @bote/native build --target x86_64-pc-windows-msvc
+            build: yarn workspace @botejs/native build --target x86_64-pc-windows-msvc
             target: x86_64-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: yarn workspace @bote/native build --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: yarn workspace @botejs/native build --target x86_64-unknown-linux-gnu --use-napi-cross
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: yarn workspace @bote/native build --target aarch64-apple-darwin
+            build: yarn workspace @botejs/native build --target aarch64-apple-darwin
     name: nightly - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -261,13 +261,13 @@ jobs:
       - name: Install dependencies
         run: yarn install
       - name: Create npm dirs
-        run: yarn workspace @bote/native napi create-npm-dirs
+        run: yarn workspace @botejs/native napi create-npm-dirs
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: ${{ env.NATIVE_PKG_DIR }}/artifacts
       - name: Move artifacts
-        run: yarn workspace @bote/native artifacts
+        run: yarn workspace @botejs/native artifacts
       - name: List packages
         run: ls -R ${{ env.NATIVE_PKG_DIR }}/npm
         shell: bash

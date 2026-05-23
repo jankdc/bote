@@ -1,6 +1,6 @@
 // Heap profile of a full ingest of a large JSON doc.
 //
-// Requires `@bote/native` built with `--features heap-profile`. Opens
+// Requires `@botejs/native` built with `--features heap-profile`. Opens
 // the source with default chunk size and default `maxResidentChunks`,
 // then walks the whole doc to force every chunk through the cache +
 // bitmap store. Writes a heap-profile file to CWD (override with
@@ -10,15 +10,15 @@
 // live bytes is the `t-gmax` field.
 //
 // Usage:
-//   yarn workspace @bote/bench profile:rust                       # synth ~400 MB doc
-//   yarn workspace @bote/bench profile:rust --file path/to.json   # real file
-//   yarn workspace @bote/bench profile:rust --items 7_000_000     # custom synth size
-//   yarn workspace @bote/bench profile:rust --out my-heap.json    # custom dump path
+//   yarn workspace @botejs/bench profile:rust                       # synth ~400 MB doc
+//   yarn workspace @botejs/bench profile:rust --file path/to.json   # real file
+//   yarn workspace @botejs/bench profile:rust --items 7_000_000     # custom synth size
+//   yarn workspace @botejs/bench profile:rust --out my-heap.json    # custom dump path
 
 import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
-import { heapProfileStart, heapProfileStop, open, type Cursor } from '@bote/native'
+import { heapProfileStart, heapProfileStop, open, type Cursor } from '@botejs/native'
 
 import { fileSource, withTempDoc } from './fixtures.ts'
 import { fmtBytes } from './format.ts'
