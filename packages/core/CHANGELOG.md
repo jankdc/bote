@@ -1,5 +1,11 @@
 # @botejs/core
 
+## 0.1.4
+
+### Patch Changes
+
+- 266e241: add README to core
+
 ## 0.1.3
 
 ### Patch Changes
