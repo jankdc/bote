@@ -1,5 +1,13 @@
 # @botejs/core
 
+## 0.1.2
+
+### Patch Changes
+
+- 289c70b: more CI pain
+- Updated dependencies [289c70b]
+  - @botejs/native@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
