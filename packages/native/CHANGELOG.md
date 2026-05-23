@@ -1,5 +1,11 @@
 # @botejs/native
 
+## 0.1.3
+
+### Patch Changes
+
+- 65590bf: fix fromHttpRange picking up compressed bytes.
+
 ## 0.1.2
 
 ### Patch Changes
