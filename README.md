@@ -3,7 +3,7 @@
 a minimal, ergonomic and low-memory approach to navigating a big JSON:
 
 ```sh
-npm install bote
+npm install @botejs/core
 ```
 
 ```ts
