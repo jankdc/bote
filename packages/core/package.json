@@ -5,7 +5,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jankdc/bote.git",
-    "directory": "packages/bote"
+    "directory": "packages/core"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

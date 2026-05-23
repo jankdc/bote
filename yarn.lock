@@ -25,9 +25,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@botejs/core@workspace:*, @botejs/core@workspace:packages/bote":
+"@botejs/core@workspace:*, @botejs/core@workspace:packages/core":
   version: 0.0.0-use.local
-  resolution: "@botejs/core@workspace:packages/bote"
+  resolution: "@botejs/core@workspace:packages/core"
   dependencies:
     "@botejs/native": "workspace:*"
     "@standard-schema/spec": "npm:^1.0.0"

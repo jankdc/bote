@@ -56,7 +56,7 @@ export declare function heapProfileStop(): void
  * read after the returned promise resolves; see `JsSource::read` for the
  * ownership protocol.
  *
- * The TS facade (`packages/bote`) adapts the user-facing
+ * The TS facade (`packages/core`) adapts the user-facing
  * `read(offset, buf)` API to this `read({ offset, buf })` shape.
  */
 export declare function open(
