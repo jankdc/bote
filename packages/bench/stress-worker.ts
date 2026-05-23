@@ -3,7 +3,7 @@
 // V8 OOM aborts the process with a non-zero status, which stress.ts
 // interprets as a failure.
 
-import { open, fromFile } from 'bote'
+import { open, fromFile } from '@botejs/core'
 
 const path = process.argv[2]
 if (!path) {

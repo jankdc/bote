@@ -19,7 +19,7 @@
 // Must be run with `--expose-gc`; the harness asserts gc is available
 // and exits otherwise.
 
-import { open, fromFile } from 'bote'
+import { open, fromFile } from '@botejs/core'
 
 import { withTempDoc } from './fixtures.ts'
 import { fmtBytes } from './format.ts'

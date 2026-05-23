@@ -20,8 +20,8 @@
     "lint": "oxlint ."
   },
   "dependencies": {
-    "@botejs/native": "workspace:*",
-    "bote": "workspace:*"
+    "@botejs/core": "workspace:*",
+    "@botejs/native": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

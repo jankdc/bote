@@ -16,12 +16,32 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@botejs/bench@workspace:packages/bench"
   dependencies:
+    "@botejs/core": "workspace:*"
     "@botejs/native": "workspace:*"
     "@types/node": "npm:^22.0.0"
-    bote: "workspace:*"
     chalk: "npm:^5.6.2"
     oxlint: "npm:^1.14.0"
     tinybench: "npm:^6.0.0"
+  languageName: unknown
+  linkType: soft
+
+"@botejs/core@workspace:*, @botejs/core@workspace:packages/bote":
+  version: 0.0.0-use.local
+  resolution: "@botejs/core@workspace:packages/bote"
+  dependencies:
+    "@botejs/native": "workspace:*"
+    "@standard-schema/spec": "npm:^1.0.0"
+    "@types/node": "npm:^22.0.0"
+    oxlint: "npm:^1.14.0"
+    typescript: "npm:^6.0.0"
+  peerDependencies:
+    "@standard-schema/spec": ^1.0.0
+  dependenciesMeta:
+    "@standard-schema/spec":
+      optional: true
+  peerDependenciesMeta:
+    "@standard-schema/spec":
+      optional: true
   languageName: unknown
   linkType: soft
 
@@ -1561,26 +1581,6 @@ __metadata:
     oxlint: "npm:^1.14.0"
     prettier: "npm:^3.6.2"
     typescript: "npm:^6.0.0"
-  languageName: unknown
-  linkType: soft
-
-"bote@workspace:*, bote@workspace:packages/bote":
-  version: 0.0.0-use.local
-  resolution: "bote@workspace:packages/bote"
-  dependencies:
-    "@botejs/native": "workspace:*"
-    "@standard-schema/spec": "npm:^1.0.0"
-    "@types/node": "npm:^22.0.0"
-    oxlint: "npm:^1.14.0"
-    typescript: "npm:^6.0.0"
-  peerDependencies:
-    "@standard-schema/spec": ^1.0.0
-  dependenciesMeta:
-    "@standard-schema/spec":
-      optional: true
-  peerDependenciesMeta:
-    "@standard-schema/spec":
-      optional: true
   languageName: unknown
   linkType: soft
 

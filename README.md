@@ -7,7 +7,7 @@ npm install bote
 ```
 
 ```ts
-import { open, fromFile } from 'bote'
+import { open, fromFile } from '@botejs/core'
 
 import * as z from 'zod' // or bring your own Standard Schema validator
 
@@ -58,7 +58,7 @@ here's a run (Apple M1 Pro 2021, 500MB JSON array file, cold-cache, default sett
 
 ## sources
 
-`bote` currently only has `fromFile` and `fromHttpRange` as pre-built sources. create your own by implementing the `Source` interface. see [./packages/bote/src/sources.ts](./packages/bote/src/sources.ts) on how it works.
+`@botejs/core` currently only has `fromFile` and `fromHttpRange` as pre-built sources. create your own by implementing the `Source` interface. see [./packages/bote/src/sources.ts](./packages/bote/src/sources.ts) on how it works.
 
 ## status
 

@@ -163,7 +163,7 @@ jobs:
         run: ls -R ${{ env.NATIVE_PKG_DIR }}
         shell: bash
       - name: Test bindings
-        run: yarn workspace bote test
+        run: yarn workspace @botejs/core test
   test-linux-binding:
     name: Test ${{ matrix.target }} - node@${{ matrix.node }}
     needs:
@@ -234,7 +234,7 @@ jobs:
           image: ${{ steps.docker.outputs.IMAGE }}
           name: test-bindings-${{ matrix.target }}
           options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
-          args: bash -lc "corepack enable && yarn workspace bote test"
+          args: bash -lc "corepack enable && yarn workspace @botejs/core test"
   release:
     name: Release
     runs-on: ubuntu-latest

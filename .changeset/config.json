@@ -3,7 +3,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [],
-  "linked": [["@botejs/native", "bote"]],
+  "linked": [["@botejs/native", "@botejs/core"]],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
