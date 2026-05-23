@@ -2,6 +2,11 @@
   "name": "@botejs/core",
   "version": "0.1.1",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jankdc/bote.git",
+    "directory": "packages/bote"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

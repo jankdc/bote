@@ -2,6 +2,11 @@
   "name": "@botejs/native",
   "version": "0.1.1",
   "description": "Native bindings for bote via napi-rs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jankdc/bote.git",
+    "directory": "packages/native"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "license": "MIT",
