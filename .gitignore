@@ -128,3 +128,6 @@ Cargo.lock
 !.yarn/sdks
 !.yarn/versions
 /npm
+
+# local bench results
+packages/bench/matrix-baseline.jsonl
