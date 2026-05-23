@@ -1,0 +1,68 @@
+name: Bench track
+env:
+  DEBUG: napi:*
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  CARGO_INCREMENTAL: '1'
+'on':
+  pull_request:
+    paths:
+      - 'packages/native/**'
+      - 'packages/core/**'
+      - 'packages/bench/**'
+      - 'Cargo.*'
+  workflow_dispatch: null
+concurrency:
+  group: bench-track-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  track:
+    name: Run matrix
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - run: npm install -g --force corepack@latest && corepack enable
+        shell: bash
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: yarn
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-15
+      - name: Install dependencies
+        run: yarn install
+      - name: Build native (release)
+        run: yarn workspace @botejs/native build
+      - name: Run matrix
+        run: yarn workspace @botejs/bench bench:matrix --out "$GITHUB_WORKSPACE/matrix.jsonl"
+      - name: Print results
+        run: cat matrix.jsonl
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        with:
+          name: matrix-results
+          path: matrix.jsonl
+          if-no-files-found: error
+      - name: Build comment body
+        id: report
+        run: |
+          cells=$(grep -c . matrix.jsonl)
+          {
+            echo 'body<<REPORT_EOF'
+            echo '### Bench matrix'
+            echo ''
+            echo "Ran ${cells} cell(s) on \`ubuntu-24.04\`."
+            echo ''
+            echo "Full JSONL: job log above, or the \`matrix-results\` artifact on [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            echo REPORT_EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Post comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: github.event_name == 'pull_request'
+        with:
+          header: bench-track
+          message: ${{ steps.report.outputs.body }}

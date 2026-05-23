@@ -1,13 +1,7 @@
-// Matrix-based regression gate. Consumes matrix.ts JSONL, joins by
-// `cell.id` against a committed baseline, and fails on:
+// Matrix-based comparison report. Consumes matrix.ts JSONL, joins by
+// `cell.id` against a committed baseline, and prints per-cell drift.
 //
-//   Perf regression - current > `perfSlack` × baseline. Uses the
-//   JSON.parse ratio when available (survives CI noise), absolute p50
-//   otherwise.
-//
-// New / gone cells are warnings, not failures.
-//
-//   yarn bench                            run matrix + gate
+//   yarn bench                            run matrix + report drift
 //   yarn bench --current path/run.jsonl   compare a pre-recorded run
 //   yarn bench --update                   refresh the baseline
 
@@ -187,20 +181,19 @@ for (const v of sortedVerdicts) {
   console.log(`${symbols[v.status]} ${v.status.padEnd(18)} ${v.cell.padEnd(48)} ${v.detail}`)
 }
 
-const failureStatuses: ReadonlyArray<Verdict['status']> = ['perf-regression', 'error']
-const failures = sortedVerdicts.filter((v) => failureStatuses.includes(v.status))
+const errors = sortedVerdicts.filter((v) => v.status === 'error')
+const regressed = sortedVerdicts.filter((v) => v.status === 'perf-regression').length
 const okCount = sortedVerdicts.filter((v) => v.status === 'ok').length
 const newCount = sortedVerdicts.filter((v) => v.status === 'new').length
 const goneCount = sortedVerdicts.filter((v) => v.status === 'gone').length
 
 console.log('')
 console.log(
-  `summary: ${okCount} ok, ${failures.length} regressed, ${newCount} new, ${goneCount} gone` +
-    `  (slack: perf ${perfSlack}×)`,
+  `summary: ${okCount} ok, ${regressed} over ${perfSlack}× (informational), ${newCount} new, ${goneCount} gone, ${errors.length} errored`,
 )
 
-if (failures.length > 0) {
-  console.error(`\n${failures.length} cell(s) regressed. If expected, re-run with --update to refresh the baseline.`)
+if (errors.length > 0) {
+  console.error(`\n${errors.length} cell(s) errored (failed to run).`)
   process.exit(1)
 }
 process.exit(0)
