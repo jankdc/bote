@@ -47,14 +47,14 @@ given a **seekable** source (e.g. a file, an HTTP range) and a JSON pointer, it 
 
 here's a run (Apple M1 Pro 2021, 500MB JSON array file, cold-cache, default settings):
 
-| operation    | approach   |      time | js heap peak Δ | rust peak |
-| ------------ | ---------- | --------: | -------------: | --------: |
-| items[0]     | JSON.parse |    1.75 s |        1.21 GB |       n/a |
-| items[len/2] | JSON.parse |    1.82 s |        1.21 GB |       n/a |
-| items[len-1] | JSON.parse |    1.76 s |        1.21 GB |       n/a |
-| items[0]     | bote       |   1.43 ms |        25.9 KB |   94.9 KB |
-| items[len/2] | bote       | 328.81 ms |         1.3 MB |   56.6 MB |
-| items[len-1] | bote       | 636.78 ms |         1.3 MB |   56.6 MB |
+| operation    | approach   |      time | js heap peak Δ | rust heap peak |
+| ------------ | ---------- | --------: | -------------: | -------------: |
+| items[0]     | JSON.parse |    1.75 s |        1.21 GB |            n/a |
+| items[len/2] | JSON.parse |    1.82 s |        1.21 GB |            n/a |
+| items[len-1] | JSON.parse |    1.76 s |        1.21 GB |            n/a |
+| items[0]     | bote       |   1.43 ms |        25.9 KB |        94.9 KB |
+| items[len/2] | bote       | 328.81 ms |         1.3 MB |        56.6 MB |
+| items[len-1] | bote       | 636.78 ms |         1.3 MB |        56.6 MB |
 
 ## sources
 
