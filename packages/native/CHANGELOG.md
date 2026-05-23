@@ -1,5 +1,11 @@
 # @botejs/native
 
+## 0.1.2
+
+### Patch Changes
+
+- 289c70b: more CI pain
+
 ## 0.1.1
 
 ### Patch Changes
