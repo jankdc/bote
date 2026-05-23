@@ -38,7 +38,7 @@ jobs:
       - name: Build native (release)
         run: yarn workspace @botejs/native build
       - name: Run matrix
-        run: yarn workspace @botejs/bench bench:matrix --out matrix.jsonl
+        run: yarn workspace @botejs/bench bench:matrix --out "$GITHUB_WORKSPACE/matrix.jsonl"
       - name: Print results
         run: cat matrix.jsonl
       - name: Upload results
