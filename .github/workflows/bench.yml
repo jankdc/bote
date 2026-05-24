@@ -41,12 +41,6 @@ jobs:
         run: yarn workspace @botejs/bench bench:matrix --common --out "$GITHUB_WORKSPACE/matrix.jsonl"
       - name: Render report
         run: yarn workspace @botejs/bench bench:report --in "$GITHUB_WORKSPACE/matrix.jsonl" --out "$GITHUB_WORKSPACE/report.md"
-      - name: Upload results
-        uses: actions/upload-artifact@v7
-        with:
-          name: matrix-results
-          path: matrix.jsonl
-          if-no-files-found: error
       - name: Build comment body
         id: report
         if: github.event_name == 'pull_request'
