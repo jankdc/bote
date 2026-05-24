@@ -117,7 +117,7 @@ impl Session {
   /// Drop bitmaps for chunks the cache has evicted since the last drain.
   /// Without this the bitmap store grows unbounded - for a 100 MB
   /// document with a 1 MB chunk budget, bitmaps alone would retain
-  /// ~90 MB (one set per chunk × 8 bitmap kinds × ~8 KB).
+  /// ~90 MB (one set per chunk x 8 bitmap kinds x ~8 KB).
   ///
   /// Called from every place that releases per-query pins
   /// (`get_at` / `resolve_at` end-of-query, iter/walk end-of-yield)
@@ -383,7 +383,7 @@ mod tests {
 
   #[tokio::test]
   async fn get_succeeds_when_document_exceeds_cap() {
-    // ~30 KiB document; cap = 16 slots × 256 bytes = ~4 KiB worth of
+    // ~30 KiB document; cap = 16 slots x 256 bytes = ~4 KiB worth of
     // chunks. A single query may temporarily pin more than the cap (chunks
     // in flight are pinned and can't be evicted), but it must still
     // succeed AND return to cap compliance once pins are released -

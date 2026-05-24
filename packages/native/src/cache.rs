@@ -109,6 +109,19 @@ impl ChunkCache {
     self.inner.lock().unwrap().chunks.len()
   }
 
+  /// Bytes currently attributed to structural/string bitmaps, shared with
+  /// the session's `BitmapStore`. `resident_bytes() + bitmap_bytes()` is the
+  /// total native memory held for source data, bounded by the ceiling.
+  pub fn bitmap_bytes(&self) -> usize {
+    self.bitmap_bytes.load(Ordering::Relaxed)
+  }
+
+  /// Hard cap on `resident_bytes + bitmap_bytes`; eviction keeps the cache
+  /// at or below this regardless of document size.
+  pub fn derived_ceiling_bytes(&self) -> usize {
+    self.derived_ceiling_bytes
+  }
+
   pub fn bitmap_bytes_handle(&self) -> Arc<AtomicUsize> {
     self.bitmap_bytes.clone()
   }
@@ -218,11 +231,6 @@ impl ChunkCache {
       .unwrap()
       .chunks
       .contains_key(&chunk_offset)
-  }
-
-  #[cfg(test)]
-  fn derived_ceiling_bytes(&self) -> usize {
-    self.derived_ceiling_bytes
   }
 }
 

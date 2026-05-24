@@ -6,6 +6,7 @@ export declare class Cursor {
   get key(): string | number | null
   iter(pointer: string): CursorIter
   walk(pointer: string): CursorWalk
+  cacheStats(): CacheStats
 }
 
 /**
@@ -36,6 +37,20 @@ export interface BoteOptions {
   maxResidentChunks?: number
 }
 
+/**
+ * Live snapshot of the session's chunk-cache occupancy. The cache is
+ * shared by every cursor derived from one `open()` call, so any cursor
+ * reports the same figures. `residentBytes + bitmapBytes` is the total
+ * native memory held for source data and stays at or below `ceilingBytes`
+ * regardless of document size - the library's bounded-memory contract.
+ */
+export interface CacheStats {
+  residentBytes: number
+  bitmapBytes: number
+  residentChunks: number
+  ceilingBytes: number
+}
+
 export declare function heapProfilePeakBytes(): number
 
 export declare function heapProfileStart(filePath?: string | undefined | null): void
@@ -46,23 +61,13 @@ export declare function heapProfileStop(): void
  * Build a [`Cursor`] from a JS source object.
  *
  * The `source` argument must be a JS object with:
- *   - `size: number`                    total source size in bytes
- *   - `read(args): Promise<number>`     `args.offset: number`, `args.buf: Uint8Array`;
- *                                       JS writes bytes into `args.buf` and resolves
- *                                       with the number of bytes written
- *   - `chunkBytes?: number`             preferred read granularity in bytes (multiple of 64, optional)
- *
- * `args.buf` is a view over Rust-owned memory and must not be retained or
- * read after the returned promise resolves; see `JsSource::read` for the
- * ownership protocol.
- *
- * The TS facade (`packages/core`) adapts the user-facing
- * `read(offset, buf)` API to this `read({ offset, buf })` shape.
+ *   - `size: number`                 total source size in bytes
+ *   - `read(args): Promise<number>`  `args.offset: number`, `args.buf: Uint8Array`;
+ *                                    JS writes bytes into `args.buf` and resolves
+ *                                    with the number of bytes written
+ *   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
  */
-export declare function open(
-  source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> },
-  options?: BoteOptions | undefined | null,
-): Cursor
+export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> }, options?: BoteOptions | undefined | null): Cursor
 
 /**
  * Arguments passed to the JS `read(args)` callback.

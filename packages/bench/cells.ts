@@ -2,56 +2,60 @@
 //
 // A cell is one fully-specified measurement; the driver spawns a fresh
 // node process per cell so the native chunk cache and bitmap store start
-// cold (required for honest peak-memory readings).
+// cold.
 
 import type { DocShape, FixturePattern } from './fixtures.ts'
 
-export type Op = 'get' | 'has' | 'walk' | 'iter'
+export type Operation = 'get' | 'has' | 'walk' | 'iter'
 export type AccessPattern = FixturePattern
 export type SourceKind = 'memory' | 'file'
 export { type DocShape }
 
 export interface Cell {
-  /** Stable identifier; join key for baseline comparison. */
   id: string
-  op: Op
-  source: SourceKind
-  docShape: DocShape
-  /** Shape-specific scale: items / depth / key count. */
-  docSize: number
-  padWidth: number
-  /** Source `chunkBytes` (bytes, multiple of 64). */
-  chunkBytes: number
-  maxResidentChunks: number
   accessPattern: AccessPattern
-  /** Batches; each batch's mean is one sample for the median/p95 stats. */
+  chunkBytes: number
+  docShape: DocShape
+  docSize: number
+  iterations: number
+  maxResidentChunks: number
+  op: Operation
+  padWidth: number
   samples: number
-  /** Op invocations per batch. For walk/iter one invocation is a full
-   *  iteration, so this should usually be 1. */
-  iters: number
+  source: SourceKind
 }
 
 export interface Timing {
+  min_ns: number
   p50_ns: number
-  p95_ns: number
   mean_ns: number
-  iters_per_sample: number
   samples: number
-  batch_means_ns: number[]
-  /** For walk/iter: items yielded per invocation. */
+  iters_per_sample: number
+  /** For walk/iter: `min_ns / items_per_invocation` (lower is better). */
+  ns_per_item?: number
   items_per_invocation?: number
+  /** For the `walk-first` pattern: ns to yield the *first* child (min over
+   *  samples). Guards against an entry path that scans the whole container
+   *  before the first element - that cost is O(doc) here, ~flat when lazy. */
+  first_item_ns?: number
+  /** Coefficient of variation (stddev / mean) across batch means to avoid jitter. */
+  cv: number
 }
 
 export interface Reference {
-  /** Median ns/op for `JSON.parse(...) + property lookup` on the same
-   *  pointer, measured in the same process. */
+  /** Fastest ns/op for the op-equivalent `JSON.parse(...)` work (parse +
+   *  the same logical lookup/traversal) on the same source.
+   */
   parse_ns: number
-  /** `timing.p50_ns / reference.parse_ns`. */
+  /** `timing.min_ns / reference.parse_ns`. */
   ratio: number
 }
 
 export interface Result {
   cell: Cell
+  timing: Timing
+  reference?: Reference
+  error?: string
   meta?: {
     sha: string
     arch: string
@@ -60,11 +64,9 @@ export interface Result {
     date: string
     durationMs: number
   }
-  timing: Timing
-  reference?: Reference
-  error?: string
 }
 
+// TODO: need to document this
 function mk(c: Omit<Cell, 'id'>): Cell {
   const id =
     `${c.op}.${c.accessPattern}.${c.docShape}.${c.source}` +
@@ -75,16 +77,17 @@ function mk(c: Omit<Cell, 'id'>): Cell {
 // Tuned so each batch lands in the 50–500 ms window. Point-access
 // micro-times scale with depth, so deep cells get fewer iters than shallow.
 function iterCount(scale: number, ap: AccessPattern): number {
-  if (ap === 'shallow') return 1000
-  if (ap === 'mid') return 100
-  if (ap === 'deep') return scale >= 100_000 ? 5 : scale >= 10_000 ? 50 : 100
-  return 1
+  switch (ap) {
+    case 'shallow': return 1000;
+    case 'mid': return 100;
+    case 'deep': return scale >= 100_000 ? 5 : scale >= 10_000 ? 50 : 100;
+    default: return 1;
+  }
 }
 
 const CHUNK_SIZE = 64 * 1024
 const PAD_WIDTH = 6
 
-/** The default cell set the driver runs without `--filter`. */
 export function defaultCells(): Cell[] {
   const cells: Cell[] = []
   const base = { chunkBytes: CHUNK_SIZE, padWidth: PAD_WIDTH }
@@ -92,7 +95,7 @@ export function defaultCells(): Cell[] {
   // array-of-objects, memory source: full sweep - the workhorse path.
   for (const docSize of [10_000, 100_000]) {
     for (const cap of [16, 256]) {
-      for (const op of ['get', 'has'] as Op[]) {
+      for (const op of ['get', 'has'] as Operation[]) {
         for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
           cells.push(
             mk({
@@ -103,8 +106,8 @@ export function defaultCells(): Cell[] {
               docSize,
               maxResidentChunks: cap,
               accessPattern: ap,
-              samples: 5,
-              iters: iterCount(docSize, ap),
+              samples: 8,
+              iterations: iterCount(docSize, ap),
             }),
           )
         }
@@ -115,7 +118,7 @@ export function defaultCells(): Cell[] {
         ['walk', 'walk-all'],
         ['iter', 'iter-all'],
         ['walk', 'walk-get-name'],
-      ] as Array<[Op, AccessPattern]>) {
+      ] as Array<[Operation, AccessPattern]>) {
         cells.push(
           mk({
             ...base,
@@ -125,8 +128,8 @@ export function defaultCells(): Cell[] {
             docSize,
             maxResidentChunks: cap,
             accessPattern: ap,
-            samples: 3,
-            iters: 1,
+            samples: 5,
+            iterations: 1,
           }),
         )
       }
@@ -146,8 +149,8 @@ export function defaultCells(): Cell[] {
           docSize: 100_000,
           maxResidentChunks: cap,
           accessPattern: ap,
-          samples: 5,
-          iters: iterCount(100_000, ap),
+          samples: 8,
+          iterations: iterCount(100_000, ap),
         }),
       )
     }
@@ -161,7 +164,29 @@ export function defaultCells(): Cell[] {
         maxResidentChunks: cap,
         accessPattern: 'walk-get-name',
         samples: 3,
-        iters: 1,
+        iterations: 1,
+      }),
+    )
+  }
+
+  // First-child latency guard. Walks `/items` and stops after one element,
+  // on a doc far larger than the cache ceiling (cap x chunkBytes) so the
+  // array can't be fully resident. Time-to-first-child must stay ~flat: a
+  // regression that resolves the container's full extent before yielding the
+  // first child would make this O(doc) and balloon min_ns. File source so
+  // chunks fault through the cache like real usage.
+  for (const cap of [16, 256]) {
+    cells.push(
+      mk({
+        ...base,
+        op: 'walk',
+        source: 'file',
+        docShape: 'array-of-objects',
+        docSize: 500_000,
+        maxResidentChunks: cap,
+        accessPattern: 'walk-first',
+        samples: 8,
+        iterations: 1,
       }),
     )
   }
@@ -179,8 +204,8 @@ export function defaultCells(): Cell[] {
           docSize: 500,
           maxResidentChunks: cap,
           accessPattern: ap,
-          samples: 5,
-          iters: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
+          samples: 8,
+          iterations: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
         }),
       )
     }
@@ -199,8 +224,8 @@ export function defaultCells(): Cell[] {
           docSize: 100_000,
           maxResidentChunks: cap,
           accessPattern: ap,
-          samples: 5,
-          iters: iterCount(100_000, ap),
+          samples: 8,
+          iterations: iterCount(100_000, ap),
         }),
       )
     }
@@ -214,10 +239,38 @@ export function defaultCells(): Cell[] {
         maxResidentChunks: cap,
         accessPattern: 'walk-all',
         samples: 3,
-        iters: 1,
+        iterations: 1,
       }),
     )
   }
 
+  return cells
+}
+
+/** A small, stable subset for the CI PR report */
+export function commonCells(): Cell[] {
+  const base = { chunkBytes: CHUNK_SIZE, padWidth: PAD_WIDTH }
+  const shared = {
+    ...base,
+    source: 'memory' as SourceKind,
+    docShape: 'array-of-objects' as DocShape,
+    docSize: 100_000,
+    maxResidentChunks: 256,
+  }
+  const cells: Cell[] = []
+  for (const [op, ap] of [
+    ['get', 'shallow'],
+    ['get', 'deep'],
+    ['has', 'shallow'],
+  ] as Array<[Operation, AccessPattern]>) {
+    cells.push(mk({ ...shared, op, accessPattern: ap, samples: 8, iterations: iterCount(shared.docSize, ap) }))
+  }
+  for (const [op, ap] of [
+    ['walk', 'walk-all'],
+    ['iter', 'iter-all'],
+    ['walk', 'walk-get-name'],
+  ] as Array<[Operation, AccessPattern]>) {
+    cells.push(mk({ ...shared, op, accessPattern: ap, samples: 5, iterations: 1 }))
+  }
   return cells
 }

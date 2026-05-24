@@ -10,13 +10,12 @@
   "scripts": {
     "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning bench.ts",
     "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning matrix.ts",
-    "bench:chunk-size": "node --experimental-strip-types --no-warnings=ExperimentalWarning chunk-size.ts",
+    "bench:report": "node --experimental-strip-types --no-warnings=ExperimentalWarning report.ts",
     "profile:rust": "node --experimental-strip-types --no-warnings=ExperimentalWarning profile-rust.ts",
     "profile:js": "node --expose-gc --experimental-strip-types --no-warnings=ExperimentalWarning profile-js.ts",
+    "profile:resident": "node --experimental-strip-types --no-warnings=ExperimentalWarning resident.ts",
     "stress": "node --experimental-strip-types --no-warnings=ExperimentalWarning stress.ts",
-    "showcase": "./showcase.sh",
-    "showcase:mem": "./showcase-mem.sh",
-    "showcase:tool": "node --experimental-strip-types --no-warnings=ExperimentalWarning showcase.ts",
+    "showcase": "node --experimental-strip-types --no-warnings=ExperimentalWarning showcase.ts",
     "lint": "oxlint ."
   },
   "dependencies": {
@@ -25,8 +24,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "chalk": "^5.6.2",
-    "oxlint": "^1.14.0",
-    "tinybench": "^6.0.0"
+    "oxlint": "^1.14.0"
   }
 }

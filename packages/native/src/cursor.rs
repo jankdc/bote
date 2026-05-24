@@ -25,6 +25,19 @@ fn map_err(e: SessionError) -> NapiError {
   NapiError::from_reason(e.to_string())
 }
 
+/// Live snapshot of the session's chunk-cache occupancy. The cache is
+/// shared by every cursor derived from one `open()` call, so any cursor
+/// reports the same figures. `residentBytes + bitmapBytes` is the total
+/// native memory held for source data and stays at or below `ceilingBytes`
+/// regardless of document size - the library's bounded-memory contract.
+#[napi(object)]
+pub struct CacheStats {
+  pub resident_bytes: f64,
+  pub bitmap_bytes: f64,
+  pub resident_chunks: f64,
+  pub ceiling_bytes: f64,
+}
+
 #[napi]
 pub struct Cursor {
   session: Arc<Session>,
@@ -99,6 +112,17 @@ impl Cursor {
   #[napi]
   pub fn walk(&self, pointer: String) -> CursorWalk {
     CursorWalk::new(self.session.clone(), pointer, self.anchor_start())
+  }
+
+  #[napi]
+  pub fn cache_stats(&self) -> CacheStats {
+    let cache = &self.session.cache;
+    CacheStats {
+      resident_bytes: cache.resident_bytes() as f64,
+      bitmap_bytes: cache.bitmap_bytes() as f64,
+      resident_chunks: cache.resident_chunks() as f64,
+      ceiling_bytes: cache.derived_ceiling_bytes() as f64,
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 // Matrix-cell worker. Reads one Cell JSON from stdin, runs its
 // measurement, writes one Result JSON line to stdout, exits 0. On
-// failure writes `{cell, error}` and exits 1. One process == one cell,
-// by design - the driver spawns us fresh so the native chunk cache,
+// failure writes `{cell, error}` and exits 1.
+// The driver spawns us fresh so the native chunk cache,
 // bitmap store, and V8 heap all start cold.
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -59,6 +59,13 @@ async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<
           await child.get('/name')
           n += 1
         }
+      } else if (cell.accessPattern === 'walk-first') {
+        // Stop after the first child: this times time-to-first-child, not a
+        // full traversal.
+        for await (const _child of cursor.walk(pointer)) {
+          n = 1
+          break
+        }
       } else {
         for await (const _child of cursor.walk(pointer)) n += 1
       }
@@ -92,46 +99,54 @@ async function measureCell(cell: Cell): Promise<Result> {
   try {
     const cursor = open(source, { maxResidentChunks: cell.maxResidentChunks })
 
-    // Warmup: pays for bitmap construction + first chunk loads. Captures
-    // items-per-invocation for walk/iter (fixed for a given pointer).
-    const itemsPerInvocation = await invokeOnce(cursor, cell, pointer)
+    // Let's warm this up it.
+    let itemsPerInvocation = 0
+    const warmupDeadline = process.hrtime.bigint() + 50_000_000n // 50 ms
+    do {
+      itemsPerInvocation = await invokeOnce(cursor, cell, pointer)
+    } while (process.hrtime.bigint() < warmupDeadline)
 
     const batchMeans: number[] = []
     for (let s = 0; s < cell.samples; s++) {
       const t0 = process.hrtime.bigint()
-      for (let i = 0; i < cell.iters; i++) await invokeOnce(cursor, cell, pointer)
+      for (let i = 0; i < cell.iterations; i++) await invokeOnce(cursor, cell, pointer)
       const t1 = process.hrtime.bigint()
-      batchMeans.push(Number(t1 - t0) / cell.iters)
+      batchMeans.push(Number(t1 - t0) / cell.iterations)
     }
 
-    const sorted = [...batchMeans].sort((a, b) => a - b)
-    const timing: Timing = {
-      p50_ns: percentile(sorted, 0.5),
-      p95_ns: percentile(sorted, 0.95),
-      mean_ns: batchMeans.reduce((a, b) => a + b, 0) / batchMeans.length,
-      iters_per_sample: cell.iters,
-      samples: cell.samples,
-      batch_means_ns: batchMeans,
-      ...(cell.op === 'walk' || cell.op === 'iter' ? { items_per_invocation: itemsPerInvocation } : {}),
-    }
-
-    let reference: Reference | undefined
-    if (
-      cell.op === 'get' &&
-      (cell.accessPattern === 'shallow' || cell.accessPattern === 'mid' || cell.accessPattern === 'deep')
-    ) {
-      reference = measureParseReference(fixture.buf, cell, pointer, timing.p50_ns)
-    }
-
+    const timing = summarizeTiming(batchMeans, cell, itemsPerInvocation)
+    const reference = measureParseReference(fixture.buf, cell, pointer, timing.min_ns)
     return { cell, timing, reference }
   } finally {
     await cleanup()
   }
 }
 
-// Walk a parsed JS value by JSON pointer (RFC 6901, minus the root `''`
-// special-case the callers don't hit). Used inside the JSON.parse
-// reference so the comparison runs the same logical lookup as bote.get.
+function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: number): Timing {
+  const sorted = [...batchMeans].sort((a, b) => a - b)
+  const mean = batchMeans.reduce((a, b) => a + b, 0) / batchMeans.length
+  const variance = batchMeans.reduce((a, b) => a + (b - mean) ** 2, 0) / batchMeans.length
+  const min_ns = sorted[0]
+  const firstItem = cell.op === 'walk' && cell.accessPattern === 'walk-first'
+  const streaming = (cell.op === 'walk' || cell.op === 'iter') && !firstItem
+  return {
+    min_ns,
+    p50_ns: percentile(sorted, 0.5),
+    mean_ns: mean,
+    cv: mean > 0 ? Math.sqrt(variance) / mean : 0,
+    iters_per_sample: cell.iterations,
+    samples: cell.samples,
+    ...(firstItem ? { first_item_ns: min_ns } : {}),
+    ...(streaming
+      ? { items_per_invocation: itemsPerInvocation, ns_per_item: min_ns / Math.max(1, itemsPerInvocation) }
+      : {}),
+  }
+}
+
+// Walk a parsed JS value by JSON pointer (RFC 6901). The empty pointer ``
+// resolves to the root, which `walk`/`iter` cells on a wide-flat doc rely
+// on. Used inside the JSON.parse reference so the comparison runs the same
+// logical lookup as the bote op.
 function evalPointer(obj: unknown, pointer: string): unknown {
   const parts = pointer.split('/').slice(1)
   let cur: unknown = obj
@@ -144,25 +159,47 @@ function evalPointer(obj: unknown, pointer: string): unknown {
   return cur
 }
 
-// Same-process JSON.parse + property lookup baseline. Lets the
-// regression layer compare ratios (which survive CI noise) instead of
-// absolute timings.
+// The op-equivalent work to do against a parsed JS value: the same logical
+// lookup or traversal the bote op performs. Returns a count derived from
+// the actual work so V8 can't elide it.
+function referenceWork(parsed: unknown, cell: Cell, pointer: string): number {
+  const target = evalPointer(parsed, pointer)
+  if (cell.op === 'get' || cell.op === 'has') return target === undefined ? 0 : 1
+  // walk / iter: traverse the resolved container's children.
+  if (target === null || typeof target !== 'object') return 0
+  const values = Array.isArray(target) ? target : Object.values(target as Record<string, unknown>)
+  // walk-first only needs the first child; JSON.parse still has to parse the
+  // whole doc to reach it, which is exactly the asymmetry the cell exposes.
+  if (cell.accessPattern === 'walk-first') return values.length > 0 ? 1 : 0
+  if (cell.accessPattern === 'walk-get-name') {
+    let named = 0
+    for (const el of values) {
+      if (el !== null && typeof el === 'object' && (el as Record<string, unknown>).name !== undefined) named += 1
+    }
+    return named
+  }
+  return values.length
+}
+
+// Co-located JSON.parse baseline, computed for every op. The regression
+// layer compares the bote/parse ratio.
 //
-// Reference iter count is adaptive - a 5 MB JSON.parse takes ~15 ms, so
-// running 1000× would burn a minute per cell to no purpose. Warm up
-// once, time it, pick the smallest iter count that puts each reference
-// batch in the 100–200 ms window, capped at `cell.iters`.
-function measureParseReference(buf: Uint8Array, cell: Cell, pointer: string, boteNs: number): Reference {
+// Reference iter count is adaptive: a 5 MB JSON.parse takes ~15 ms, so
+// running 1000x would burn a minute per cell to no purpose. Warm up once,
+// time it, pick the smallest iter count that puts each reference batch in
+// the ~200 ms window, capped at `cell.iters`. Report the min (matching
+// bote's min_ns) so the ratio compares like for like.
+function measureParseReference(buf: Uint8Array, cell: Cell, pointer: string, boteMinNs: number): Reference {
   const decoder = new TextDecoder()
+  let sink = 0
   const parseOnce = (): void => {
-    const parsed = JSON.parse(decoder.decode(buf))
-    evalPointer(parsed, pointer)
+    sink += referenceWork(JSON.parse(decoder.decode(buf)), cell, pointer)
   }
   const warmupT0 = process.hrtime.bigint()
   parseOnce()
   const warmupNs = Number(process.hrtime.bigint() - warmupT0)
   const targetBatchNs = 200_000_000
-  const refIters = Math.max(1, Math.min(cell.iters, Math.floor(targetBatchNs / Math.max(warmupNs, 1))))
+  const refIters = Math.max(1, Math.min(cell.iterations, Math.floor(targetBatchNs / Math.max(warmupNs, 1))))
   const batchMeans: number[] = []
   for (let s = 0; s < cell.samples; s++) {
     const t0 = process.hrtime.bigint()
@@ -170,9 +207,10 @@ function measureParseReference(buf: Uint8Array, cell: Cell, pointer: string, bot
     const t1 = process.hrtime.bigint()
     batchMeans.push(Number(t1 - t0) / refIters)
   }
+  if (!Number.isFinite(sink)) throw new Error('reference work produced a non-finite count')
   batchMeans.sort((a, b) => a - b)
-  const parse_ns = batchMeans[Math.floor(batchMeans.length / 2)]
-  return { parse_ns, ratio: boteNs / parse_ns }
+  const parse_ns = batchMeans[0]
+  return { parse_ns, ratio: boteMinNs / parse_ns }
 }
 
 const text = await readStdin()
