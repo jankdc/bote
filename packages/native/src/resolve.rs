@@ -679,7 +679,7 @@ mod tests {
 
   #[test]
   fn fuzz_matches_serde_oracle() {
-    // 32 random documents × every pointer that resolves × 3 chunk sizes.
+    // 32 random documents x every pointer that resolves x 3 chunk sizes.
     for seed in 0..32u64 {
       let value = random_json(seed.wrapping_mul(0x9E37_79B1_7F4A_7C15), 4);
       let serialized = serde_json::to_vec(&value).unwrap();
