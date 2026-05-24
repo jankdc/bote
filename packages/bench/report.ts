@@ -44,7 +44,11 @@ const rows = results.map((r) => {
   const label = `${r.cell.op} · ${r.cell.accessPattern}`
   if (r.error) return `| ${label} | — | — | ⚠️ error |`
   const streaming = r.cell.op === 'walk' || r.cell.op === 'iter'
-  const bote = streaming && r.timing.ns_per_item ? `${fmtNs(r.timing.ns_per_item)}/item` : fmtNs(r.timing.p50_ns)
+  const bote = r.timing.first_item_ns
+    ? `${fmtNs(r.timing.first_item_ns)} to 1st`
+    : streaming && r.timing.ns_per_item
+      ? `${fmtNs(r.timing.ns_per_item)}/item`
+      : fmtNs(r.timing.p50_ns)
   const parse = r.reference ? fmtNs(r.reference.parse_ns) : '—'
   const ratio = r.reference ? `${fmtRatio(r.reference.ratio)}x` : '—'
   return `| ${label} | ${bote} | ${parse} | ${ratio} |`

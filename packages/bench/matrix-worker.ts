@@ -59,6 +59,13 @@ async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<
           await child.get('/name')
           n += 1
         }
+      } else if (cell.accessPattern === 'walk-first') {
+        // Stop after the first child: this times time-to-first-child, not a
+        // full traversal.
+        for await (const _child of cursor.walk(pointer)) {
+          n = 1
+          break
+        }
       } else {
         for await (const _child of cursor.walk(pointer)) n += 1
       }
@@ -120,7 +127,8 @@ function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: n
   const mean = batchMeans.reduce((a, b) => a + b, 0) / batchMeans.length
   const variance = batchMeans.reduce((a, b) => a + (b - mean) ** 2, 0) / batchMeans.length
   const min_ns = sorted[0]
-  const streaming = cell.op === 'walk' || cell.op === 'iter'
+  const firstItem = cell.op === 'walk' && cell.accessPattern === 'walk-first'
+  const streaming = (cell.op === 'walk' || cell.op === 'iter') && !firstItem
   return {
     min_ns,
     p50_ns: percentile(sorted, 0.5),
@@ -128,6 +136,7 @@ function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: n
     cv: mean > 0 ? Math.sqrt(variance) / mean : 0,
     iters_per_sample: cell.iterations,
     samples: cell.samples,
+    ...(firstItem ? { first_item_ns: min_ns } : {}),
     ...(streaming
       ? { items_per_invocation: itemsPerInvocation, ns_per_item: min_ns / Math.max(1, itemsPerInvocation) }
       : {}),
@@ -159,6 +168,9 @@ function referenceWork(parsed: unknown, cell: Cell, pointer: string): number {
   // walk / iter: traverse the resolved container's children.
   if (target === null || typeof target !== 'object') return 0
   const values = Array.isArray(target) ? target : Object.values(target as Record<string, unknown>)
+  // walk-first only needs the first child; JSON.parse still has to parse the
+  // whole doc to reach it, which is exactly the asymmetry the cell exposes.
+  if (cell.accessPattern === 'walk-first') return values.length > 0 ? 1 : 0
   if (cell.accessPattern === 'walk-get-name') {
     let named = 0
     for (const el of values) {

@@ -84,7 +84,7 @@ export interface Pattern {
 }
 
 export type DocShape = 'array-of-objects' | 'deep-nested' | 'wide-flat'
-export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name'
+export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name' | 'walk-first'
 
 export interface DocFixture {
   shape: DocShape
@@ -105,6 +105,7 @@ function buildArrayOfObjects(items: number, padWidth: number): DocFixture {
       'walk-all': '/items',
       'iter-all': '/items',
       'walk-get-name': '/items',
+      'walk-first': '/items',
     },
   }
 }
@@ -129,6 +130,7 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
       'walk-all': null,
       'iter-all': null,
       'walk-get-name': null,
+      'walk-first': null,
     },
   }
 }
@@ -154,6 +156,7 @@ function buildWideFlat(keys: number, padWidth: number): DocFixture {
       'walk-all': '',
       'iter-all': '',
       'walk-get-name': null,
+      'walk-first': '',
     },
   }
 }

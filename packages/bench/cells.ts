@@ -34,6 +34,10 @@ export interface Timing {
   /** For walk/iter: `min_ns / items_per_invocation` (lower is better). */
   ns_per_item?: number
   items_per_invocation?: number
+  /** For the `walk-first` pattern: ns to yield the *first* child (min over
+   *  samples). Guards against an entry path that scans the whole container
+   *  before the first element - that cost is O(doc) here, ~flat when lazy. */
+  first_item_ns?: number
   /** Coefficient of variation (stddev / mean) across batch means to avoid jitter. */
   cv: number
 }
@@ -160,6 +164,28 @@ export function defaultCells(): Cell[] {
         maxResidentChunks: cap,
         accessPattern: 'walk-get-name',
         samples: 3,
+        iterations: 1,
+      }),
+    )
+  }
+
+  // First-child latency guard. Walks `/items` and stops after one element,
+  // on a doc far larger than the cache ceiling (cap x chunkBytes) so the
+  // array can't be fully resident. Time-to-first-child must stay ~flat: a
+  // regression that resolves the container's full extent before yielding the
+  // first child would make this O(doc) and balloon min_ns. File source so
+  // chunks fault through the cache like real usage.
+  for (const cap of [16, 256]) {
+    cells.push(
+      mk({
+        ...base,
+        op: 'walk',
+        source: 'file',
+        docShape: 'array-of-objects',
+        docSize: 500_000,
+        maxResidentChunks: cap,
+        accessPattern: 'walk-first',
+        samples: 8,
         iterations: 1,
       }),
     )
