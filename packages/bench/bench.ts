@@ -1,42 +1,25 @@
-// Matrix-based comparison report. Consumes matrix.ts JSONL, joins by
-// `cell.id` against a committed baseline, and prints per-cell drift.
+// Local matrix-based regression gate. Consumes matrix.ts JSONL, joins by
+// `cell.id` against a baseline recorded on this machine, and FAILS
+// (exit 1) on a regression or a cell that errored.
 //
-//   yarn bench                            run matrix + report drift
-//   yarn bench --current path/run.jsonl   compare a pre-recorded run
-//   yarn bench --update                   refresh the baseline
+//   yarn bench                            run matrix + gate against baseline
+//   yarn bench --current path/run.jsonl   gate a pre-recorded run
+//   yarn bench --update                   refresh the local baseline
+//
+// `--baseline`/`--current` accept any two summarized runs, so A/B-ing two
+// builds is just a matter of producing both with `bench:matrix`.
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 import type { Cell, Result } from './cells.ts'
-import { fmtNs } from './format.ts'
-
-function arg(name: string): string | null {
-  const i = process.argv.indexOf(name)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null
-}
-function flag(name: string): boolean {
-  return process.argv.includes(name)
-}
+import { arg, flag } from './cli.ts'
 
 const baselinePath = arg('--baseline') ?? new URL('./matrix-baseline.jsonl', import.meta.url).pathname
 const currentPath = arg('--current')
 const update = flag('--update')
-const perfSlack = Number.parseFloat(arg('--perf-slack') ?? '1.5')
-
-function parseJsonl(text: string): Result[] {
-  const out: Result[] = []
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      out.push(JSON.parse(trimmed) as Result)
-    } catch (e) {
-      console.error(`skipping malformed JSONL line: ${(e as Error).message}`)
-    }
-  }
-  return out
-}
+const relSlack = Number.parseFloat(arg('--rel-slack') ?? '0.25')
+const noiseK = Number.parseFloat(arg('--noise-k') ?? '3')
 
 async function runMatrix(): Promise<string> {
   const matrixPath = new URL('./matrix.ts', import.meta.url).pathname
@@ -61,6 +44,20 @@ async function runMatrix(): Promise<string> {
   })
 }
 
+function parseJsonl(text: string): Result[] {
+  const out: Result[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      out.push(JSON.parse(trimmed) as Result)
+    } catch (e) {
+      console.error(`skipping malformed JSONL line: ${(e as Error).message}`)
+    }
+  }
+  return out
+}
+
 async function loadCurrent(): Promise<Result[]> {
   if (currentPath) return parseJsonl(readFileSync(currentPath, 'utf8'))
   console.error('running matrix…')
@@ -69,35 +66,30 @@ async function loadCurrent(): Promise<Result[]> {
 
 interface BaselineEntry {
   cell: Cell
-  timing: { p50_ns: number; mean_ns: number; iters_per_sample: number; samples: number; items_per_invocation?: number }
-  reference?: { parse_ns: number; ratio: number }
-  meta?: { arch: string; platform: string; node: string }
+  ratio: number
+  cv: number
 }
 
-// Drop everything that varies across machines or runs: timestamps,
-// durations, sha, raw batch samples.
 function summarize(r: Result): BaselineEntry {
-  return {
-    cell: r.cell,
-    timing: {
-      p50_ns: r.timing.p50_ns,
-      mean_ns: r.timing.mean_ns,
-      iters_per_sample: r.timing.iters_per_sample,
-      samples: r.timing.samples,
-      ...(r.timing.items_per_invocation !== undefined ? { items_per_invocation: r.timing.items_per_invocation } : {}),
-    },
-    ...(r.reference ? { reference: { parse_ns: r.reference.parse_ns, ratio: r.reference.ratio } } : {}),
-    ...(r.meta ? { meta: { arch: r.meta.arch, platform: r.meta.platform, node: r.meta.node } } : {}),
-  }
+  return { cell: r.cell, ratio: r.reference?.ratio ?? 0, cv: r.timing.cv }
 }
 
 function writeBaseline(current: Result[]): void {
-  const lines = current
-    .filter((r) => !r.error)
-    .map((r) => JSON.stringify(summarize(r)))
-    .join('\n')
+  const kept = current.filter((r) => !r.error && r.reference)
+  const lines = kept.map((r) => JSON.stringify(summarize(r))).join('\n')
   writeFileSync(baselinePath, lines + '\n')
-  console.error(`baseline written → ${baselinePath} (${current.length} cell(s))`)
+  console.error(`baseline written → ${baselinePath} (${kept.length} cell(s))`)
+}
+
+function loadBaseline(text: string): BaselineEntry[] {
+  const out: BaselineEntry[] = []
+  for (const r of parseJsonl(text)) {
+    const obj = r as unknown as { ratio?: number; error?: string }
+    if (obj.error) continue
+    if (typeof obj.ratio === 'number') out.push(r as unknown as BaselineEntry)
+    else if (r.reference && r.timing) out.push(summarize(r))
+  }
+  return out
 }
 
 interface Verdict {
@@ -108,25 +100,21 @@ interface Verdict {
 
 function compareCell(cur: Result, base: BaselineEntry | undefined): Verdict {
   if (cur.error) return { cell: cur.cell.id, status: 'error', detail: cur.error }
-  if (!base) return { cell: cur.cell.id, status: 'new', detail: `p50=${fmtNs(cur.timing.p50_ns)}` }
+  const curRatio = cur.reference?.ratio
+  if (curRatio === undefined) return { cell: cur.cell.id, status: 'ok', detail: 'no reference (ungated)' }
+  if (!base) return { cell: cur.cell.id, status: 'new', detail: `ratio ${curRatio.toFixed(3)}` }
 
-  const useRatio = cur.reference && base.reference
-  const curPerf = useRatio ? cur.reference!.ratio : cur.timing.p50_ns
-  const basePerf = useRatio ? base.reference!.ratio : base.timing.p50_ns
-  const perfRatio = basePerf > 0 ? curPerf / basePerf : 1
-  if (perfRatio > perfSlack) {
-    const what = useRatio
-      ? `ratio ${curPerf.toFixed(3)} vs ${basePerf.toFixed(3)}`
-      : `p50 ${fmtNs(curPerf)} vs ${fmtNs(basePerf)}`
+  const drift = base.ratio > 0 ? curRatio / base.ratio : 1
+  const noise = Math.max(cur.timing.cv, base.cv)
+  const threshold = 1 + Math.max(relSlack, noiseK * noise)
+  if (drift > threshold) {
     return {
       cell: cur.cell.id,
       status: 'perf-regression',
-      detail: `${what} (${perfRatio.toFixed(2)}× > ${perfSlack}×)`,
+      detail: `ratio ${curRatio.toFixed(3)} vs ${base.ratio.toFixed(3)} (${drift.toFixed(2)}x > ${threshold.toFixed(2)}x; noise ${(noise * 100).toFixed(0)}%)`,
     }
   }
-
-  const drift = useRatio ? `ratio ${perfRatio.toFixed(2)}×` : `p50 ${perfRatio.toFixed(2)}×`
-  return { cell: cur.cell.id, status: 'ok', detail: drift }
+  return { cell: cur.cell.id, status: 'ok', detail: `${drift.toFixed(2)}x (noise ${(noise * 100).toFixed(0)}%)` }
 }
 
 const current = await loadCurrent()
@@ -144,7 +132,7 @@ if (!existsSync(baselinePath)) {
   console.error(`no baseline at ${baselinePath}; run with --update first.`)
   process.exit(1)
 }
-const baseline = parseJsonl(readFileSync(baselinePath, 'utf8')) as unknown as BaselineEntry[]
+const baseline = loadBaseline(readFileSync(baselinePath, 'utf8'))
 const baseById = new Map<string, BaselineEntry>()
 for (const entry of baseline) baseById.set(entry.cell.id, entry)
 
@@ -154,7 +142,7 @@ const seen = new Set(current.map((r) => r.cell.id))
 const gone: Verdict[] = []
 for (const entry of baseline) {
   if (!seen.has(entry.cell.id)) {
-    gone.push({ cell: entry.cell.id, status: 'gone', detail: `was p50=${fmtNs(entry.timing.p50_ns)}` })
+    gone.push({ cell: entry.cell.id, status: 'gone', detail: `was ratio=${entry.ratio.toFixed(3)}` })
   }
 }
 
@@ -189,11 +177,15 @@ const goneCount = sortedVerdicts.filter((v) => v.status === 'gone').length
 
 console.log('')
 console.log(
-  `summary: ${okCount} ok, ${regressed} over ${perfSlack}× (informational), ${newCount} new, ${goneCount} gone, ${errors.length} errored`,
+  `summary: ${okCount} ok, ${regressed} regressed, ${newCount} new, ${goneCount} gone, ${errors.length} errored`,
 )
 
-if (errors.length > 0) {
-  console.error(`\n${errors.length} cell(s) errored (failed to run).`)
+if (regressed > 0 || errors.length > 0) {
+  const parts: string[] = []
+  if (regressed > 0) parts.push(`${regressed} perf regression(s)`)
+  if (errors.length > 0) parts.push(`${errors.length} errored cell(s)`)
+  console.error(`\nFAIL - ${parts.join(' and ')}.`)
   process.exit(1)
 }
+console.error('\nPASS - no regressions.')
 process.exit(0)

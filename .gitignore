@@ -129,5 +129,5 @@ Cargo.lock
 !.yarn/versions
 /npm
 
-# local bench results
+# Local bench baseline
 packages/bench/matrix-baseline.jsonl

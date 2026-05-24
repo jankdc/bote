@@ -19,9 +19,7 @@ __metadata:
     "@botejs/core": "workspace:*"
     "@botejs/native": "workspace:*"
     "@types/node": "npm:^22.0.0"
-    chalk: "npm:^5.6.2"
     oxlint: "npm:^1.14.0"
-    tinybench: "npm:^6.0.0"
   languageName: unknown
   linkType: soft
 
@@ -1593,13 +1591,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"chalk@npm:^5.6.2":
-  version: 5.6.2
-  resolution: "chalk@npm:5.6.2"
-  checksum: 10c0/99a4b0f0e7991796b1e7e3f52dceb9137cae2a9dfc8fc0784a550dc4c558e15ab32ed70b14b21b52beb2679b4892b41a0aa44249bcb996f01e125d58477c6976
-  languageName: node
-  linkType: hard
-
 "chardet@npm:^2.1.1":
   version: 2.1.1
   resolution: "chardet@npm:2.1.1"
@@ -2633,13 +2624,6 @@ __metadata:
   version: 2.2.1
   resolution: "term-size@npm:2.2.1"
   checksum: 10c0/89f6bba1d05d425156c0910982f9344d9e4aebf12d64bfa1f460d93c24baa7bc4c4a21d355fbd7153c316433df0538f64d0ae6e336cc4a69fdda4f85d62bc79d
-  languageName: node
-  linkType: hard
-
-"tinybench@npm:^6.0.0":
-  version: 6.0.1
-  resolution: "tinybench@npm:6.0.1"
-  checksum: 10c0/6c34b9e6de944499c0781c0434211bfe23ed9793f769b2fb34bb8d314e86cd90b4f40d95b9bc49712a53ac570cc58d599c6c4304460812a6a4bc219159334949
   languageName: node
   linkType: hard
 

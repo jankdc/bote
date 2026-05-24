@@ -7,6 +7,7 @@
 //
 // CLI:
 //   --out <path>     write JSONL to <path> instead of stdout
+//   --common         run only the curated common-ops subset (CI report)
 //   --filter <re>    only run cells whose id matches the regex
 //   --limit <n>      stop after the first n matching cells
 //   --dry-run        print the cell list to stderr and exit
@@ -15,18 +16,12 @@ import { execSync, spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import type { Writable } from 'node:stream'
 
-import { defaultCells, type Cell, type Result } from './cells.ts'
+import { commonCells, defaultCells, type Cell, type Result } from './cells.ts'
+import { arg, flag } from './cli.ts'
 import { fmtNs } from './format.ts'
 
-function flag(name: string): boolean {
-  return process.argv.includes(name)
-}
-function arg(name: string): string | null {
-  const i = process.argv.indexOf(name)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null
-}
-
 const outPath = arg('--out')
+const common = flag('--common')
 const filterRe = arg('--filter') ? new RegExp(arg('--filter')!) : null
 const limit = arg('--limit') ? Number.parseInt(arg('--limit')!, 10) : Number.POSITIVE_INFINITY
 const dryRun = flag('--dry-run')
@@ -43,7 +38,7 @@ function gitSha(): string {
 
 const meta = { sha: gitSha(), arch: process.arch, platform: process.platform, node: process.version }
 
-let cells: Cell[] = defaultCells()
+let cells: Cell[] = common ? commonCells() : defaultCells()
 if (filterRe) cells = cells.filter((c) => filterRe.test(c.id))
 if (Number.isFinite(limit)) cells = cells.slice(0, limit)
 

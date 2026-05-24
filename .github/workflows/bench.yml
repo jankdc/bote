@@ -1,4 +1,4 @@
-name: Bench track
+name: Bench report
 env:
   DEBUG: napi:*
   MACOSX_DEPLOYMENT_TARGET: '10.13'
@@ -12,11 +12,11 @@ env:
       - 'Cargo.*'
   workflow_dispatch: null
 concurrency:
-  group: bench-track-${{ github.ref }}
+  group: bench-report-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  track:
-    name: Run matrix
+  report:
+    name: Report common ops
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: write
@@ -37,10 +37,10 @@ jobs:
         run: yarn install
       - name: Build native (release)
         run: yarn workspace @botejs/native build
-      - name: Run matrix
-        run: yarn workspace @botejs/bench bench:matrix --out "$GITHUB_WORKSPACE/matrix.jsonl"
-      - name: Print results
-        run: cat matrix.jsonl
+      - name: Run common cells
+        run: yarn workspace @botejs/bench bench:matrix --common --out "$GITHUB_WORKSPACE/matrix.jsonl"
+      - name: Render report
+        run: yarn workspace @botejs/bench bench:report --in "$GITHUB_WORKSPACE/matrix.jsonl" --out "$GITHUB_WORKSPACE/report.md"
       - name: Upload results
         uses: actions/upload-artifact@v7
         with:
@@ -49,20 +49,20 @@ jobs:
           if-no-files-found: error
       - name: Build comment body
         id: report
+        if: github.event_name == 'pull_request'
         run: |
-          cells=$(grep -c . matrix.jsonl)
           {
             echo 'body<<REPORT_EOF'
-            echo '### Bench matrix'
+            echo '### Bench report'
             echo ''
-            echo "Ran ${cells} cell(s) on \`ubuntu-24.04\`."
+            echo 'Common-op timings on `ubuntu-24.04`:'
             echo ''
-            echo "Full JSONL: job log above, or the \`matrix-results\` artifact on [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            cat "$GITHUB_WORKSPACE/report.md"
             echo REPORT_EOF
           } >> "$GITHUB_OUTPUT"
       - name: Post comment
         uses: marocchino/sticky-pull-request-comment@v2
         if: github.event_name == 'pull_request'
         with:
-          header: bench-track
+          header: bench-report
           message: ${{ steps.report.outputs.body }}
