@@ -6,10 +6,6 @@ export declare class Cursor {
   get key(): string | number | null
   iter(pointer: string): CursorIter
   walk(pointer: string): CursorWalk
-  /**
-   * Live snapshot of the underlying chunk cache's memory occupancy.
-   * Diagnostics/benchmarking only; not needed for normal queries.
-   */
   cacheStats(): CacheStats
 }
 
@@ -71,10 +67,7 @@ export declare function heapProfileStop(): void
  *                                    with the number of bytes written
  *   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
  */
-export declare function open(
-  source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> },
-  options?: BoteOptions | undefined | null,
-): Cursor
+export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> }, options?: BoteOptions | undefined | null): Cursor
 
 /**
  * Arguments passed to the JS `read(args)` callback.
