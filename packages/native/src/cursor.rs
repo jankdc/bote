@@ -176,6 +176,18 @@ async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(
   Ok(())
 }
 
+/// Release all pins held by an iterator on early termination.
+async fn release_on_complete<Y>(
+  session: Arc<Session>,
+  state: Arc<AsyncMutex<IterState>>,
+) -> napi::Result<Option<Y>> {
+  let mut guard = state.lock().await;
+  guard.pinned.clear();
+  guard.walker = None;
+  session.sync_bitmap_evictions();
+  Ok(None)
+}
+
 /// Drop every pin except the one covering `next_offset`. This bounds the
 /// resident-pin count to 1 between yields so the cache's own eviction
 /// loop is free to maintain `maxResidentChunks`.
@@ -240,6 +252,13 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       result
     }
   }
+
+  fn complete(
+    &mut self,
+    _value: Option<Self::Return>,
+  ) -> impl std::future::Future<Output = napi::Result<Option<Self::Yield>>> + Send + 'static {
+    release_on_complete(self.session.clone(), self.state.clone())
+  }
 }
 
 #[napi(async_iterator)]
@@ -296,5 +315,129 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
       };
       Ok(Some(Cursor::child(session.clone(), child.location(), key)))
     }
+  }
+
+  fn complete(
+    &mut self,
+    _value: Option<Self::Return>,
+  ) -> impl std::future::Future<Output = napi::Result<Option<Self::Yield>>> + Send + 'static {
+    release_on_complete(self.session.clone(), self.state.clone())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::cache::CacheOptions;
+  use crate::source::{InMemorySource, Source};
+  use napi::bindgen_prelude::AsyncGenerator;
+
+  /// `{"items":[{"name":"i0000",...}, ...]}` sized to span many chunks so a
+  /// walk pins a real frontier chunk and the cap is in force throughout.
+  fn array_doc(items: usize) -> Vec<u8> {
+    let mut doc = String::from("{\"items\":[");
+    for i in 0..items {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!("{{\"name\":\"i{i:04}\",\"total\":{i}}}"));
+    }
+    doc.push_str("]}");
+    doc.into_bytes()
+  }
+
+  fn session(items: usize, chunk_size: usize, max_chunks: u32) -> Arc<Session> {
+    let source: Arc<dyn Source> = Arc::new(InMemorySource::new(array_doc(items)));
+    Session::new(
+      source,
+      CacheOptions {
+        chunk_size,
+        max_resident_chunks: max_chunks,
+      },
+    )
+    .unwrap()
+  }
+
+  #[tokio::test]
+  async fn walk_complete_releases_pins() {
+    let s = session(500, 256, 4);
+    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    // Advance a few elements so the walker holds a live frontier pin.
+    for _ in 0..3 {
+      assert!(w.next(None).await.unwrap().is_some());
+    }
+    assert!(
+      !w.state.lock().await.pinned.is_empty(),
+      "walk should hold a frontier pin between yields"
+    );
+
+    w.complete(None).await.unwrap();
+
+    {
+      let guard = w.state.lock().await;
+      assert!(guard.pinned.is_empty(), "complete() must clear all pins");
+      assert!(guard.walker.is_none(), "complete() must drop the walker");
+    }
+    // A resumed next() after completion yields nothing.
+    assert!(w.next(None).await.unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn walk_complete_safe_when_child_cursor_escapes() {
+    let s = session(500, 256, 4);
+    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    let child = w.next(None).await.unwrap().expect("first child");
+
+    w.complete(None).await.unwrap();
+
+    assert!(w.state.lock().await.pinned.is_empty());
+    // The escaped child is still fully usable: its session outlives the walk.
+    assert_eq!(
+      child.get("/name".into()).await.unwrap(),
+      serde_json::json!("i0000")
+    );
+  }
+
+  #[tokio::test]
+  async fn walk_abandoned_stay_under_cap_without_gc() {
+    let s = session(2000, 256, 4);
+    let ceiling = s.cache.derived_ceiling_bytes();
+    let mut abandoned = Vec::new();
+    for _ in 0..64 {
+      let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+      // Partial walk, then early-terminate via complete() (the break path).
+      assert!(w.next(None).await.unwrap().is_some());
+      w.complete(None).await.unwrap();
+      abandoned.push(w); // keep alive: no Drop, no GC
+
+      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
+      assert!(
+        total <= ceiling,
+        "resident {} + bitmap {} exceeded ceiling {} with {} abandoned iterators",
+        s.cache.resident_bytes(),
+        s.cache.bitmap_bytes(),
+        ceiling,
+        abandoned.len(),
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn iter_complete_releases_pins() {
+    let s = session(500, 256, 4);
+    let mut it = CursorIter::new(s.clone(), "/items".into(), 0);
+    for _ in 0..3 {
+      assert!(it.next(None).await.unwrap().is_some());
+    }
+    assert!(!it.state.lock().await.pinned.is_empty());
+
+    it.complete(None).await.unwrap();
+
+    {
+      let guard = it.state.lock().await;
+      assert!(guard.pinned.is_empty());
+      assert!(guard.walker.is_none());
+    }
+    assert!(it.next(None).await.unwrap().is_none());
   }
 }
