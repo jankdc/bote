@@ -41,7 +41,7 @@ async function makeSource(cell: Cell, buf: Uint8Array): Promise<SourceHandle> {
   }
 }
 
-// Returns items consumed (1 for get/has, iterated count for walk/iter).
+// Returns items consumed (1 for get/has, iterated count for walk/scan).
 // `walk-get-name` is a walk that also fetches `/name` on every child -
 // closer to a realistic streaming-traversal workload.
 async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<number> {
@@ -71,9 +71,9 @@ async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<
       }
       return n
     }
-    case 'iter': {
+    case 'scan': {
       let n = 0
-      for await (const _value of cursor.iter(pointer)) n += 1
+      for await (const _value of cursor.scan(pointer)) n += 1
       return n
     }
   }
@@ -128,7 +128,7 @@ function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: n
   const variance = batchMeans.reduce((a, b) => a + (b - mean) ** 2, 0) / batchMeans.length
   const min_ns = sorted[0]
   const firstItem = cell.op === 'walk' && cell.accessPattern === 'walk-first'
-  const streaming = (cell.op === 'walk' || cell.op === 'iter') && !firstItem
+  const streaming = (cell.op === 'walk' || cell.op === 'scan') && !firstItem
   return {
     min_ns,
     p50_ns: percentile(sorted, 0.5),
@@ -144,7 +144,7 @@ function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: n
 }
 
 // Walk a parsed JS value by JSON pointer (RFC 6901). The empty pointer ``
-// resolves to the root, which `walk`/`iter` cells on a wide-flat doc rely
+// resolves to the root, which `walk`/`scan` cells on a wide-flat doc rely
 // on. Used inside the JSON.parse reference so the comparison runs the same
 // logical lookup as the bote op.
 function evalPointer(obj: unknown, pointer: string): unknown {
@@ -165,7 +165,7 @@ function evalPointer(obj: unknown, pointer: string): unknown {
 function referenceWork(parsed: unknown, cell: Cell, pointer: string): number {
   const target = evalPointer(parsed, pointer)
   if (cell.op === 'get' || cell.op === 'has') return target === undefined ? 0 : 1
-  // walk / iter: traverse the resolved container's children.
+  // walk / scan: traverse the resolved container's children.
   if (target === null || typeof target !== 'object') return 0
   const values = Array.isArray(target) ? target : Object.values(target as Record<string, unknown>)
   // walk-first only needs the first child; JSON.parse still has to parse the

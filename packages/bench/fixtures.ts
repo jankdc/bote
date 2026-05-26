@@ -84,7 +84,7 @@ export interface Pattern {
 }
 
 export type DocShape = 'array-of-objects' | 'deep-nested' | 'wide-flat'
-export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name' | 'walk-first'
+export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'scan-all' | 'walk-get-name' | 'walk-first'
 
 export interface DocFixture {
   shape: DocShape
@@ -103,7 +103,7 @@ function buildArrayOfObjects(items: number, padWidth: number): DocFixture {
       mid: `/items/${Math.floor(items / 2)}/name`,
       deep: `/items/${items - 1}/name`,
       'walk-all': '/items',
-      'iter-all': '/items',
+      'scan-all': '/items',
       'walk-get-name': '/items',
       'walk-first': '/items',
     },
@@ -112,7 +112,7 @@ function buildArrayOfObjects(items: number, padWidth: number): DocFixture {
 
 // `{"a":{"a":...{"name":"leaf-N"},"name":"leaf-N-1"}...,"name":"leaf-0"}`.
 // Every level carries a sibling `name` so every access pattern resolves
-// to a leaf string (not a sub-object). Walk/iter aren't meaningful here:
+// to a leaf string (not a sub-object). Walk/scan aren't meaningful here:
 // each level has one child, one key path.
 function buildDeepNested(depth: number, padWidth: number): DocFixture {
   let body = `"name":"leaf-${String(depth).padStart(padWidth, '0')}"`
@@ -128,7 +128,7 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
       mid: ptr(Math.floor(depth / 2)),
       deep: ptr(depth),
       'walk-all': null,
-      'iter-all': null,
+      'scan-all': null,
       'walk-get-name': null,
       'walk-first': null,
     },
@@ -154,7 +154,7 @@ function buildWideFlat(keys: number, padWidth: number): DocFixture {
       mid: key(Math.floor(keys / 2)),
       deep: key(keys - 1),
       'walk-all': '',
-      'iter-all': '',
+      'scan-all': '',
       'walk-get-name': null,
       'walk-first': '',
     },

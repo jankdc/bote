@@ -6,7 +6,7 @@
 
 import type { DocShape, FixturePattern } from './fixtures.ts'
 
-export type Operation = 'get' | 'has' | 'walk' | 'iter'
+export type Operation = 'get' | 'has' | 'walk' | 'scan'
 export type AccessPattern = FixturePattern
 export type SourceKind = 'memory' | 'file'
 export { type DocShape }
@@ -31,7 +31,7 @@ export interface Timing {
   mean_ns: number
   samples: number
   iters_per_sample: number
-  /** For walk/iter: `min_ns / items_per_invocation` (lower is better). */
+  /** For walk/scan: `min_ns / items_per_invocation` (lower is better). */
   ns_per_item?: number
   items_per_invocation?: number
   /** For the `walk-first` pattern: ns to yield the *first* child (min over
@@ -112,11 +112,11 @@ export function defaultCells(): Cell[] {
           )
         }
       }
-      // Traversal: walk-all (count children), iter-all (materialize values),
+      // Traversal: walk-all (count children), scan-all (materialize values),
       // walk-get-name (walk + per-child get; closer to real usage).
       for (const [op, ap] of [
         ['walk', 'walk-all'],
-        ['iter', 'iter-all'],
+        ['scan', 'scan-all'],
         ['walk', 'walk-get-name'],
       ] as Array<[Operation, AccessPattern]>) {
         cells.push(
@@ -192,7 +192,7 @@ export function defaultCells(): Cell[] {
   }
 
   // Deep-nested: depth 500 stresses pointer-walking overhead. Point
-  // access only - walk/iter aren't meaningful here.
+  // access only - walk/scan aren't meaningful here.
   for (const cap of [16, 256]) {
     for (const ap of ['shallow', 'mid', 'deep'] as AccessPattern[]) {
       cells.push(
@@ -267,7 +267,7 @@ export function commonCells(): Cell[] {
   }
   for (const [op, ap] of [
     ['walk', 'walk-all'],
-    ['iter', 'iter-all'],
+    ['scan', 'scan-all'],
     ['walk', 'walk-get-name'],
   ] as Array<[Operation, AccessPattern]>) {
     cells.push(mk({ ...shared, op, accessPattern: ap, samples: 5, iterations: 1 }))

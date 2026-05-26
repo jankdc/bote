@@ -56,27 +56,27 @@ test('has_presence_and_absence', async () => {
   assert.equal(await cursor.has('/b/5'), false)
 })
 
-test('iter_array_elements', async () => {
+test('scan_array_elements', async () => {
   const data = new TextEncoder().encode('{"xs":[10,20,30,40]}')
   const cursor = await open(memorySource(data))
   const values: unknown[] = []
-  for await (const v of cursor.iter('/xs')) values.push(v)
+  for await (const v of cursor.scan('/xs')) values.push(v)
   assert.deepEqual(values, [10, 20, 30, 40])
 })
 
-test('iter_object_members', async () => {
+test('scan_object_members', async () => {
   const data = new TextEncoder().encode('{"o":{"a":1,"b":2,"c":3}}')
   const cursor = await open(memorySource(data))
   const values: unknown[] = []
-  for await (const v of cursor.iter('/o')) values.push(v)
+  for await (const v of cursor.scan('/o')) values.push(v)
   assert.deepEqual(values.sort(), [1, 2, 3])
 })
 
-test('iter_non_container_yields_nothing', async () => {
+test('scan_non_container_yields_nothing', async () => {
   const data = new TextEncoder().encode('{"scalar":42}')
   const cursor = await open(memorySource(data))
   const values: unknown[] = []
-  for await (const v of cursor.iter('/scalar')) values.push(v)
+  for await (const v of cursor.scan('/scalar')) values.push(v)
   assert.deepEqual(values, [])
 })
 

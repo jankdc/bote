@@ -23,15 +23,15 @@ await using cursor = await open(fromFile('./your-big.json'))
 // if you want one value
 const user0: unknown = await cursor.get('/1234/users/0')
 
-// for .get and .iter, you can supply a validator
+// for .get and .scan, you can supply a validator
 const user1: User = await cursor.get('/1234/users/1', User)
 
-// if you want to iterate a list of values
-for await (const user of cursor.iter('/1234/users')) {
+// if you want to sweep a list of values
+for await (const user of cursor.scan('/1234/users')) {
   console.log(user)
 }
 
-// if you want to iterate but not fully resolve values
+// if you want to iterate but not fully resolve an array or object
 for await (const userCursor of cursor.walk('/1234/users')) {
   const id = await userCursor.get('/id')
   console.log({ id })

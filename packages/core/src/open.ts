@@ -1,8 +1,9 @@
-import { open as openNative, type Cursor as NativeCursor } from '@botejs/native'
+import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
 
 import type { JsonPointer } from './pointer.ts'
+import { serializePredicate, type Predicate } from './predicate.ts'
 import type { Source, SourceReader } from './sources.ts'
-import { runStandardSchema, type StandardSchemaV1 } from './validate.ts'
+import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts'
 
 export interface SessionOptions {
   /**
@@ -18,6 +19,20 @@ export interface SessionOptions {
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
+export interface ScanOptions {
+  /** Filter items natively here. */
+  where?: Predicate
+  /** Project each child before it crosses: a sub-pointer yields the bare value;
+   *  a map yields an object of those sub-values. */
+  select?: string | Record<string, string>
+  /** Yield arrays of up to `batch` items instead of one at a time.. */
+  batch?: number
+  /** Validate each yielded item against this schema (after `select`). */
+  schema?: StandardSchemaV1
+  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them, turning the schema into a filter. */
+  onInvalid?: 'throw' | 'skip'
+}
+
 export interface Cursor {
   /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
   readonly key: string | number | null
@@ -28,13 +43,29 @@ export interface Cursor {
   get<S extends string>(pointer: JsonPointer<S>): Promise<unknown>
   get<S extends string, Sch extends StandardSchemaV1>(pointer: JsonPointer<S>, schema: Sch): Promise<InferOutput<Sch>>
 
-  iter<S extends string>(pointer: JsonPointer<S>): AsyncIterable<unknown>
-  iter<S extends string, Sch extends StandardSchemaV1>(
+  count<S extends string>(pointer: JsonPointer<S>, options?: { where?: Predicate }): Promise<number>
+
+  scan<S extends string>(pointer: JsonPointer<S>): AsyncIterable<unknown>
+  scan<S extends string, Sch extends StandardSchemaV1>(
     pointer: JsonPointer<S>,
     schema: Sch,
   ): AsyncIterable<InferOutput<Sch>>
+  scan<S extends string, Sch extends StandardSchemaV1>(
+    pointer: JsonPointer<S>,
+    options: ScanOptions & { schema: Sch; batch: number },
+  ): AsyncIterable<InferOutput<Sch>[]>
+  scan<S extends string, Sch extends StandardSchemaV1>(
+    pointer: JsonPointer<S>,
+    options: ScanOptions & { schema: Sch },
+  ): AsyncIterable<InferOutput<Sch>>
+  scan<S extends string>(pointer: JsonPointer<S>, options: ScanOptions & { batch: number }): AsyncIterable<unknown[]>
+  scan<S extends string>(pointer: JsonPointer<S>, options: ScanOptions): AsyncIterable<unknown>
 
-  walk<S extends string>(pointer: JsonPointer<S>): AsyncIterable<Cursor>
+  /** Stream child positions as cursors. With `where`, yields only matches - the filter runs natively, so a sparse descent crosses once per match. */
+  walk<S extends string>(pointer: JsonPointer<S>, options?: { where?: Predicate }): AsyncIterable<Cursor>
+
+  /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
+  cacheStats(): CacheStats
 }
 
 /**
@@ -93,6 +124,29 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
+function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
+  schema?: StandardSchemaV1
+  where?: Predicate
+  select?: string | Record<string, string>
+  batch?: number
+  onInvalid?: 'throw' | 'skip'
+} {
+  if (!arg) return {}
+  if ('~standard' in arg) return { schema: arg as StandardSchemaV1 }
+  const options = arg as ScanOptions
+  return {
+    schema: options.schema,
+    where: options.where,
+    select: options.select,
+    batch: options.batch,
+    onInvalid: options.onInvalid,
+  }
+}
+
+function serializeSelect(select: string | Record<string, string>): string {
+  return typeof select === 'string' ? JSON.stringify({ one: select }) : JSON.stringify({ map: Object.entries(select) })
+}
+
 function wrap(native: NativeCursor): Cursor {
   const cursor = {
     get key() {
@@ -108,27 +162,65 @@ function wrap(native: NativeCursor): Cursor {
       const value = await native.get(pointer)
       return schema ? runStandardSchema(schema, value, pointer) : value
     },
-    iter(pointer: string, schema?: StandardSchemaV1): AsyncIterable<unknown> {
-      const inner = native.iter(pointer)
+    count(pointer: string, options?: { where?: Predicate }): Promise<number> {
+      return native.count(pointer, options?.where ? serializePredicate(options.where) : undefined)
+    },
+    scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown> {
+      const { schema, where, select, batch, onInvalid } = normalizeScanArgs(optionsOrSchema)
+      if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
+        throw new RangeError(`scan: batch must be a positive integer, got ${batch}`)
+      }
+      const whereIr = where ? serializePredicate(where) : undefined
+      const selectIr = select !== undefined ? serializeSelect(select) : undefined
+      const hasArgs = whereIr !== undefined || selectIr !== undefined || batch !== undefined
+      const inner = native.scan(pointer, hasArgs ? { whereIr, selectIr, batch } : undefined)
       if (!schema) return inner
+      const policy = onInvalid ?? 'throw'
+
+      if (batch === undefined) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            let i = 0
+            for await (const v of inner) {
+              const result = await validateItem(schema, v, `${pointer}/${i++}`, policy)
+              if ('skip' in result) continue
+              yield result.value
+            }
+          },
+        }
+      }
+
+      // Batched: each native yield is an array; validate (or skip) every
+      // element. With `onInvalid: 'skip'` a batch may shrink or come back empty.
       return {
         async *[Symbol.asyncIterator]() {
           let i = 0
-          for await (const v of inner) {
-            yield await runStandardSchema(schema, v, `${pointer}/${i++}`)
+          for await (const b of inner) {
+            const out: unknown[] = []
+            for (const v of b as unknown[]) {
+              const result = await validateItem(schema, v, `${pointer}/${i++}`, policy)
+              if ('skip' in result) continue
+              out.push(result.value)
+            }
+            yield out
           }
         },
       }
     },
-    walk(pointer: string) {
+    walk(pointer: string, options?: { where?: Predicate }) {
+      const whereIr = options?.where ? serializePredicate(options.where) : undefined
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const child of native.walk(pointer)) {
+          for await (const child of native.walk(pointer, whereIr)) {
             yield wrap(child)
           }
         },
       }
     },
+    cacheStats() {
+      return native.cacheStats()
+    },
   }
+
   return cursor as Cursor
 }

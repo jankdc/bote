@@ -4,8 +4,12 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
   ;(Symbol as { asyncDispose?: symbol }).asyncDispose = Symbol.for('Symbol.asyncDispose')
 }
 
+export type { CacheStats } from '@botejs/native'
 export type { JsonPointer } from './pointer.ts'
-export { open, type Cursor, type RootCursor, type SessionOptions } from './open.ts'
+export { ValidationError, type StandardSchemaV1 } from './validate.ts'
+export { eq, lt, lte, gt, gte, exists, and, type Predicate } from './predicate.ts'
+export { open, type Cursor, type RootCursor, type ScanOptions, type SessionOptions } from './open.ts'
+
 export {
   fromBuffer,
   fromFile,
@@ -15,4 +19,3 @@ export {
   type SourceReader,
   type HttpRangeOptions,
 } from './sources.ts'
-export { ValidationError, type StandardSchemaV1 } from './validate.ts'

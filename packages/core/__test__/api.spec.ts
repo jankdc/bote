@@ -119,11 +119,11 @@ test('await_using_cursor_disposes_reader_at_scope_exit', async () => {
   assert.equal(closeCalls, 1, 'scope exit must drive Symbol.asyncDispose -> reader.close')
 })
 
-test('iter_materializes_each_child', async (t) => {
+test('scan_materializes_each_child', async (t) => {
   const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
   t.after(() => cursor.close())
   const tags: unknown[] = []
-  for await (const v of cursor.iter('/users/0/tags')) tags.push(v)
+  for await (const v of cursor.scan('/users/0/tags')) tags.push(v)
   assert.deepEqual(tags, ['admin', 'staff'])
 })
 

@@ -3,9 +3,10 @@
 export declare class Cursor {
   has(pointer: string): Promise<boolean>
   get(pointer: string): Promise<unknown>
+  count(pointer: string, whereIr?: string | undefined | null): Promise<number>
   get key(): string | number | null
-  iter(pointer: string): CursorIter
-  walk(pointer: string): CursorWalk
+  scan(pointer: string, options?: ScanArgs | undefined | null): CursorScan
+  walk(pointer: string, whereIr?: string | undefined | null): CursorWalk
   cacheStats(): CacheStats
 }
 
@@ -15,7 +16,7 @@ export declare class Cursor {
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
  */
-export declare class CursorIter {
+export declare class CursorScan {
   [Symbol.asyncIterator](): AsyncGenerator<any, void, undefined>
 }
 
@@ -86,4 +87,17 @@ export declare function open(source: { size: number; chunkBytes?: number; read: 
 export interface ReadArgs {
   offset: number
   buf: Uint8Array
+}
+
+/**
+ * Options for `scan`. A `#[napi(object)]` so the facade can grow it (select,
+ * batch, ...) without changing the method's arity. `whereIr` is the
+ * serialized predicate IR (see `predicate.rs`); `None` means no filter.
+ */
+export interface ScanArgs {
+  whereIr?: string
+  /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
+  selectIr?: string
+  /** Yield arrays of up to `batch` items instead of one at a time. */
+  batch?: number
 }

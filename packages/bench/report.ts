@@ -43,7 +43,7 @@ const results = parseJsonl(readInput())
 const rows = results.map((r) => {
   const label = `${r.cell.op} · ${r.cell.accessPattern}`
   if (r.error) return `| ${label} | — | — | ⚠️ error |`
-  const streaming = r.cell.op === 'walk' || r.cell.op === 'iter'
+  const streaming = r.cell.op === 'walk' || r.cell.op === 'scan'
   const bote = r.timing.first_item_ns
     ? `${fmtNs(r.timing.first_item_ns)} to 1st`
     : streaming && r.timing.ns_per_item

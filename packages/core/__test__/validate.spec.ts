@@ -89,13 +89,13 @@ test('has_with_schema_returns_true_only_when_valid', async (t) => {
   assert.equal(await cursor.has('/users/99', userSchema()), false)
 })
 
-test('iter_with_schema_yields_validated_items_then_throws', async (t) => {
+test('scan_with_schema_yields_validated_items_then_throws', async (t) => {
   const cursor = await open(memorySource(new TextEncoder().encode(DOC)))
   t.after(() => cursor.close())
   const seen: User[] = []
   await assert.rejects(
     async () => {
-      for await (const u of cursor.iter('/users', userSchema())) seen.push(u)
+      for await (const u of cursor.scan('/users', userSchema())) seen.push(u)
     },
     (err: unknown) => {
       assert.ok(err instanceof ValidationError)
@@ -109,11 +109,11 @@ test('iter_with_schema_yields_validated_items_then_throws', async (t) => {
   )
 })
 
-test('iter_with_schema_completes_when_all_items_valid', async (t) => {
+test('scan_with_schema_completes_when_all_items_valid', async (t) => {
   const doc = JSON.stringify({ tags: ['a', 'b', 'c'] })
   const cursor = await open(memorySource(new TextEncoder().encode(doc)))
   t.after(() => cursor.close())
   const collected: string[] = []
-  for await (const tag of cursor.iter('/tags', asyncStringSchema())) collected.push(tag)
+  for await (const tag of cursor.scan('/tags', asyncStringSchema())) collected.push(tag)
   assert.deepEqual(collected, ['a', 'b', 'c'])
 })

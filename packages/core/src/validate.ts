@@ -23,3 +23,23 @@ export async function runStandardSchema<O>(
   if (result.issues) throw new ValidationError(result.issues, pointer)
   return result.value
 }
+
+/**
+ * Validate one item for a stream fold. On failure: `'throw'` raises a
+ * `ValidationError`; `'skip'` returns `{ skip: true }` so the caller can drop
+ * the item (turning the schema into a filter). On success, returns the typed
+ * value.
+ */
+export async function validateItem<O>(
+  schema: StandardSchemaV1<unknown, O>,
+  value: unknown,
+  pointer: string,
+  onInvalid: 'throw' | 'skip',
+): Promise<{ skip: true } | { value: O }> {
+  const result = await schema['~standard'].validate(value)
+  if (result.issues) {
+    if (onInvalid === 'skip') return { skip: true }
+    throw new ValidationError(result.issues, pointer)
+  }
+  return { value: result.value }
+}

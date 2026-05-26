@@ -268,6 +268,10 @@ pub struct Children {
   pub kind: ContainerKind,
   pub next_offset: u64,
   pub index: usize,
+  /// Set once the container's closing `}`/`]` has been reached, so repeated
+  /// `next_child` calls return `None` idempotently instead of trying to parse
+  /// whatever follows the container (which would be malformed).
+  done: bool,
 }
 
 /// One yielded child of a container.
@@ -312,6 +316,7 @@ pub fn enter_container<P: ChunkBytes + ?Sized>(
     kind,
     next_offset: open + 1,
     index: 0,
+    done: false,
   }))
 }
 
@@ -321,10 +326,17 @@ pub fn next_child<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
   cw: &mut Children,
 ) -> Result<Option<ChildEntry>, TraverseError> {
-  match cw.kind {
-    ContainerKind::Object => next_object_member(walker, cw),
-    ContainerKind::Array => next_array_element(walker, cw),
+  if cw.done {
+    return Ok(None);
   }
+  let entry = match cw.kind {
+    ContainerKind::Object => next_object_member(walker, cw)?,
+    ContainerKind::Array => next_array_element(walker, cw)?,
+  };
+  if entry.is_none() {
+    cw.done = true;
+  }
+  Ok(entry)
 }
 
 fn next_object_member<P: ChunkBytes + ?Sized>(
