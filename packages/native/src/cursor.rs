@@ -124,9 +124,7 @@ impl Cursor {
   #[napi]
   pub async fn count(&self, pointer: String, where_ir: Option<String>) -> napi::Result<f64> {
     let pred = parse_where(where_ir.as_deref())?;
-    self
-      .session
-      .count_at(&pointer, self.anchor_start(), pred.as_ref())
+    crate::count::at(&self.session, &pointer, self.anchor_start(), pred.as_ref())
       .await
       .map(|n| n as f64)
       .map_err(map_err)
@@ -365,9 +363,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
           };
           let keep = match pred {
             Some(p) => {
-              session
-                .matches_predicate(p, child.location().start, pinned)
-                .await?
+              crate::eval::matches(&session, p, child.location().start, pinned).await?
             }
             None => true,
           };
@@ -378,7 +374,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             continue;
           }
           let value = match select {
-            Some(sel) => session.project(sel, child.location().start, pinned).await?,
+            Some(sel) => crate::eval::project(&session, sel, child.location().start, pinned).await?,
             None => session.materialize(child.location(), pinned).await?,
           };
           // The value is owned now; release the chunks that backed it.
@@ -477,9 +473,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
           };
           let keep = match pred {
             Some(p) => {
-              session
-                .matches_predicate(p, child.location().start, pinned)
-                .await?
+              crate::eval::matches(&session, p, child.location().start, pinned).await?
             }
             None => true,
           };

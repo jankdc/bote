@@ -21,6 +21,10 @@ mod select;
 // async orchestration
 mod session;
 
+// operations layered above the session
+mod count;
+mod eval;
+
 mod cursor;
 
 use std::sync::Arc;
