@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, pointer, eq } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // JSON Pointer (RFC 6901) resolution semantics observed through get_/has_: tilde
@@ -83,4 +83,42 @@ test('pointer_rfc6901_section_5_examples', async (t) => {
   assert.equal(await cursor.get('/k"l'), 6)
   assert.equal(await cursor.get('/ '), 7)
   assert.equal(await cursor.get('/m~0n'), 8)
+})
+
+// `pointer()` is the explicit boundary for dynamically-built pointers, which
+// `PointerLiteral<S>` can't validate (a `string`-typed pointer collapses to the
+// error type and won't compile). It is an opaque, unchecked brand; the native
+// parser remains the single source of truth and rejects malformed pointers when
+// they resolve.
+
+test('pointer_constructor_brands_dynamic_pointers', async (t) => {
+  const cursor = await open(memorySource(enc('{"users":[{"name":"Alice"},{"name":"Bob"}]}')))
+  t.after(() => cursor.close())
+  // A pointer built from a `string`-typed part wouldn't type-check raw; pointer() blesses it.
+  const idx: number = 1
+  const dynamic: string = `/users/${idx}/name`
+  assert.equal(await cursor.get(pointer(dynamic)), 'Bob')
+  // Works anywhere a pointer is accepted, including predicate constructors.
+  assert.equal(await cursor.count('/users', { where: eq(pointer(`/name`), 'Alice') }), 1)
+})
+
+test('pointer_constructor_defers_validation_to_native_parser', async (t) => {
+  const cursor = await open(memorySource(enc('{"a":1}')))
+  t.after(() => cursor.close())
+  // pointer() does no checking of its own - a malformed pointer is still
+  // caught, by the native RFC 6901 parser, when it is resolved.
+  await assert.rejects(cursor.get(pointer('a'))) // missing leading '/'
+  await assert.rejects(cursor.get(pointer('/foo~'))) // dangling '~'
+  await assert.rejects(cursor.get(pointer('/foo~2bar'))) // '~2' not a valid escape
+})
+
+test('pointer_brand_does_not_open_a_hole_for_raw_strings', async (t) => {
+  const cursor = await open(memorySource(enc('{"users":[{"name":"Alice"}]}')))
+  t.after(() => cursor.close())
+  const raw: string = '/users/0/name'
+  // A bare `string` is still rejected at the type level - the brand requires
+  // going through pointer(); we await the runtime call to avoid an unhandled
+  // rejection if the brand is ever weakened.
+  // @ts-expect-error dynamic strings must be blessed via pointer()
+  assert.equal(await cursor.get(raw), 'Alice')
 })

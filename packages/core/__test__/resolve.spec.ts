@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, type PointerLiteral } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // Resolution correctness across chunk sizes: the same value must resolve whether
@@ -10,7 +10,7 @@ import { memorySource, enc } from './fixtures.ts'
 
 const CHUNK_SIZES = [64, 128, 4096]
 
-async function assertGet(doc: string, pointer: string, expected: unknown): Promise<void> {
+async function assertGet<S extends string>(doc: string, pointer: PointerLiteral<S>, expected: unknown): Promise<void> {
   for (const chunkBytes of CHUNK_SIZES) {
     const cursor = await open(memorySource(enc(doc), chunkBytes))
     try {

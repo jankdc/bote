@@ -1,6 +1,6 @@
 import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
 
-import type { JsonPointer } from './pointer.ts'
+import type { PointerLiteral, Pointer } from './pointer.ts'
 import { serializePredicate, type Predicate } from './predicate.ts'
 import type { Source, SourceReader } from './sources.ts'
 import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts'
@@ -37,32 +37,38 @@ export interface Cursor {
   /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
   readonly key: string | number | null
 
-  has<S extends string>(pointer: JsonPointer<S>): Promise<boolean>
-  has<S extends string>(pointer: JsonPointer<S>, schema: StandardSchemaV1): Promise<boolean>
+  has<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<boolean>
+  has<S extends string>(pointer: PointerLiteral<S> | Pointer, schema: StandardSchemaV1): Promise<boolean>
 
-  get<S extends string>(pointer: JsonPointer<S>): Promise<unknown>
-  get<S extends string, Sch extends StandardSchemaV1>(pointer: JsonPointer<S>, schema: Sch): Promise<InferOutput<Sch>>
+  get<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<unknown>
+  get<S extends string, Sch extends StandardSchemaV1>(
+    pointer: PointerLiteral<S> | Pointer,
+    schema: Sch,
+  ): Promise<InferOutput<Sch>>
 
-  count<S extends string>(pointer: JsonPointer<S>, options?: { where?: Predicate }): Promise<number>
+  count<S extends string>(pointer: PointerLiteral<S> | Pointer, options?: { where?: Predicate }): Promise<number>
 
-  scan<S extends string>(pointer: JsonPointer<S>): AsyncIterable<unknown>
+  scan<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown>
   scan<S extends string, Sch extends StandardSchemaV1>(
-    pointer: JsonPointer<S>,
+    pointer: PointerLiteral<S> | Pointer,
     schema: Sch,
   ): AsyncIterable<InferOutput<Sch>>
   scan<S extends string, Sch extends StandardSchemaV1>(
-    pointer: JsonPointer<S>,
+    pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { schema: Sch; batch: number },
   ): AsyncIterable<InferOutput<Sch>[]>
   scan<S extends string, Sch extends StandardSchemaV1>(
-    pointer: JsonPointer<S>,
+    pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { schema: Sch },
   ): AsyncIterable<InferOutput<Sch>>
-  scan<S extends string>(pointer: JsonPointer<S>, options: ScanOptions & { batch: number }): AsyncIterable<unknown[]>
-  scan<S extends string>(pointer: JsonPointer<S>, options: ScanOptions): AsyncIterable<unknown>
+  scan<S extends string>(
+    pointer: PointerLiteral<S> | Pointer,
+    options: ScanOptions & { batch: number },
+  ): AsyncIterable<unknown[]>
+  scan<S extends string>(pointer: PointerLiteral<S> | Pointer, options: ScanOptions): AsyncIterable<unknown>
 
   /** Stream child positions as cursors. With `where`, yields only matches - the filter runs natively, so a sparse descent crosses once per match. */
-  walk<S extends string>(pointer: JsonPointer<S>, options?: { where?: Predicate }): AsyncIterable<Cursor>
+  walk<S extends string>(pointer: PointerLiteral<S> | Pointer, options?: { where?: Predicate }): AsyncIterable<Cursor>
 
   /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
   cacheStats(): CacheStats

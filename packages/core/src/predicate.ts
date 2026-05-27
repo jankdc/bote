@@ -4,7 +4,7 @@
 // Rust `#[serde(tag = "t")]` enum exactly. `Predicate` is an opaque brand so
 // callers can only build predicates through these constructors.
 
-import type { JsonPointer } from './pointer.ts'
+import type { PointerLiteral, Pointer } from './pointer.ts'
 
 export type Predicate = { readonly __brand: 'Predicate' }
 
@@ -18,27 +18,27 @@ type IRNode = CompareNode | ExistsNode | AndNode
 const toPredicate = (node: IRNode): Predicate => node as unknown as Predicate
 const toNode = (predicate: Predicate): IRNode => predicate as unknown as IRNode
 
-export function eq<S extends string>(pointer: JsonPointer<S>, value: Scalar): Predicate {
+export function eq<S extends string>(pointer: PointerLiteral<S> | Pointer, value: Scalar): Predicate {
   return toPredicate({ t: 'eq', p: pointer as string, v: value })
 }
 
-export function lt<S extends string>(pointer: JsonPointer<S>, value: number | string): Predicate {
+export function lt<S extends string>(pointer: PointerLiteral<S> | Pointer, value: number | string): Predicate {
   return toPredicate({ t: 'lt', p: pointer as string, v: value })
 }
 
-export function lte<S extends string>(pointer: JsonPointer<S>, value: number | string): Predicate {
+export function lte<S extends string>(pointer: PointerLiteral<S> | Pointer, value: number | string): Predicate {
   return toPredicate({ t: 'lte', p: pointer as string, v: value })
 }
 
-export function gt<S extends string>(pointer: JsonPointer<S>, value: number | string): Predicate {
+export function gt<S extends string>(pointer: PointerLiteral<S> | Pointer, value: number | string): Predicate {
   return toPredicate({ t: 'gt', p: pointer as string, v: value })
 }
 
-export function gte<S extends string>(pointer: JsonPointer<S>, value: number | string): Predicate {
+export function gte<S extends string>(pointer: PointerLiteral<S> | Pointer, value: number | string): Predicate {
   return toPredicate({ t: 'gte', p: pointer as string, v: value })
 }
 
-export function exists<S extends string>(pointer: JsonPointer<S>): Predicate {
+export function exists<S extends string>(pointer: PointerLiteral<S> | Pointer): Predicate {
   return toPredicate({ t: 'exists', p: pointer as string })
 }
 
