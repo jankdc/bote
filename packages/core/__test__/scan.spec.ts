@@ -1,20 +1,31 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, fromBuffer, eq, gte, and, type Source } from '../src/index.ts'
+import { open, eq, gte, and } from '../src/index.ts'
+import { memorySource, enc, ORDERS } from './fixtures.ts'
 
-function memorySource(data: Uint8Array, chunkBytes?: number): Source {
-  return fromBuffer(data, chunkBytes === undefined ? undefined : { chunkBytes })
-}
-const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
+// scan_ iteration over containers, plus the select (projection) and batch options.
+// where-filtered scans live in predicate.spec.ts; schema-validated scans in schema.spec.ts.
 
-const ORDERS = JSON.stringify({
-  orders: [
-    { id: 'a', status: 'paid', total: 120, customer: { country: 'US' } },
-    { id: 'b', status: 'refunded', total: 80, customer: { country: 'GB' } },
-    { id: 'c', status: 'paid', total: 50, customer: { country: 'US' } },
-    { id: 'd', status: 'paid', total: 200, customer: { country: 'DE' } },
-  ],
+test('scan_array_elements', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
+  const values: unknown[] = []
+  for await (const v of cursor.scan('/xs')) values.push(v)
+  assert.deepEqual(values, [10, 20, 30, 40])
+})
+
+test('scan_object_members', async () => {
+  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
+  const values: unknown[] = []
+  for await (const v of cursor.scan('/o')) values.push(v)
+  assert.deepEqual(values.sort(), [1, 2, 3])
+})
+
+test('scan_non_container_yields_nothing', async () => {
+  const cursor = await open(memorySource(enc('{"scalar":42}')))
+  const values: unknown[] = []
+  for await (const v of cursor.scan('/scalar')) values.push(v)
+  assert.deepEqual(values, [])
 })
 
 test('scan_select_single_pointer_yields_bare_values', async (t) => {
@@ -22,7 +33,7 @@ test('scan_select_single_pointer_yields_bare_values', async (t) => {
   t.after(() => db.close())
   const totals: number[] = []
   for await (const total of db.scan('/orders', { select: '/total' })) totals.push(total as number)
-  assert.deepEqual(totals, [120, 80, 50, 200])
+  assert.deepEqual(totals, [120, 80, 50, 200, 999])
 })
 
 test('scan_select_map_yields_objects_in_declared_order', async (t) => {
@@ -41,7 +52,7 @@ test('scan_select_missing_sub_pointer_yields_null', async (t) => {
   t.after(() => db.close())
   const vals: unknown[] = []
   for await (const v of db.scan('/orders', { select: '/nope' })) vals.push(v)
-  assert.deepEqual(vals, [null, null, null, null])
+  assert.deepEqual(vals, [null, null, null, null, null])
 })
 
 test('scan_batch_yields_arrays', async (t) => {
@@ -51,7 +62,7 @@ test('scan_batch_yields_arrays', async (t) => {
   for await (const batch of db.scan('/orders', { select: '/id', batch: 3 })) {
     sizes.push((batch as unknown[]).length)
   }
-  assert.deepEqual(sizes, [3, 1]) // 4 items, batch of 3
+  assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
 })
 
 test('scan_where_select_batch_combined_byCountry_fold', async (t) => {

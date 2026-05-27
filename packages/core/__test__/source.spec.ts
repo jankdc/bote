@@ -5,26 +5,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { open, fromBuffer, fromFile, type Source } from '../src/index.ts'
+import { DOC, enc } from './fixtures.ts'
 
-const DOC = JSON.stringify({
-  users: [
-    { id: 1, name: 'Alice', tags: ['admin', 'staff'] },
-    { id: 2, name: 'Bob', tags: ['guest'] },
-  ],
-  meta: { version: 'v2', enabled: true },
-})
+// Source construction & I/O contract, plus cursor lifecycle (close / dispose).
 
 test('source_custom_open_and_get', async (t) => {
-  const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
+  const cursor = await open(fromBuffer(enc(DOC)))
   t.after(() => cursor.close())
   assert.equal(await cursor.get('/users/0/name'), 'Alice')
   assert.equal(await cursor.get('/meta/enabled'), true)
-})
-
-test('source_from_buffer_roundtrips_json', async (t) => {
-  const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
-  t.after(() => cursor.close())
-  assert.equal(await cursor.get('/users/1/id'), 2)
 })
 
 test('source_from_file_reads_from_disk', async (t) => {
@@ -46,7 +35,7 @@ test('source_open_is_deferred_until_open_call', async () => {
   const source: Source = {
     open: () => {
       opened += 1
-      const data = new TextEncoder().encode(DOC)
+      const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
         read: async (offset, dst) => {
@@ -64,11 +53,11 @@ test('source_open_is_deferred_until_open_call', async () => {
   await cursor.close()
 })
 
-test('cursor_close_drives_reader_close_exactly_once', async () => {
+test('lifecycle_close_drives_reader_close_exactly_once', async () => {
   let closeCalls = 0
   const source: Source = {
     open: () => {
-      const data = new TextEncoder().encode(DOC)
+      const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
         read: async (offset, dst) => {
@@ -90,11 +79,11 @@ test('cursor_close_drives_reader_close_exactly_once', async () => {
   assert.equal(closeCalls, 1)
 })
 
-test('await_using_cursor_disposes_reader_at_scope_exit', async () => {
+test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
   let closeCalls = 0
   const source: Source = {
     open: () => {
-      const data = new TextEncoder().encode(DOC)
+      const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
         read: async (offset, dst) => {
@@ -117,43 +106,4 @@ test('await_using_cursor_disposes_reader_at_scope_exit', async () => {
     await cursor[Symbol.asyncDispose]()
   }
   assert.equal(closeCalls, 1, 'scope exit must drive Symbol.asyncDispose -> reader.close')
-})
-
-test('scan_materializes_each_child', async (t) => {
-  const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
-  t.after(() => cursor.close())
-  const tags: unknown[] = []
-  for await (const v of cursor.scan('/users/0/tags')) tags.push(v)
-  assert.deepEqual(tags, ['admin', 'staff'])
-})
-
-test('walk_subcursor_key_reflects_parent_step', async (t) => {
-  const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
-  t.after(() => cursor.close())
-  const keys: Array<string | number | null> = []
-  for await (const user of cursor.walk('/users')) {
-    keys.push(user.key)
-  }
-  assert.deepEqual(keys, [0, 1])
-  const memberKeys: Array<string | number | null> = []
-  for await (const member of cursor.walk('/meta')) {
-    memberKeys.push(member.key)
-  }
-  assert.deepEqual(memberKeys.sort(), ['enabled', 'version'])
-})
-
-test('pointer_rejects_malformed_literals', async (t) => {
-  const cursor = await open(fromBuffer(new TextEncoder().encode(DOC)))
-  t.after(() => cursor.close())
-  // Each line below should be a TS error at the call site; we still await
-  // the rejected promise so the runtime check doesn't leak an unhandled
-  // rejection if the type validator is ever weakened.
-  // @ts-expect-error pointer must start with '/' or be empty
-  await assert.rejects(cursor.get('users'))
-  // @ts-expect-error '~' must be followed by '0' or '1'
-  await assert.rejects(cursor.get('/foo~'))
-  // @ts-expect-error '~2' is not a valid escape
-  await assert.rejects(cursor.get('/foo~2bar'))
-  // Sanity: well-formed pointers compile.
-  assert.equal(await cursor.get('/users/0/name'), 'Alice')
 })

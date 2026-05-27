@@ -1,13 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, fromBuffer, type Source } from '../src/index.ts'
-
-function memorySource(data: Uint8Array, chunkBytes?: number): Source {
-  return fromBuffer(data, chunkBytes === undefined ? undefined : { chunkBytes })
-}
-
-const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
+import { open } from '../src/index.ts'
+import { memorySource, enc } from './fixtures.ts'
 
 test('count_array_elements', async (t) => {
   const cursor = await open(memorySource(enc('{"items":[10,20,30,40,50]}')))
@@ -42,14 +37,12 @@ test('count_ignores_nested_and_in_string_commas', async (t) => {
   assert.equal(await cursor.count('/xs'), 3)
 })
 
-test('count_large_array_under_tight_budget', async (t) => {
+test('count_large_array_under_eviction', async (t) => {
+  // count() iterates the whole array under a tight cache cap, so chunks are
+  // fetched and evicted repeatedly; the tally must stay correct. (The resident
+  // budget invariant itself is asserted in cache.spec.ts.)
   const items = Array.from({ length: 5000 }, (_, i) => `{"id":${i}}`)
   const cursor = await open(memorySource(enc('[' + items.join(',') + ']'), 256), { maxResidentChunks: 16 })
   t.after(() => cursor.close())
   assert.equal(await cursor.count(''), 5000)
-  const stats = cursor.cacheStats()
-  assert.ok(
-    stats.residentBytes + stats.bitmapBytes <= stats.ceilingBytes,
-    `resident ${stats.residentBytes} + bitmap ${stats.bitmapBytes} > ceiling ${stats.ceilingBytes}`,
-  )
 })
