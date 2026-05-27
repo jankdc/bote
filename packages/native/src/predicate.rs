@@ -271,6 +271,14 @@ mod tests {
   }
 
   #[test]
+  fn eq_bool_and_null() {
+    assert!(holds(r#"{"t":"eq","p":"/b","v":true}"#, b"true"));
+    assert!(!holds(r#"{"t":"eq","p":"/b","v":true}"#, b"false"));
+    assert!(holds(r#"{"t":"eq","p":"/x","v":null}"#, b"null"));
+    assert!(!holds(r#"{"t":"eq","p":"/x","v":null}"#, b"0"));
+  }
+
+  #[test]
   fn ordering_on_numbers() {
     assert!(holds(r#"{"t":"gte","p":"/n","v":100}"#, b"100"));
     assert!(holds(r#"{"t":"gte","p":"/n","v":100}"#, b"250"));
@@ -284,14 +292,6 @@ mod tests {
   fn ordering_on_strings() {
     assert!(holds(r#"{"t":"gt","p":"/s","v":"m"}"#, b"\"z\""));
     assert!(!holds(r#"{"t":"gt","p":"/s","v":"m"}"#, b"\"a\""));
-  }
-
-  #[test]
-  fn bool_and_null_eq() {
-    assert!(holds(r#"{"t":"eq","p":"/b","v":true}"#, b"true"));
-    assert!(!holds(r#"{"t":"eq","p":"/b","v":true}"#, b"false"));
-    assert!(holds(r#"{"t":"eq","p":"/x","v":null}"#, b"null"));
-    assert!(!holds(r#"{"t":"eq","p":"/x","v":null}"#, b"0"));
   }
 
   #[test]

@@ -468,7 +468,7 @@ mod tests {
   }
 
   #[test]
-  fn pointer_root_returns_whole_document() {
+  fn resolve_root_returns_whole_document() {
     let doc = br#"{"a":1,"b":2}"#;
     assert_get(doc, "", serde_json::json!({"a": 1, "b": 2}));
   }
@@ -557,7 +557,7 @@ mod tests {
   }
 
   #[test]
-  fn pointer_rfc6901_section_5_examples() {
+  fn resolve_rfc6901_section_5_examples() {
     let doc = br#"{
         "foo": ["bar", "baz"],
         "": 0,

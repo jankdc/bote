@@ -229,10 +229,6 @@ impl BitmapStore {
 mod tests {
   use super::*;
 
-  fn count_bits(words: &[u64]) -> u32 {
-    words.iter().map(|w| w.count_ones()).sum()
-  }
-
   fn bit_positions(words: &[u64]) -> Vec<usize> {
     let mut positions = Vec::new();
     for (w_idx, &word) in words.iter().enumerate() {
@@ -261,6 +257,20 @@ mod tests {
     // the opening quote at bit 1; closing quote at bit 3 is not.
     assert_eq!(bm.in_string[0], 0b0011_1111);
     assert_eq!(bm.in_string[1] & 0xFF, 0b0000_0110);
+  }
+
+  #[test]
+  fn build_pads_partial_last_window() {
+    // 70-byte chunk: occupies window 0 fully and 6 bytes of window 1. The
+    // remaining 58 bytes of window 1 are padded with spaces, so the bitmap
+    // for window 1 has only bits at positions < 6 possibly set.
+    let mut chunk = vec![b' '; 70];
+    chunk[64..70].copy_from_slice(b"[1,2,3");
+    let mut bm = ChunkBitmaps::build_basic(&chunk, ScanCarry::default());
+    let lbracket = bm.ensure_structural(&chunk, Structural::LBracket).to_vec();
+    assert_eq!(bit_positions(&lbracket), vec![64]);
+    let comma = bm.ensure_structural(&chunk, Structural::Comma).to_vec();
+    assert_eq!(bit_positions(&comma), vec![66, 68]);
   }
 
   #[test]
@@ -313,20 +323,6 @@ mod tests {
   }
 
   #[test]
-  fn build_pads_partial_last_window() {
-    // 70-byte chunk: occupies window 0 fully and 6 bytes of window 1. The
-    // remaining 58 bytes of window 1 are padded with spaces, so the bitmap
-    // for window 1 has only bits at positions < 6 possibly set.
-    let mut chunk = vec![b' '; 70];
-    chunk[64..70].copy_from_slice(b"[1,2,3");
-    let mut bm = ChunkBitmaps::build_basic(&chunk, ScanCarry::default());
-    let lbracket = bm.ensure_structural(&chunk, Structural::LBracket).to_vec();
-    assert_eq!(bit_positions(&lbracket), vec![64]);
-    let comma = bm.ensure_structural(&chunk, Structural::Comma).to_vec();
-    assert_eq!(bit_positions(&comma), vec![66, 68]);
-  }
-
-  #[test]
   fn carry_entry_propagates_into_chunk() {
     // Chunk starts mid-string. Provide inside_string carry so the parser
     // knows to treat early bytes as string content.
@@ -342,12 +338,6 @@ mod tests {
     // Colon at byte 4 should be picked up; nothing else.
     let colon = bm.ensure_structural(&chunk, Structural::Colon).to_vec();
     assert_eq!(bit_positions(&colon), vec![4]);
-  }
-
-  #[test]
-  fn helper_count_bits_sanity() {
-    let words = vec![0b0101u64, 0b1u64];
-    assert_eq!(count_bits(&words), 3);
   }
 
   #[test]

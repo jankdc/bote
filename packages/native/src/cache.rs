@@ -283,6 +283,43 @@ mod tests {
     .unwrap()
   }
 
+  #[test]
+  fn config_rejects_invalid_chunk_size() {
+    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
+    let err = ChunkCache::new(
+      src.clone(),
+      CacheOptions {
+        chunk_size: 63,
+        max_resident_chunks: 4,
+      },
+    )
+    .unwrap_err();
+    assert!(matches!(err, CacheError::InvalidChunkSize(63)));
+    let err = ChunkCache::new(
+      src,
+      CacheOptions {
+        chunk_size: 0,
+        max_resident_chunks: 4,
+      },
+    )
+    .unwrap_err();
+    assert!(matches!(err, CacheError::InvalidChunkSize(0)));
+  }
+
+  #[test]
+  fn config_rejects_zero_slot_cap() {
+    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
+    let err = ChunkCache::new(
+      src,
+      CacheOptions {
+        chunk_size: 64,
+        max_resident_chunks: 0,
+      },
+    )
+    .unwrap_err();
+    assert!(matches!(err, CacheError::ZeroMaxResidentChunks));
+  }
+
   #[tokio::test]
   async fn fetch_loads_chunk_from_source() {
     let cache = make_cache(1024, 4, 64);
@@ -399,42 +436,5 @@ mod tests {
       cache.resident_bytes(),
       cache.derived_ceiling_bytes(),
     );
-  }
-
-  #[test]
-  fn config_rejects_invalid_chunk_size() {
-    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
-    let err = ChunkCache::new(
-      src.clone(),
-      CacheOptions {
-        chunk_size: 63,
-        max_resident_chunks: 4,
-      },
-    )
-    .unwrap_err();
-    assert!(matches!(err, CacheError::InvalidChunkSize(63)));
-    let err = ChunkCache::new(
-      src,
-      CacheOptions {
-        chunk_size: 0,
-        max_resident_chunks: 4,
-      },
-    )
-    .unwrap_err();
-    assert!(matches!(err, CacheError::InvalidChunkSize(0)));
-  }
-
-  #[test]
-  fn config_rejects_zero_slot_cap() {
-    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
-    let err = ChunkCache::new(
-      src,
-      CacheOptions {
-        chunk_size: 64,
-        max_resident_chunks: 0,
-      },
-    )
-    .unwrap_err();
-    assert!(matches!(err, CacheError::ZeroMaxResidentChunks));
   }
 }

@@ -549,7 +549,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn walk_complete_releases_pins() {
+  async fn pins_walk_released_on_complete() {
     let s = session(500, 256, 4);
     let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, None);
     // Advance a few elements so the walker holds a live frontier pin.
@@ -573,7 +573,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn walk_complete_safe_when_child_cursor_escapes() {
+  async fn pins_walk_safe_when_child_escapes() {
     let s = session(500, 256, 4);
     let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, None);
     let child = w.next(None).await.unwrap().expect("first child");
@@ -589,7 +589,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn walk_abandoned_stay_under_cap_without_gc() {
+  async fn pins_walk_abandoned_stay_under_cap() {
     let s = session(2000, 256, 4);
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
@@ -613,7 +613,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn scan_complete_releases_pins() {
+  async fn pins_scan_released_on_complete() {
     let s = session(500, 256, 4);
     let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, None);
     for _ in 0..3 {
@@ -629,6 +629,43 @@ mod tests {
       assert!(guard.walker.is_none());
     }
     assert!(it.next(None).await.unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn pins_scan_batch_early_break_releases() {
+    let s = session(500, 256, 4);
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, Some(8));
+    // Pull one batch, then early-terminate via complete() (the break path).
+    assert!(it.next(None).await.unwrap().is_some());
+    it.complete(None).await.unwrap();
+    let guard = it.state.lock().await;
+    assert!(
+      guard.pinned.is_empty(),
+      "complete() must clear pins after a batch"
+    );
+    assert!(guard.walker.is_none());
+  }
+
+  #[tokio::test]
+  async fn pins_scan_batch_peak_bounded() {
+    // Batching a large array under a tight cap stays under the cache ceiling.
+    let s = session(2000, 256, 4);
+    let ceiling = s.cache.derived_ceiling_bytes();
+    let mut it = CursorScan::new(
+      s.clone(),
+      "/items".into(),
+      0,
+      None,
+      Some(r#"{"one":"/total"}"#.to_string()),
+      Some(64),
+    );
+    while it.next(None).await.unwrap().is_some() {
+      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
+      assert!(
+        total <= ceiling,
+        "resident {total} exceeded ceiling {ceiling} while batching"
+      );
+    }
   }
 
   #[tokio::test]
@@ -795,42 +832,5 @@ mod tests {
       sizes.push(b.as_array().unwrap().len());
     }
     assert_eq!(sizes, vec![2, 2, 1]);
-  }
-
-  #[tokio::test]
-  async fn scan_batch_early_break_releases_pins() {
-    let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, Some(8));
-    // Pull one batch, then early-terminate via complete() (the break path).
-    assert!(it.next(None).await.unwrap().is_some());
-    it.complete(None).await.unwrap();
-    let guard = it.state.lock().await;
-    assert!(
-      guard.pinned.is_empty(),
-      "complete() must clear pins after a batch"
-    );
-    assert!(guard.walker.is_none());
-  }
-
-  #[tokio::test]
-  async fn scan_batch_peak_pins_bounded() {
-    // Batching a large array under a tight cap stays under the cache ceiling.
-    let s = session(2000, 256, 4);
-    let ceiling = s.cache.derived_ceiling_bytes();
-    let mut it = CursorScan::new(
-      s.clone(),
-      "/items".into(),
-      0,
-      None,
-      Some(r#"{"one":"/total"}"#.to_string()),
-      Some(64),
-    );
-    while it.next(None).await.unwrap().is_some() {
-      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
-      assert!(
-        total <= ceiling,
-        "resident {total} exceeded ceiling {ceiling} while batching"
-      );
-    }
   }
 }
