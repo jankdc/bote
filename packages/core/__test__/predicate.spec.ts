@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, eq, gte, exists, and } from '../src/index.ts'
+import { open, eq, gt, lt, gte, exists, and } from '../src/index.ts'
 import { memorySource, enc, ORDERS } from './fixtures.ts'
 
 // where_ predicate pushdown across count / scan / walk, and the totality contract.
@@ -52,6 +52,44 @@ test('where_is_total_and_non_throwing', async (t) => {
   assert.equal(await db.count('/orders', { where: gte('/status', 100) }), 0)
   // exists is true whenever the sub-pointer resolves
   assert.equal(await db.count('/orders', { where: exists('/customer/country') }), 5)
+})
+
+test('where_eq_is_type_aware', async (t) => {
+  // The numeric literal 1 matches only the JSON number, not the string "1".
+  const db = await open(memorySource(enc('{"xs":[{"v":1},{"v":"1"}]}')))
+  t.after(() => db.close())
+  assert.equal(await db.count('/xs', { where: eq('/v', 1) }), 1)
+  assert.equal(await db.count('/xs', { where: eq('/v', '1') }), 1)
+})
+
+test('where_eq_matches_bool_and_null', async (t) => {
+  const db = await open(memorySource(enc('{"xs":[{"v":true},{"v":false},{"v":null}]}')))
+  t.after(() => db.close())
+  assert.equal(await db.count('/xs', { where: eq('/v', true) }), 1)
+  assert.equal(await db.count('/xs', { where: eq('/v', false) }), 1)
+  assert.equal(await db.count('/xs', { where: eq('/v', null) }), 1)
+})
+
+test('where_eq_decodes_string_escapes', async (t) => {
+  const doc = JSON.stringify({ xs: [{ v: 'a"b' }, { v: 'ab' }] })
+  const db = await open(memorySource(enc(doc)))
+  t.after(() => db.close())
+  // The literal a"b must match the JSON-escaped value "a\"b".
+  assert.equal(await db.count('/xs', { where: eq('/v', 'a"b') }), 1)
+})
+
+test('where_orders_strings_lexically', async (t) => {
+  const db = await open(memorySource(enc('{"xs":[{"s":"a"},{"s":"m"},{"s":"z"}]}')))
+  t.after(() => db.close())
+  assert.equal(await db.count('/xs', { where: gt('/s', 'm') }), 1) // only "z"
+  assert.equal(await db.count('/xs', { where: lt('/s', 'm') }), 1) // only "a"
+})
+
+test('where_empty_and_matches_everything', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  // and() with no clauses is vacuously true: every element matches.
+  assert.equal(await db.count('/orders', { where: and() }), 5)
 })
 
 test('where_sub_pointer_is_compile_validated', async (t) => {

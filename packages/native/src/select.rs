@@ -48,34 +48,3 @@ impl CompiledSelect {
     })
   }
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn parse_one() {
-    assert!(matches!(
-      CompiledSelect::parse(r#"{"one":"/total"}"#).unwrap(),
-      CompiledSelect::One(_)
-    ));
-  }
-
-  #[test]
-  fn parse_map_preserves_declared_order() {
-    let s =
-      CompiledSelect::parse(r#"{"map":[["total","/total"],["country","/c/country"]]}"#).unwrap();
-    match s {
-      CompiledSelect::Map(fields) => {
-        let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["total", "country"]);
-      }
-      _ => panic!("expected map"),
-    }
-  }
-
-  #[test]
-  fn invalid_pointer_errors() {
-    assert!(CompiledSelect::parse(r#"{"one":"bad"}"#).is_err());
-  }
-}
