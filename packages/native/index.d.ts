@@ -70,14 +70,7 @@ export declare function heapProfileStop(): void
  */
 export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options?: BoteOptions | undefined | null): Cursor
 
-/**
- * Arguments passed to the JS `read(args)` callback.
- *
- * We funnel `(offset, length)` through a single object so the napi-rs
- * `ThreadsafeFunction` only has to model a single argument - keeping the
- * type signature in Rust simple. The TS facade wraps the user's
- * `read(offset, length)` API into this shape.
- */
+/** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {
   offset: number
   length: number

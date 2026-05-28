@@ -661,4 +661,72 @@ mod tests {
       );
     }
   }
+
+  #[tokio::test]
+  async fn pins_scan_batch_abandoned_stay_under_cap() {
+    // Mirror of `pins_walk_abandoned_stay_under_cap` for batched scan: an
+    // iterator that pulls one batch, completes, and is kept alive without
+    // dropping must not retain pins. 64 of them in a row must not push
+    // `resident + bitmap` past the cache ceiling.
+    let s = session(2000, 256, 4);
+    let ceiling = s.cache.derived_ceiling_bytes();
+    let mut abandoned = Vec::new();
+    for _ in 0..64 {
+      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, Some(8));
+      assert!(it.next(None).await.unwrap().is_some());
+      it.complete(None).await.unwrap();
+      abandoned.push(it); // keep alive: no Drop, no GC
+
+      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
+      assert!(
+        total <= ceiling,
+        "resident {} + bitmap {} exceeded ceiling {} with {} abandoned scan iterators",
+        s.cache.resident_bytes(),
+        s.cache.bitmap_bytes(),
+        ceiling,
+        abandoned.len(),
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn pred_compile_error_surfaces_on_first_scan_next() {
+    // Lazy-compile contract: `scan` and `walk` defer predicate parsing to the
+    // first `next()` so the error surfaces there (not on the sync constructor).
+    // `count` parses eagerly because its sync entry point returns a Promise -
+    // see `cursor.rs:32` (`parse_where`) versus `:234` (`initialize_walker`).
+    let s = session(5, 256, 4);
+    let mut it = CursorScan::new(
+      s.clone(),
+      "/items".into(),
+      0,
+      Some("not json".into()),
+      None,
+      None,
+    );
+    let err = it.next(None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+      msg.contains("invalid"),
+      "expected invalid-predicate error, got: {msg}",
+    );
+  }
+
+  #[tokio::test]
+  async fn pred_compile_error_surfaces_on_first_walk_next() {
+    let s = session(5, 256, 4);
+    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, Some("not json".into()));
+    // `.err().expect(..)` rather than `.unwrap_err()` because `Cursor` doesn't
+    // impl `Debug` and `unwrap_err` needs the Ok type printable.
+    let err = w
+      .next(None)
+      .await
+      .err()
+      .expect("expected error from malformed predicate");
+    let msg = err.to_string();
+    assert!(
+      msg.contains("invalid"),
+      "expected invalid-predicate error, got: {msg}",
+    );
+  }
 }

@@ -381,3 +381,82 @@ impl Drop for Query<'_> {
     self.session.sync_bitmap_evictions();
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::bitmap::ChunkBitmaps;
+  use crate::cache::CacheOptions;
+  use crate::simd::ScanCarry;
+  use crate::source::InMemorySource;
+
+  #[tokio::test]
+  async fn bitmap_evict_drains_only_after_unpin() {
+    // The bitmap-bytes accounting depends on a specific ordering: when a query
+    // ends, pins release FIRST (unpin -> evict_to_caps queues offsets in
+    // `evicted_since_drain`), THEN `sync_bitmap_evictions` drains the queue
+    // into the bitmap store. Calling sync the other way around - before any
+    // pin releases - is a no-op, and the bitmaps for chunks that are about to
+    // be evicted persist until the next sync, breaking the bounded-bitmap
+    // contract under churn. This test pins below the cap, syncs (must be a
+    // no-op), unpins, syncs again (must reclaim).
+    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![b' '; 256]));
+    let session = Session::new(
+      src,
+      CacheOptions {
+        chunk_size: 64,
+        max_resident_chunks: 1,
+      },
+    )
+    .unwrap();
+
+    // Pin chunks 0 and 64. Cap is 1; eviction can't fire while both are pinned
+    // (evict_to_caps finds no unpinned victim).
+    let pin0 = session.cache.fetch(0).await.unwrap();
+    let pin64 = session.cache.fetch(64).await.unwrap();
+
+    // Build bitmaps for both, chaining carries.
+    {
+      let mut store = session.bitmaps.lock().unwrap();
+      let bm0 = ChunkBitmaps::build_basic(&pin0.data, ScanCarry::default());
+      let entry_after_0 = bm0.exit_carry();
+      store.insert(0, bm0);
+      let bm64 = ChunkBitmaps::build_basic(&pin64.data, entry_after_0);
+      store.insert(64, bm64);
+    }
+    let bytes_with_both = session.cache.bitmap_bytes();
+    assert!(bytes_with_both > 0, "bitmaps must contribute bytes");
+
+    // Sync before any pin release: cache's eviction queue is empty, drain is
+    // a no-op.
+    session.sync_bitmap_evictions();
+    assert_eq!(
+      session.cache.bitmap_bytes(),
+      bytes_with_both,
+      "sync before pin release must be a no-op",
+    );
+
+    // Release pin 0. unpin -> evict_to_caps sees 1 unpinned chunk + 1 pinned >
+    // cap=1, evicts the unpinned one, pushes its offset onto evicted_since_drain.
+    drop(pin0);
+
+    // The cache has dropped chunk 0's bytes; the bitmap store still has its
+    // bitmaps - exactly the leak window that a wrong drain ordering would
+    // make permanent.
+    assert_eq!(
+      session.cache.bitmap_bytes(),
+      bytes_with_both,
+      "before sync, bitmap bytes for the evicted chunk are not yet reclaimed",
+    );
+
+    // Sync now. Drain pulls chunk 0 off the queue and drops its bitmaps.
+    session.sync_bitmap_evictions();
+    assert!(
+      session.cache.bitmap_bytes() < bytes_with_both,
+      "sync after unpin must reclaim evicted chunk's bitmap bytes (was {bytes_with_both}, now {})",
+      session.cache.bitmap_bytes(),
+    );
+
+    drop(pin64);
+  }
+}

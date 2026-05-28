@@ -855,4 +855,58 @@ mod tests {
     };
     assert_eq!(end, close_at as u64 + 1);
   }
+
+  #[test]
+  fn ensure_back_walk_stops_at_nearest_cached_chunk() {
+    // `ensure(co)` walks back to the earliest chunk lacking bitmaps and builds
+    // forward, threading carries. After bitmaps for some prefix are present,
+    // a later ensure must NOT re-walk past the cached frontier - that's the
+    // no-quadratic-rebuild property under steady-state eviction.
+    let chunk_size: usize = 64;
+    let source: Vec<u8> = vec![b'x'; chunk_size * 10];
+    let provider = chunked(&source, chunk_size);
+    let mut store = BitmapStore::new();
+
+    // First call seeds chunks 0..=5 (back-walk reaches all the way to chunk 0
+    // because the store is empty).
+    {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      w.ensure(5 * chunk_size as u64).unwrap();
+    }
+    for i in 0..=5u64 {
+      assert!(
+        store.get(i * chunk_size as u64).is_some(),
+        "chunk {i} bitmaps should be built after ensure(5)",
+      );
+    }
+    for i in 6..10u64 {
+      assert!(
+        store.get(i * chunk_size as u64).is_none(),
+        "chunk {i} must not be built yet",
+      );
+    }
+
+    // Second call: ensure(7). Back-walk hits cached chunk 5 immediately and
+    // builds only 6 and 7. Chunks 8 and 9 must stay unbuilt.
+    {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      w.ensure(7 * chunk_size as u64).unwrap();
+    }
+    assert!(
+      store.get(6 * chunk_size as u64).is_some(),
+      "chunk 6 should be built forward from cached chunk 5",
+    );
+    assert!(
+      store.get(7 * chunk_size as u64).is_some(),
+      "chunk 7 should be built (the target)",
+    );
+    assert!(
+      store.get(8 * chunk_size as u64).is_none(),
+      "chunk 8 must not be built (past target)",
+    );
+    assert!(
+      store.get(9 * chunk_size as u64).is_none(),
+      "chunk 9 must not be built (past target)",
+    );
+  }
 }
