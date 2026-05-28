@@ -34,7 +34,7 @@ test('source_from_file_reads_from_disk', async (t) => {
   t.after(() => cursor.close())
   assert.equal(await cursor.get('/users/0/name'), 'Alice')
   const names: string[] = []
-  for await (const batch of cursor.scan('/users', { select: '/name' })) {
+  for await (const batch of cursor.iter('/users', { select: '/name' })) {
     for (const name of batch) names.push(name as string)
   }
   assert.deepEqual(names, ['Alice', 'Bob'])

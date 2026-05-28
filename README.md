@@ -23,25 +23,25 @@ await using cursor = await open(fromFile('./your-big.json'))
 // if you want one value
 const user0: unknown = await cursor.get('/1234/users/0')
 
-// for .get and .scan, you can supply a validator
+// for .get and .iter, you can supply a validator
 const user1: User = await cursor.get('/1234/users/1', User)
 
-for await (const batch of cursor.scan('/1234/users')) {
+for await (const batch of cursor.iter('/1234/users')) {
   for (const user of batch) console.log(user)
 }
 
 // project a single field per child without materializing the whole thing
-for await (const batch of cursor.scan('/1234/users', { select: '/id' })) {
+for await (const batch of cursor.iter('/1234/users', { select: '/id' })) {
   for (const id of batch) console.log({ id })
 }
 
 // add `withKey: true` to get the index (or member name) alongside the value
-for await (const batch of cursor.scan('/1234/users', { select: '/id', withKey: true })) {
+for await (const batch of cursor.iter('/1234/users', { select: '/id', withKey: true })) {
   for (const [i, id] of batch) console.log({ i, id })
 }
 
 // for open-ended per-child work (conditional reads, recursive descent, nested
-// scans), `walk` still yields a subcursor positioned at each child:
+// iters), `walk` still yields a subcursor positioned at each child:
 for await (const userCursor of cursor.walk('/1234/users')) {
   if (await userCursor.has('/details')) {
     console.log(await userCursor.get('/details'))

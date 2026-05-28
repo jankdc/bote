@@ -19,19 +19,19 @@ export interface SessionOptions {
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
 /** Member name for object children, zero-based index for array elements. */
-export type ScanKey = string | number
+export type IterKey = string | number
 
-/** Default batch size for `.scan()`. Each yield is an array of up to this many
+/** Default batch size for `.iter()`. Each yield is an array of up to this many
  *  items; the final batch may be smaller. Sized to amortize the per-yield
  *  FFI/promise overhead across enough items that compute, not protocol, sets
- *  the cost. Override via `ScanOptions.batch`. */
-export const DEFAULT_SCAN_BATCH = 1000
+ *  the cost. Override via `IterOptions.batch`. */
+export const DEFAULT_ITER_BATCH = 1000
 
-export interface ScanOptions {
+export interface IterOptions {
   /** Project each child before it crosses: a sub-pointer yields the bare value;
    *  a map yields an object of those sub-values. */
   select?: string | Record<string, string>
-  /** Override the default batch size of {@link DEFAULT_SCAN_BATCH}. Must be a
+  /** Override the default batch size of {@link DEFAULT_ITER_BATCH}. Must be a
    *  positive integer. Larger amortizes FFI overhead further at the cost of
    *  per-yield latency and transient JS-heap residency. */
   batch?: number
@@ -60,29 +60,29 @@ export interface Cursor {
   count<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<number>
 
   /** Stream children of `pointer` as batches. Each yield is an array of up to
-   *  {@link DEFAULT_SCAN_BATCH} items (override with `options.batch`); the
+   *  {@link DEFAULT_ITER_BATCH} items (override with `options.batch`); the
    *  final batch may be smaller. Empty containers yield nothing. Batching is
    *  not optional — single-item iteration cannot amortize the FFI overhead. */
-  scan<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown[]>
-  scan<S extends string, Sch extends StandardSchemaV1>(
+  iter<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown[]>
+  iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     schema: Sch,
   ): AsyncIterable<InferOutput<Sch>[]>
   // withKey overloads precede the non-withKey ones so TS resolves the
   // tuple-yielding signatures first.
-  scan<S extends string, Sch extends StandardSchemaV1>(
+  iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { withKey: true; schema: Sch },
-  ): AsyncIterable<[ScanKey, InferOutput<Sch>][]>
-  scan<S extends string>(
+    options: IterOptions & { withKey: true; schema: Sch },
+  ): AsyncIterable<[IterKey, InferOutput<Sch>][]>
+  iter<S extends string>(
     pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { withKey: true },
-  ): AsyncIterable<[ScanKey, unknown][]>
-  scan<S extends string, Sch extends StandardSchemaV1>(
+    options: IterOptions & { withKey: true },
+  ): AsyncIterable<[IterKey, unknown][]>
+  iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { schema: Sch },
+    options: IterOptions & { schema: Sch },
   ): AsyncIterable<InferOutput<Sch>[]>
-  scan<S extends string>(pointer: PointerLiteral<S> | Pointer, options: ScanOptions): AsyncIterable<unknown[]>
+  iter<S extends string>(pointer: PointerLiteral<S> | Pointer, options: IterOptions): AsyncIterable<unknown[]>
 
   /** Stream child positions as cursors. */
   walk<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<Cursor>
@@ -147,7 +147,7 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
-function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
+function normalizeIterArgs(arg?: StandardSchemaV1 | IterOptions): {
   schema?: StandardSchemaV1
   select?: string | Record<string, string>
   batch?: number
@@ -156,7 +156,7 @@ function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
 } {
   if (!arg) return {}
   if ('~standard' in arg) return { schema: arg as StandardSchemaV1 }
-  const options = arg as ScanOptions
+  const options = arg as IterOptions
   return {
     schema: options.schema,
     select: options.select,
@@ -170,7 +170,7 @@ function serializeSelect(select: string | Record<string, string>): string {
   if (typeof select === 'string') return JSON.stringify({ one: select })
   const entries = Object.entries(select)
   if (entries.length === 0) {
-    throw new RangeError('scan: select must have at least one field')
+    throw new RangeError('iter: select must have at least one field')
   }
   return JSON.stringify({ map: entries })
 }
@@ -193,14 +193,14 @@ function wrap(native: NativeCursor): Cursor {
     count(pointer: string): Promise<number> {
       return native.count(pointer)
     },
-    scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown[]> {
-      const { schema, select, batch, onInvalid, withKey } = normalizeScanArgs(optionsOrSchema)
+    iter(pointer: string, optionsOrSchema?: StandardSchemaV1 | IterOptions): AsyncIterable<unknown[]> {
+      const { schema, select, batch, onInvalid, withKey } = normalizeIterArgs(optionsOrSchema)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
-        throw new RangeError(`scan: batch must be a positive integer, got ${batch}`)
+        throw new RangeError(`iter: batch must be a positive integer, got ${batch}`)
       }
-      const resolvedBatch = batch ?? DEFAULT_SCAN_BATCH
+      const resolvedBatch = batch ?? DEFAULT_ITER_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const inner = native.scan(pointer, { selectIr, batch: resolvedBatch, withKey })
+      const inner = native.iter(pointer, { selectIr, batch: resolvedBatch, withKey })
       if (!schema) return inner as AsyncIterable<unknown[]>
       const policy = onInvalid ?? 'throw'
 
@@ -215,10 +215,10 @@ function wrap(native: NativeCursor): Cursor {
           for await (const b of inner) {
             const out: unknown[] = []
             for (const v of b as unknown[]) {
-              const value = withKey ? (v as [ScanKey, unknown])[1] : v
+              const value = withKey ? (v as [IterKey, unknown])[1] : v
               const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
               if ('skip' in result) continue
-              out.push(withKey ? [(v as [ScanKey, unknown])[0], result.value] : result.value)
+              out.push(withKey ? [(v as [IterKey, unknown])[0], result.value] : result.value)
             }
             yield out
           }

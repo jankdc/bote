@@ -1,4 +1,4 @@
-//! Projection IR for `scan`'s `select`: extract a single sub-value, or a map
+//! Projection IR for `iter`'s `select`: extract a single sub-value, or a map
 //! of named sub-values, from each child before it crosses - so the
 //! non-selected parts of the child never materialize. Mirrors the TS
 //! `serializeSelect` output (`{"one": ptr}` or `{"map": [[key, ptr], ...]}`).

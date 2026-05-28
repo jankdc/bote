@@ -27,9 +27,9 @@ import { fmtBytes } from './format.ts'
 const DEFAULT_SYNTH_ITEMS = 7_000_000 // ≈ 385 MB at padWidth 7
 const PAD_WIDTH = 7
 
-async function scanAll(cursor: Cursor): Promise<number> {
+async function iterAll(cursor: Cursor): Promise<number> {
   let count = 0
-  for await (const batch of cursor.scan('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
+  for await (const batch of cursor.iter('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
     count += batch.length
   }
   return count
@@ -46,10 +46,10 @@ async function profile(path: string, docBytes: number, outPath: string): Promise
     heapProfileStart(outPath)
     try {
       const cursor = open(source) // no options → default maxResidentChunks (512)
-      const seen = await scanAll(cursor)
+      const seen = await iterAll(cursor)
       // Read peak before stopping; stop tears the profiler down.
       peakBytes = heapProfilePeakBytes()
-      console.log(`Scanned ${seen.toLocaleString()} items.`)
+      console.log(`Iterated ${seen.toLocaleString()} items.`)
     } finally {
       heapProfileStop()
     }

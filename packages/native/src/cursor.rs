@@ -5,7 +5,7 @@
 //! pointer resolution starts at byte 0. Sub-cursors yielded by `walk` carry
 //! an anchor and resolve pointers relative to that location.
 //!
-//! `scan` / `walk` are sync methods returning [`CursorScan`] / [`CursorWalk`] -
+//! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`] -
 //! napi async-iterators that lazily resolve their pointer on first `next()`
 //! and then step through children one entry at a time. Each step retries
 //! through `Pending` by fetching chunks as needed.
@@ -39,14 +39,14 @@ pub struct CacheStats {
   pub ceiling_bytes: f64,
 }
 
-/// Options for `scan`. A `#[napi(object)]` so the facade can grow it
+/// Options for `iter`. A `#[napi(object)]` so the facade can grow it
 /// without changing the method's arity.
 #[napi(object)]
-pub struct ScanArgs {
+pub struct IterArgs {
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
   /// Override the batch size. The facade always resolves a value here; `None`
-  /// or sub-1 values fall back to `DEFAULT_SCAN_BATCH` defensively.
+  /// or sub-1 values fall back to `DEFAULT_ITER_BATCH` defensively.
   pub batch: Option<f64>,
   /// Yield `[key, value]` tuples instead of bare values. The key is a string
   /// for object members and a number for array elements.
@@ -55,7 +55,7 @@ pub struct ScanArgs {
 
 /// Defensive fallback if the facade omits `batch`. The TS layer normally
 /// resolves the user-facing default (also 1000) before the call lands here.
-const DEFAULT_SCAN_BATCH: usize = 1000;
+const DEFAULT_ITER_BATCH: usize = 1000;
 
 #[napi]
 pub struct Cursor {
@@ -132,7 +132,7 @@ impl Cursor {
   }
 
   #[napi]
-  pub fn scan(&self, pointer: String, options: Option<ScanArgs>) -> CursorScan {
+  pub fn iter(&self, pointer: String, options: Option<IterArgs>) -> CursorIter {
     let (select_ir, batch, with_key) = match options {
       Some(o) => (
         o.select_ir,
@@ -141,12 +141,12 @@ impl Cursor {
         o.batch
           .filter(|b| *b >= 1.0)
           .map(|b| b as usize)
-          .unwrap_or(DEFAULT_SCAN_BATCH),
+          .unwrap_or(DEFAULT_ITER_BATCH),
         o.with_key.unwrap_or(false),
       ),
-      None => (None, DEFAULT_SCAN_BATCH, false),
+      None => (None, DEFAULT_ITER_BATCH, false),
     };
-    CursorScan::new(
+    CursorIter::new(
       self.session.clone(),
       pointer,
       self.anchor_start(),
@@ -192,12 +192,12 @@ struct IterState {
   pinned: HashMap<u64, ChunkRef>,
   /// Serialized projection IR, parsed lazily into `select` on first `next()`.
   select_ir: Option<String>,
-  /// Compiled `select` projection (scan only). `None` yields the whole child.
+  /// Compiled `select` projection (iter only). `None` yields the whole child.
   select: Option<CompiledSelect>,
-  /// Batch size (scan only). Each yield is an array of up to `batch` items.
+  /// Batch size (iter only). Each yield is an array of up to `batch` items.
   /// Walk passes 0 here and never reads the field.
   batch: usize,
-  /// Scan-only: wrap each yielded value in a `[key, value]` array.
+  /// Iter-only: wrap each yielded value in a `[key, value]` array.
   with_key: bool,
 }
 
@@ -264,12 +264,12 @@ async fn release_on_complete<Y>(
 }
 
 #[napi(async_iterator)]
-pub struct CursorScan {
+pub struct CursorIter {
   session: Arc<Session>,
   state: Arc<AsyncMutex<IterState>>,
 }
 
-impl CursorScan {
+impl CursorIter {
   fn new(
     session: Arc<Session>,
     pointer: String,
@@ -301,7 +301,7 @@ fn child_key_json(child: &ChildEntry) -> serde_json::Value {
 }
 
 #[napi]
-impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
+impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
   type Yield = serde_json::Value;
   type Next = ();
   type Return = ();
@@ -563,12 +563,12 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn pins_scan_released_on_complete() {
+  async fn pins_iter_released_on_complete() {
     let s = session(500, 256, 4);
     // batch=1 so each next() yields after one child, mirroring the old
     // single-item path the rest of this test exercises (frontier pin held
     // between yields).
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 1, false);
+    let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 1, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -585,9 +585,9 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn pins_scan_batch_early_break_releases() {
+  async fn pins_iter_batch_early_break_releases() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 8, false);
     // Pull one batch, then early-terminate via complete() (the break path).
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
@@ -600,11 +600,11 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn pins_scan_batch_peak_bounded() {
+  async fn pins_iter_batch_peak_bounded() {
     // Batching a large array under a tight cap stays under the cache ceiling.
     let s = session(2000, 256, 4);
     let ceiling = s.cache.derived_ceiling_bytes();
-    let mut it = CursorScan::new(
+    let mut it = CursorIter::new(
       s.clone(),
       "/items".into(),
       0,
@@ -622,8 +622,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn pins_scan_batch_abandoned_stay_under_cap() {
-    // Mirror of `pins_walk_abandoned_stay_under_cap` for batched scan: an
+  async fn pins_iter_batch_abandoned_stay_under_cap() {
+    // Mirror of `pins_walk_abandoned_stay_under_cap` for batched iter: an
     // iterator that pulls one batch, completes, and is kept alive without
     // dropping must not retain pins. 64 of them in a row must not push
     // `resident + bitmap` past the cache ceiling.
@@ -631,7 +631,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 8, false);
+      let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 8, false);
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       abandoned.push(it); // keep alive: no Drop, no GC
@@ -639,7 +639,7 @@ mod tests {
       let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
       assert!(
         total <= ceiling,
-        "resident {} + bitmap {} exceeded ceiling {} with {} abandoned scan iterators",
+        "resident {} + bitmap {} exceeded ceiling {} with {} abandoned iter iterators",
         s.cache.resident_bytes(),
         s.cache.bitmap_bytes(),
         ceiling,

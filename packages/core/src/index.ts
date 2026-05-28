@@ -9,11 +9,11 @@ export { ValidationError, type StandardSchemaV1 } from './validate.ts'
 export { pointer, type PointerLiteral, type Pointer } from './pointer.ts'
 export {
   open,
-  DEFAULT_SCAN_BATCH,
+  DEFAULT_ITER_BATCH,
   type Cursor,
   type RootCursor,
-  type ScanKey,
-  type ScanOptions,
+  type IterKey,
+  type IterOptions,
   type SessionOptions,
 } from './open.ts'
 

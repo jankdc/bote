@@ -3,7 +3,7 @@
 // Verifies two properties of the JS layer, in two independent phases so
 // each phase's bookkeeping can't pollute the other's signal:
 //
-//   1. heap-plateau phase - scans N items (the common consumption path),
+//   1. heap-plateau phase - iterates N items (the common consumption path),
 //      samples `process.memoryUsage().heapUsed` (after a forced GC) at
 //      regular intervals, keeps no per-item state. If the facade retained
 //      resolved values or async-iterator state, heap would climb linearly
@@ -56,7 +56,7 @@ async function heapPlateauPhase(path: string): Promise<HeapSample[]> {
   const baseline = process.memoryUsage().heapUsed
   const samples: HeapSample[] = []
   let seen = 0
-  outer: for await (const batch of cursor.scan('/items', { select: '/name' })) {
+  outer: for await (const batch of cursor.iter('/items', { select: '/name' })) {
     for (let i = 0; i < batch.length; i++) {
       seen += 1
       if (seen % HEAP_SAMPLE_EVERY === 0) {
@@ -95,7 +95,7 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(`Doc size: ${fmtBytes(buf.byteLength)}`)
 
   console.log(
-    `\n[phase 1] heap plateau - scanning ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`,
+    `\n[phase 1] heap plateau - iterating ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`,
   )
   const samples = await heapPlateauPhase(path)
   for (const s of samples) {

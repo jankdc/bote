@@ -577,7 +577,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.Cursor = nativeBinding.Cursor
-module.exports.CursorScan = nativeBinding.CursorScan
+module.exports.CursorIter = nativeBinding.CursorIter
 module.exports.CursorWalk = nativeBinding.CursorWalk
 module.exports.heapProfilePeakBytes = nativeBinding.heapProfilePeakBytes
 module.exports.heapProfileStart = nativeBinding.heapProfileStart

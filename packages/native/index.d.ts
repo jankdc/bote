@@ -5,7 +5,7 @@ export declare class Cursor {
   get(pointer: string): Promise<unknown>
   count(pointer: string): Promise<number>
   get key(): string | number | null
-  scan(pointer: string, options?: ScanArgs | undefined | null): CursorScan
+  iter(pointer: string, options?: IterArgs | undefined | null): CursorIter
   walk(pointer: string): CursorWalk
   cacheStats(): CacheStats
 }
@@ -16,7 +16,7 @@ export declare class Cursor {
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
  */
-export declare class CursorScan {
+export declare class CursorIter {
   [Symbol.asyncIterator](): AsyncGenerator<any, void, undefined>
 }
 
@@ -59,6 +59,25 @@ export declare function heapProfileStart(filePath?: string | undefined | null): 
 export declare function heapProfileStop(): void
 
 /**
+ * Options for `iter`. A `#[napi(object)]` so the facade can grow it
+ * without changing the method's arity.
+ */
+export interface IterArgs {
+  /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
+  selectIr?: string
+  /**
+   * Override the batch size. The facade always resolves a value here; `None`
+   * or sub-1 values fall back to `DEFAULT_ITER_BATCH` defensively.
+   */
+  batch?: number
+  /**
+   * Yield `[key, value]` tuples instead of bare values. The key is a string
+   * for object members and a number for array elements.
+   */
+  withKey?: boolean
+}
+
+/**
  * Build a [`Cursor`] from a JS source object.
  *
  * The `source` argument must be a JS object with:
@@ -74,23 +93,4 @@ export declare function open(source: { size: number; chunkBytes?: number; read: 
 export interface ReadArgs {
   offset: number
   length: number
-}
-
-/**
- * Options for `scan`. A `#[napi(object)]` so the facade can grow it
- * without changing the method's arity.
- */
-export interface ScanArgs {
-  /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
-  selectIr?: string
-  /**
-   * Override the batch size. The facade always resolves a value here; `None`
-   * or sub-1 values fall back to `DEFAULT_SCAN_BATCH` defensively.
-   */
-  batch?: number
-  /**
-   * Yield `[key, value]` tuples instead of bare values. The key is a string
-   * for object members and a number for array elements.
-   */
-  withKey?: boolean
 }
