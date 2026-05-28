@@ -93,6 +93,15 @@ test('scan_batch_rejects_non_positive', async (t) => {
   assert.throws(() => db.scan('/orders', { batch: 1.5 }), RangeError)
 })
 
+test('scan_select_rejects_empty_map', async (t) => {
+  // An empty `select: {}` would yield one empty object per child silently.
+  // Reject at the facade so the failure mode is a clear error - symmetric
+  // with the `batch <= 0` rejection above.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.throws(() => db.scan('/orders', { select: {} }), RangeError)
+})
+
 test('scan_select_batch_under_tight_budget_stays_bounded', async (t) => {
   // Projecting + batching a big array under a tight cap stays under the ceiling.
   const rows = Array.from({ length: 4000 }, (_, i) => `{"id":${i},"v":"value-${i}"}`)
