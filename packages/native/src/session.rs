@@ -66,6 +66,20 @@ pub struct Session {
 /// quickly reaches the cap and the remaining chunks load in one or two hits.
 pub(crate) const MAX_BURST: u64 = 256;
 
+/// Adaptive doubling burst schedule used by every resolver that doesn't know
+/// the value's extent up front (`run_locate`, `skip_value_at`, `count::children`).
+/// Each call yields the current burst (in chunks) and doubles it for the next
+/// call, capped at [`MAX_BURST`]. The returned closure is move-bound and
+/// stateful; use one per `Session::drive` invocation.
+pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
+  let mut n = 1u64;
+  move |_off| {
+    let cur = n;
+    n = n.saturating_mul(2).min(MAX_BURST);
+    cur
+  }
+}
+
 impl Session {
   pub fn new(source: Arc<dyn Source>, options: CacheOptions) -> Result<Arc<Self>, SessionError> {
     let source_size = source.size();
@@ -130,6 +144,38 @@ impl Session {
     }
   }
 
+  /// Drop every pin except the one covering `next_offset`. Bounds the
+  /// resident-pin count to 1 between iterator yields so the cache's own
+  /// eviction loop is free to maintain `maxResidentChunks`. When
+  /// `next_offset >= source_size` (iteration walked off the end) clears
+  /// everything.
+  pub(crate) fn prune_pins(&self, pinned: &mut HashMap<u64, ChunkRef>, next_offset: u64) {
+    if next_offset >= self.source_size {
+      pinned.clear();
+      return;
+    }
+    let keep = (next_offset / self.chunk_size) * self.chunk_size;
+    pinned.retain(|&off, _| off == keep);
+  }
+
+  /// Frontier-prune followed by a bitmap drain. The order is load-bearing:
+  /// pin releases populate the cache's eviction queue (`unpin` ->
+  /// `evict_to_caps`), then [`sync_bitmap_evictions`](Self::sync_bitmap_evictions)
+  /// reads that queue and applies it to the bitmap store. Doing it the
+  /// other way around drains an empty queue and the bitmaps for chunks
+  /// about to be evicted persist until the next sync - the leak path
+  /// the `bitmap_evict_drains_only_after_unpin` test guards against.
+  ///
+  /// Use at every iterator step where the walker has advanced.
+  pub(crate) fn prune_frontier_and_sync(
+    &self,
+    pinned: &mut HashMap<u64, ChunkRef>,
+    next_offset: u64,
+  ) {
+    self.prune_pins(pinned, next_offset);
+    self.sync_bitmap_evictions();
+  }
+
   /// Open a child iterator over the container starting at `value_start`.
   /// Returns `Ok(None)` if the value isn't an object or array.
   pub async fn enter_container(
@@ -189,15 +235,10 @@ impl Session {
     // chunk fault during a long array walk redoes at most one element on
     // resumption - not the whole walk from the anchor.
     let mut state = ResolveState::new(anchor_start);
-    let mut burst = 1u64;
     self
       .drive(
         pinned,
-        |_| {
-          let n = burst;
-          burst = burst.saturating_mul(2).min(MAX_BURST);
-          n
-        },
+        doubling_burst(),
         |walker| resolve::resolve_step(walker, pointer, &mut state),
       )
       .await
@@ -223,19 +264,14 @@ impl Session {
     from: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<u64, SessionError> {
+    // Adaptive burst: the value's extent is unknown. The `doubling_burst`
+    // schedule (1, 2, 4, ..., MAX_BURST) means short values pay no over-fetch
+    // and long ones converge to near-single-pass once the burst caps out.
     let mut state = SkipState::start(from);
-    let mut burst = 1u64;
     self
       .drive(
         pinned,
-        // Adaptive burst: the value's extent is unknown. Doubling
-        // (1, 2, 4, ..., MAX_BURST) so short values pay no over-fetch and
-        // long ones converge to near-single-pass once the burst caps out.
-        |_| {
-          let n = burst;
-          burst = burst.saturating_mul(2).min(MAX_BURST);
-          n
-        },
+        doubling_burst(),
         |walker| walker::skip_value_step(walker, &mut state),
       )
       .await
@@ -389,6 +425,26 @@ mod tests {
   use crate::cache::CacheOptions;
   use crate::simd::ScanCarry;
   use crate::source::InMemorySource;
+
+  #[test]
+  fn burst_doubling_schedule_caps_at_max_burst() {
+    // The MAX_BURST policy doc (see above) lives in one comment but is
+    // enforced by convention in three drivers (`run_locate`, `skip_value_at`,
+    // `count::children`). Centralising the schedule in `doubling_burst` makes
+    // it directly testable: yields are 1, 2, 4, 8, ..., MAX_BURST, MAX_BURST.
+    let mut b = doubling_burst();
+    let mut expected = 1u64;
+    // The schedule reaches MAX_BURST in log2(MAX_BURST) + 1 = 9 iterations
+    // (1, 2, 4, 8, 16, 32, 64, 128, 256). Iterate well past that to confirm
+    // the cap is sticky.
+    for _ in 0..16 {
+      assert_eq!(b(0), expected, "expected {expected} at this step");
+      expected = expected.saturating_mul(2).min(MAX_BURST);
+    }
+    // Sticky cap: further calls keep yielding MAX_BURST.
+    assert_eq!(b(0), MAX_BURST);
+    assert_eq!(b(0), MAX_BURST);
+  }
 
   #[tokio::test]
   async fn bitmap_evict_drains_only_after_unpin() {

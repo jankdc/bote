@@ -254,11 +254,11 @@ async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(
     // Hand off to the per-yield pruning loop: keep just the chunk at
     // the upcoming `next_offset` so the first yield's read is hot.
     if let Some(w) = &state.walker {
-      prune_pins(session, &mut state.pinned, w.next_offset);
+      session.prune_frontier_and_sync(&mut state.pinned, w.next_offset);
     } else {
       state.pinned.clear();
+      session.sync_bitmap_evictions();
     }
-    session.sync_bitmap_evictions();
   }
   state.initialized = true;
   Ok(())
@@ -276,16 +276,35 @@ async fn release_on_complete<Y>(
   Ok(None)
 }
 
-/// Drop every pin except the one covering `next_offset`. This bounds the
-/// resident-pin count to 1 between yields so the cache's own eviction
-/// loop is free to maintain `maxResidentChunks`.
-fn prune_pins(session: &Session, pinned: &mut HashMap<u64, ChunkRef>, next_offset: u64) {
-  if next_offset >= session.source_size {
-    pinned.clear();
-    return;
+/// The shared core of `CursorScan::next` and `CursorWalk::next`: advance the
+/// walker until it produces a child satisfying `pred` (or `None` on
+/// exhaustion). Per-step pin pruning happens inside the loop on non-matches;
+/// the matched child is returned WITH pins still hot so the caller can
+/// materialize / project its bytes before driving the post-consume prune.
+///
+/// Takes disjoint borrows of `IterState`'s fields rather than `&mut IterState`
+/// so callers can hold concurrent borrows on the other fields (e.g. `select`,
+/// `batch`) across the same `next()` invocation.
+async fn next_matching_child(
+  session: &Session,
+  walker: &mut Children,
+  pinned: &mut HashMap<u64, ChunkRef>,
+  pred: Option<&CompiledPredicate>,
+) -> Result<Option<ChildEntry>, SessionError> {
+  loop {
+    let Some(child) = session.next_child(walker, pinned).await? else {
+      return Ok(None);
+    };
+    let keep = match pred {
+      Some(p) => crate::eval::matches(session, p, child.location().start, pinned).await?,
+      None => true,
+    };
+    if keep {
+      return Ok(Some(child));
+    }
+    // Non-match: never materialized. Prune the frontier, then advance.
+    session.prune_frontier_and_sync(pinned, walker.next_offset);
   }
-  let keep = (next_offset / session.chunk_size) * session.chunk_size;
-  pinned.retain(|&off, _| off == keep);
 }
 
 #[napi(async_iterator)]
@@ -349,30 +368,21 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       let pred = pred.as_ref();
       let select = select.as_ref();
       let batch = *batch;
-      let result = async {
-        // Items are materialized eagerly and accumulated here, so the buffer
-        // (not chunk pins) is the in-flight batch; pins are pruned after each
-        // item. The buffer lives in this `next()` frame, so early termination
-        // via `complete` needs no special handling.
+      // Items are materialized eagerly and accumulated here, so the buffer
+      // (not chunk pins) is the in-flight batch; pins are pruned after each
+      // item. The buffer lives in this `next()` frame, so early termination
+      // via `complete` needs no special handling.
+      let result: Result<Option<serde_json::Value>, SessionError> = async {
         let mut buf: Vec<serde_json::Value> = Vec::new();
         loop {
-          let Some(child) = session.next_child(walker, pinned).await? else {
+          let Some(child) = next_matching_child(&session, walker, pinned, pred).await? else {
             // Exhausted: flush a final partial batch, otherwise end.
             if batch.is_some() && !buf.is_empty() {
               return Ok(Some(serde_json::Value::Array(buf)));
             }
             return Ok(None);
           };
-          let keep = match pred {
-            Some(p) => crate::eval::matches(&session, p, child.location().start, pinned).await?,
-            None => true,
-          };
-          if !keep {
-            // Non-match: never materialized. Prune the frontier, then advance.
-            prune_pins(&session, pinned, walker.next_offset);
-            session.sync_bitmap_evictions();
-            continue;
-          }
+          // Materialize / project the matched child while its pins are still hot.
           let value = match select {
             Some(sel) => {
               crate::eval::project(&session, sel, child.location().start, pinned).await?
@@ -380,8 +390,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             None => session.materialize(child.location(), pinned).await?,
           };
           // The value is owned now; release the chunks that backed it.
-          prune_pins(&session, pinned, walker.next_offset);
-          session.sync_bitmap_evictions();
+          session.prune_frontier_and_sync(pinned, walker.next_offset);
           match batch {
             None => return Ok(Some(value)),
             Some(n) => {
@@ -393,11 +402,12 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
           }
         }
       }
-      .await
-      .map_err(map_err);
-      prune_pins(&session, pinned, walker.next_offset);
-      session.sync_bitmap_evictions();
-      result
+      .await;
+      // End-of-next defensive prune: any error path through the inner block
+      // also lands here so abandoned iterators don't retain pins past the
+      // frontier.
+      session.prune_frontier_and_sync(pinned, walker.next_offset);
+      result.map_err(map_err)
     }
   }
 
@@ -468,28 +478,12 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         return Ok(None);
       };
       let pred = pred.as_ref();
-      let result = async {
-        loop {
-          let Some(child) = session.next_child(walker, pinned).await? else {
-            return Ok::<Option<ChildEntry>, SessionError>(None);
-          };
-          let keep = match pred {
-            Some(p) => crate::eval::matches(&session, p, child.location().start, pinned).await?,
-            None => true,
-          };
-          if keep {
-            return Ok(Some(child));
-          }
-          // Non-match: prune to the frontier, then advance to the next child.
-          prune_pins(&session, pinned, walker.next_offset);
-          session.sync_bitmap_evictions();
-        }
-      }
-      .await
-      .map_err(map_err);
-      prune_pins(&session, pinned, walker.next_offset);
-      session.sync_bitmap_evictions();
-      let entry = result?;
+      let entry = next_matching_child(&session, walker, pinned, pred)
+        .await
+        .map_err(map_err)?;
+      // End-of-next defensive prune: matched and non-matched paths both
+      // converge here (the helper already pruned on non-match).
+      session.prune_frontier_and_sync(pinned, walker.next_offset);
       let Some(child) = entry else {
         return Ok(None);
       };

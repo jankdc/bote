@@ -32,29 +32,22 @@ pub struct ResolveState {
   loop_state: Option<LoopState>,
 }
 
+/// Per-iteration scan state for `step_object` / `step_array`. Flattened
+/// across both container kinds: object scans only read `offset`, array
+/// scans use all three fields (the comma-bitmap fast path needs `index`
+/// and `depth` so a `ChunkMiss` mid-scan can resume without losing them).
 #[derive(Debug, Clone)]
-enum LoopState {
-  Object(ObjectLoopState),
-  Array(ArrayLoopState),
-}
-
-#[derive(Debug, Clone)]
-struct ObjectLoopState {
-  /// Byte offset where the next iteration's key scan begins.
+struct LoopState {
+  kind: ContainerKind,
+  /// Byte offset where the next iteration begins. For objects, a key
+  /// scan; for arrays, an element start.
   offset: u64,
-}
-
-#[derive(Debug, Clone)]
-struct ArrayLoopState {
-  /// Byte offset where the next element scan begins.
-  offset: u64,
-  /// Index of the next element to be considered.
+  /// Array element index considered next. Always 0 for objects.
   index: usize,
-  /// Container-nesting depth at `offset`, relative to the array we entered.
-  /// Used by the comma-bitmap fast path so a `ChunkMiss` mid-scan can
-  /// resume without losing depth state. Always 0 at iteration boundaries
-  /// the slow path sets up; the fast path may commit mid-nesting at a
-  /// chunk boundary.
+  /// Container-nesting depth at `offset`, relative to the container we
+  /// entered. 0 at iteration boundaries the slow path sets up; the
+  /// array fast path may commit mid-nesting at a chunk boundary. Always
+  /// 0 for objects (unused).
   depth: u32,
 }
 
@@ -83,24 +76,23 @@ pub fn resolve_step<P: ChunkBytes + ?Sized>(
       let s = walker.skip_whitespace(state.start)?;
       state.start = s;
       let b = walker.byte_at(s)?.ok_or(TraverseError::UnexpectedEof(s))?;
-      match b {
-        b'{' => {
-          state.loop_state = Some(LoopState::Object(ObjectLoopState { offset: s + 1 }));
-        }
-        b'[' => {
-          state.loop_state = Some(LoopState::Array(ArrayLoopState {
-            offset: s + 1,
-            index: 0,
-            depth: 0,
-          }));
-        }
+      let kind = match b {
+        b'{' => ContainerKind::Object,
+        b'[' => ContainerKind::Array,
         _ => return Ok(None),
-      }
+      };
+      state.loop_state = Some(LoopState {
+        kind,
+        offset: s + 1,
+        index: 0,
+        depth: 0,
+      });
     }
     let token = &tokens[state.token_idx];
-    let descend = match state.loop_state.as_mut().expect("set just above") {
-      LoopState::Object(o) => step_object(walker, token, o)?,
-      LoopState::Array(a) => step_array(walker, token, a)?,
+    let ls = state.loop_state.as_mut().expect("set just above");
+    let descend = match ls.kind {
+      ContainerKind::Object => step_object(walker, token, ls)?,
+      ContainerKind::Array => step_array(walker, token, ls)?,
     };
     match descend {
       Some(value_start) => {
@@ -117,10 +109,12 @@ pub fn resolve_step<P: ChunkBytes + ?Sized>(
 /// Advance an object scan, updating `state.offset` only after each fully
 /// successful iteration. A `ChunkMiss` mid-iteration leaves `state` at the
 /// previous iteration's boundary, so resumption redoes at most one key.
+/// Only reads `state.offset`; the `index`/`depth` fields are unused for
+/// objects (they exist on the shared `LoopState` for arrays' sake).
 fn step_object<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
   target: &str,
-  state: &mut ObjectLoopState,
+  state: &mut LoopState,
 ) -> Result<Option<u64>, TraverseError> {
   loop {
     let iter_offset = state.offset;
@@ -135,27 +129,19 @@ fn step_object<P: ChunkBytes + ?Sized>(
       .next_string_close(offset + 1)?
       .ok_or(TraverseError::UnexpectedEof(offset))?;
 
-    // fast path: JSON escapes (`\n`, `\"`, `\uXXXX`, …) only
-    // ever *shrink* a string's byte count, so if the raw byte span between
-    // the quotes is shorter than the pointer target, no decoding can make
-    // them equal - skip the `read_range` allocation entirely. When lengths
-    // could match, peek for a backslash: with none, the raw bytes equal the
-    // decoded key and we byte-compare; otherwise fall through to a real
-    // serde decode.
+    // Fast path: JSON escapes (`\n`, `\"`, `\uXXXX`, ...) only ever *shrink*
+    // a string's byte count, so if the raw byte span between the quotes is
+    // shorter than the pointer target, no decoding can make them equal -
+    // skip the `read_range` allocation entirely. When lengths could match,
+    // delegate the byte-compare-or-escape-decode to the shared helper.
     let raw_len = (key_close - offset).saturating_sub(1) as usize;
     let target_bytes = target.as_bytes();
     let matches = if raw_len < target_bytes.len() {
       false
     } else {
       let raw = walker.read_range(offset, key_close + 1)?;
-      let inner = &raw[1..raw.len() - 1];
-      if !inner.contains(&b'\\') {
-        inner == target_bytes
-      } else {
-        let decoded: String =
-          serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(offset))?;
-        decoded == target
-      }
+      crate::predicate::quoted_string_eq(&raw, target)
+        .map_err(|()| TraverseError::Malformed(offset))?
     };
     let post_key = walker.skip_whitespace(key_close + 1)?;
     if walker.byte_at(post_key)? != Some(b':') {
@@ -180,7 +166,7 @@ fn step_object<P: ChunkBytes + ?Sized>(
 fn step_array<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
   target: &str,
-  state: &mut ArrayLoopState,
+  state: &mut LoopState,
 ) -> Result<Option<u64>, TraverseError> {
   let Some(target_index) = token_as_array_index(target) else {
     return Ok(None);
@@ -251,15 +237,16 @@ pub enum ContainerKind {
 
 /// Cursor over the children of an object or array value. Created from
 /// [`enter_container`] and advanced one entry at a time by [`next_child`].
+///
+/// After exhaustion `next_offset` points AT the closing `}`/`]` (not past it),
+/// so repeated `next_child` calls re-run `skip_whitespace` -> `byte_at` -> see
+/// the close byte -> return `None` idempotently. No explicit `done` flag is
+/// needed.
 #[derive(Debug, Clone)]
 pub struct Children {
   pub kind: ContainerKind,
   pub next_offset: u64,
   pub index: usize,
-  /// Set once the container's closing `}`/`]` has been reached, so repeated
-  /// `next_child` calls return `None` idempotently instead of trying to parse
-  /// whatever follows the container (which would be malformed).
-  done: bool,
 }
 
 /// One yielded child of a container.
@@ -309,27 +296,21 @@ pub fn enter_container<P: ChunkBytes + ?Sized>(
     kind,
     next_offset: open + 1,
     index: 0,
-    done: false,
   }))
 }
 
 /// Advance `cw` to the next child entry. Returns `Ok(None)` when the
-/// container is exhausted (closing `}` or `]` reached).
+/// container is exhausted (closing `}` or `]` reached). Idempotent: after
+/// exhaustion, `cw.next_offset` is left AT the close byte, so subsequent
+/// calls re-detect it and keep returning `None`.
 pub fn next_child<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
   cw: &mut Children,
 ) -> Result<Option<ChildEntry>, TraverseError> {
-  if cw.done {
-    return Ok(None);
+  match cw.kind {
+    ContainerKind::Object => next_object_member(walker, cw),
+    ContainerKind::Array => next_array_element(walker, cw),
   }
-  let entry = match cw.kind {
-    ContainerKind::Object => next_object_member(walker, cw)?,
-    ContainerKind::Array => next_array_element(walker, cw)?,
-  };
-  if entry.is_none() {
-    cw.done = true;
-  }
-  Ok(entry)
 }
 
 fn next_object_member<P: ChunkBytes + ?Sized>(
@@ -340,7 +321,8 @@ fn next_object_member<P: ChunkBytes + ?Sized>(
   match walker.byte_at(offset)? {
     None => return Err(TraverseError::UnexpectedEof(offset)),
     Some(b'}') => {
-      cw.next_offset = offset + 1;
+      // Park AT the close so a repeated call re-detects it (idempotent).
+      cw.next_offset = offset;
       return Ok(None);
     }
     Some(b'"') => {}
@@ -380,7 +362,8 @@ fn next_array_element<P: ChunkBytes + ?Sized>(
   match walker.byte_at(offset)? {
     None => return Err(TraverseError::UnexpectedEof(offset)),
     Some(b']') => {
-      cw.next_offset = offset + 1;
+      // Park AT the close so a repeated call re-detects it (idempotent).
+      cw.next_offset = offset;
       return Ok(None);
     }
     _ => {}

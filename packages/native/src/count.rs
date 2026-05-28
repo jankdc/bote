@@ -16,7 +16,7 @@ use crate::eval;
 use crate::pointer::JsonPointer;
 use crate::predicate::CompiledPredicate;
 use crate::resolve::Children;
-use crate::session::{Query, Session, SessionError, MAX_BURST};
+use crate::session::{doubling_burst, Query, Session, SessionError};
 use crate::walker::{AdvanceCommas, ChunkBytes, TraverseError, Walker};
 
 /// Count the children of the container `pointer_str` resolves to, with no
@@ -56,15 +56,10 @@ async fn children(
   pinned: &mut HashMap<u64, ChunkRef>,
 ) -> Result<u64, SessionError> {
   let mut state = CountState::new(start);
-  let mut burst = 1u64;
   session
     .drive(
       pinned,
-      |_| {
-        let n = burst;
-        burst = burst.saturating_mul(2).min(MAX_BURST);
-        n
-      },
+      doubling_burst(),
       |walker| count_step(walker, &mut state),
     )
     .await

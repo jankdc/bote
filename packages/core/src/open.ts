@@ -150,7 +150,12 @@ function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
 }
 
 function serializeSelect(select: string | Record<string, string>): string {
-  return typeof select === 'string' ? JSON.stringify({ one: select }) : JSON.stringify({ map: Object.entries(select) })
+  if (typeof select === 'string') return JSON.stringify({ one: select })
+  const entries = Object.entries(select)
+  if (entries.length === 0) {
+    throw new RangeError('scan: select must have at least one field')
+  }
+  return JSON.stringify({ map: entries })
 }
 
 function wrap(native: NativeCursor): Cursor {

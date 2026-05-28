@@ -59,19 +59,15 @@ impl Literal {
 }
 
 /// One flattened predicate leaf: a sub-pointer plus how to test the value it
-/// resolves to.
+/// resolves to. `op == None` is the `exists` test (the value's bytes are
+/// never read); `op == Some(_)` is a comparison against `literal`.
 #[derive(Debug, Clone)]
 pub struct Leaf {
   pointer: JsonPointer,
-  test: LeafTest,
-}
-
-#[derive(Debug, Clone)]
-enum LeafTest {
-  /// Pointer must resolve to *some* value (the value itself is never read).
-  Exists,
-  /// Pointer must resolve and the value must satisfy `op` against `literal`.
-  Compare { op: CompareOp, literal: Literal },
+  op: Option<CompareOp>,
+  /// Comparison literal. A sentinel [`Literal::Null`] is stored when `op`
+  /// is `None`, keeping the struct uniform; it's ignored in that case.
+  literal: Literal,
 }
 
 impl Leaf {
@@ -83,16 +79,17 @@ impl Leaf {
   /// Whether evaluating this leaf needs the resolved value's bytes. `false`
   /// for `exists` (presence is enough), so the caller can skip the read.
   pub fn needs_value(&self) -> bool {
-    matches!(self.test, LeafTest::Compare { .. })
+    self.op.is_some()
   }
 
-  /// Test a `Compare` leaf against the resolved value's exact `[start, end)`
-  /// bytes (including the surrounding quotes for strings). Only meaningful
-  /// when [`Leaf::needs_value`] is true; returns `true` for `exists`.
+  /// Test the resolved value's exact `[start, end)` bytes (including the
+  /// surrounding quotes for strings) against this leaf's comparison. Only
+  /// meaningful when [`Leaf::needs_value`] is true; returns `true` for
+  /// `exists`.
   pub fn satisfied_by(&self, value_raw: &[u8]) -> bool {
-    match &self.test {
-      LeafTest::Exists => true,
-      LeafTest::Compare { op, literal } => compare(*op, literal, value_raw),
+    match self.op {
+      None => true,
+      Some(op) => compare(op, &self.literal, value_raw),
     }
   }
 }
@@ -131,32 +128,26 @@ impl CompiledPredicate {
 /// Flatten the IR tree into a leaf list. `and` nodes recurse and append; an
 /// empty `and` flattens to zero leaves (a vacuously-true predicate).
 fn flatten(ir: PredicateIr, out: &mut Vec<Leaf>) -> Result<(), PredicateError> {
-  let (pointer, test) = match ir {
+  let (pointer, op, literal) = match ir {
     PredicateIr::And { c } => {
       for child in c {
         flatten(child, out)?;
       }
       return Ok(());
     }
-    PredicateIr::Exists { p } => (p, LeafTest::Exists),
-    PredicateIr::Eq { p, v } => (p, cmp_test(CompareOp::Eq, v)),
-    PredicateIr::Lt { p, v } => (p, cmp_test(CompareOp::Lt, v)),
-    PredicateIr::Lte { p, v } => (p, cmp_test(CompareOp::Lte, v)),
-    PredicateIr::Gt { p, v } => (p, cmp_test(CompareOp::Gt, v)),
-    PredicateIr::Gte { p, v } => (p, cmp_test(CompareOp::Gte, v)),
+    PredicateIr::Exists { p } => (p, None, Literal::Null),
+    PredicateIr::Eq { p, v } => (p, Some(CompareOp::Eq), Literal::from_json(v)),
+    PredicateIr::Lt { p, v } => (p, Some(CompareOp::Lt), Literal::from_json(v)),
+    PredicateIr::Lte { p, v } => (p, Some(CompareOp::Lte), Literal::from_json(v)),
+    PredicateIr::Gt { p, v } => (p, Some(CompareOp::Gt), Literal::from_json(v)),
+    PredicateIr::Gte { p, v } => (p, Some(CompareOp::Gte), Literal::from_json(v)),
   };
   out.push(Leaf {
     pointer: JsonPointer::parse(&pointer)?,
-    test,
+    op,
+    literal,
   });
   Ok(())
-}
-
-fn cmp_test(op: CompareOp, v: serde_json::Value) -> LeafTest {
-  LeafTest::Compare {
-    op,
-    literal: Literal::from_json(v),
-  }
 }
 
 /// Compare a resolved value's raw bytes against a literal. Total and
@@ -210,23 +201,41 @@ fn parse_number(value_raw: &[u8]) -> Option<f64> {
   serde_json::from_slice::<f64>(value_raw).ok()
 }
 
-/// Byte-compare a JSON string value to a literal, decoding only when escapes
-/// are present (mirrors `resolve::step_object`'s key compare). `value_raw`
-/// includes the surrounding quotes; any non-string value is never equal.
-fn string_eq(value_raw: &[u8], lit: &str) -> bool {
+/// Compare the raw bytes of a JSON-encoded string value (including the
+/// surrounding quotes) to a Rust `&str`. The hot path - interior contains
+/// no backslash - byte-compares directly; escaped strings invoke
+/// `serde_json::from_slice` to decode.
+///
+/// Returns `Err(())` only when an escaped interior fails to decode (i.e.
+/// the JSON is malformed). Callers in resolve context map this to
+/// [`TraverseError::Malformed`](crate::walker::TraverseError::Malformed)
+/// to surface bad data; predicate context treats it as a non-match (via
+/// [`string_eq`] below).
+///
+/// Shared with [`crate::resolve::step_object`]'s key comparison so the two
+/// sites stay in sync on escape-decoding semantics.
+pub(crate) fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
   if value_raw.len() < 2 || value_raw[0] != b'"' || value_raw[value_raw.len() - 1] != b'"' {
-    return false;
+    return Ok(false);
   }
   let interior = &value_raw[1..value_raw.len() - 1];
   if !interior.contains(&b'\\') {
-    interior == lit.as_bytes()
-  } else {
-    decode_string(value_raw).map(|s| s == lit).unwrap_or(false)
+    return Ok(interior == target.as_bytes());
   }
+  serde_json::from_slice::<String>(value_raw)
+    .map(|s| s == target)
+    .map_err(|_| ())
+}
+
+/// Byte-compare a JSON string value to a literal. Wraps [`quoted_string_eq`]
+/// and folds malformed escapes into `false` (predicates are total).
+fn string_eq(value_raw: &[u8], lit: &str) -> bool {
+  quoted_string_eq(value_raw, lit).unwrap_or(false)
 }
 
 /// Decode a JSON string value (handling escapes) to an owned `String`, or
-/// `None` if the value isn't a JSON string.
+/// `None` if the value isn't a JSON string. Used by the ordering compares
+/// (`lt`/`gt`/...) which need the decoded `String` to call `str::cmp`.
 fn decode_string(value_raw: &[u8]) -> Option<String> {
   if value_raw.first() != Some(&b'"') {
     return None;
