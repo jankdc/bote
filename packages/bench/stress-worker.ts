@@ -13,12 +13,14 @@ if (!path) {
 
 await using cursor = await open(fromFile(path))
 let count = 0
-for await (const name of cursor.scan('/items', { select: '/name' })) {
-  // Touch the resolved value so the optimizer can't elide the read.
-  if (typeof name !== 'string' || !name.startsWith('item-')) {
-    console.error(`stress-worker: unexpected value at item ${count}: ${JSON.stringify(name)}`)
-    process.exit(2)
+for await (const batch of cursor.scan('/items', { select: '/name' })) {
+  for (const name of batch) {
+    // Touch the resolved value so the optimizer can't elide the read.
+    if (typeof name !== 'string' || !name.startsWith('item-')) {
+      console.error(`stress-worker: unexpected value at item ${count}: ${JSON.stringify(name)}`)
+      process.exit(2)
+    }
+    count += 1
   }
-  count += 1
 }
 console.error(`stress-worker: scanned ${count} items OK`)

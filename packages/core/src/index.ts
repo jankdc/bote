@@ -9,6 +9,7 @@ export { ValidationError, type StandardSchemaV1 } from './validate.ts'
 export { pointer, type PointerLiteral, type Pointer } from './pointer.ts'
 export {
   open,
+  DEFAULT_SCAN_BATCH,
   type Cursor,
   type RootCursor,
   type ScanKey,

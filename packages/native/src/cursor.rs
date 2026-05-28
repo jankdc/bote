@@ -45,12 +45,17 @@ pub struct CacheStats {
 pub struct ScanArgs {
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
-  /// Yield arrays of up to `batch` items instead of one at a time.
+  /// Override the batch size. The facade always resolves a value here; `None`
+  /// or sub-1 values fall back to `DEFAULT_SCAN_BATCH` defensively.
   pub batch: Option<f64>,
   /// Yield `[key, value]` tuples instead of bare values. The key is a string
   /// for object members and a number for array elements.
   pub with_key: Option<bool>,
 }
+
+/// Defensive fallback if the facade omits `batch`. The TS layer normally
+/// resolves the user-facing default (also 1000) before the call lands here.
+const DEFAULT_SCAN_BATCH: usize = 1000;
 
 #[napi]
 pub struct Cursor {
@@ -131,11 +136,15 @@ impl Cursor {
     let (select_ir, batch, with_key) = match options {
       Some(o) => (
         o.select_ir,
-        // The facade rejects batch <= 0; guard here too (sub-1 -> no batching).
-        o.batch.filter(|b| *b >= 1.0).map(|b| b as usize),
+        // The facade validates and resolves the default; this only guards
+        // against missing/bad values reaching us anyway.
+        o.batch
+          .filter(|b| *b >= 1.0)
+          .map(|b| b as usize)
+          .unwrap_or(DEFAULT_SCAN_BATCH),
         o.with_key.unwrap_or(false),
       ),
-      None => (None, None, false),
+      None => (None, DEFAULT_SCAN_BATCH, false),
     };
     CursorScan::new(
       self.session.clone(),
@@ -185,8 +194,9 @@ struct IterState {
   select_ir: Option<String>,
   /// Compiled `select` projection (scan only). `None` yields the whole child.
   select: Option<CompiledSelect>,
-  /// Batch size (scan only). `Some(n)` yields arrays of up to `n` items.
-  batch: Option<usize>,
+  /// Batch size (scan only). Each yield is an array of up to `batch` items.
+  /// Walk passes 0 here and never reads the field.
+  batch: usize,
   /// Scan-only: wrap each yielded value in a `[key, value]` array.
   with_key: bool,
 }
@@ -196,7 +206,7 @@ impl IterState {
     pointer: String,
     anchor_start: u64,
     select_ir: Option<String>,
-    batch: Option<usize>,
+    batch: usize,
     with_key: bool,
   ) -> Self {
     Self {
@@ -265,7 +275,7 @@ impl CursorScan {
     pointer: String,
     anchor_start: u64,
     select_ir: Option<String>,
-    batch: Option<usize>,
+    batch: usize,
     with_key: bool,
   ) -> Self {
     Self {
@@ -328,14 +338,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       // item. The buffer lives in this `next()` frame, so early termination
       // via `complete` needs no special handling.
       let result: Result<Option<serde_json::Value>, SessionError> = async {
-        let mut buf: Vec<serde_json::Value> = Vec::new();
+        let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
         loop {
           let Some(child) = session.next_child(walker, pinned).await? else {
             // Exhausted: flush a final partial batch, otherwise end.
-            if batch.is_some() && !buf.is_empty() {
-              return Ok(Some(serde_json::Value::Array(buf)));
+            if buf.is_empty() {
+              return Ok(None);
             }
-            return Ok(None);
+            return Ok(Some(serde_json::Value::Array(buf)));
           };
           // Capture the key before its bytes get released by materialization.
           let key = if with_key {
@@ -356,14 +366,9 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             Some(k) => serde_json::Value::Array(vec![k, value]),
             None => value,
           };
-          match batch {
-            None => return Ok(Some(item)),
-            Some(n) => {
-              buf.push(item);
-              if buf.len() >= n {
-                return Ok(Some(serde_json::Value::Array(buf)));
-              }
-            }
+          buf.push(item);
+          if buf.len() >= batch {
+            return Ok(Some(serde_json::Value::Array(buf)));
           }
         }
       }
@@ -399,7 +404,7 @@ impl CursorWalk {
         pointer,
         anchor_start,
         None,
-        None,
+        0,
         false,
       ))),
     }
@@ -560,7 +565,10 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, false);
+    // batch=1 so each next() yields after one child, mirroring the old
+    // single-item path the rest of this test exercises (frontier pin held
+    // between yields).
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 1, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -579,7 +587,7 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_batch_early_break_releases() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8), false);
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 8, false);
     // Pull one batch, then early-terminate via complete() (the break path).
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
@@ -601,7 +609,7 @@ mod tests {
       "/items".into(),
       0,
       Some(r#"{"one":"/total"}"#.to_string()),
-      Some(64),
+      64,
       false,
     );
     while it.next(None).await.unwrap().is_some() {
@@ -623,7 +631,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8), false);
+      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, 8, false);
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       abandoned.push(it); // keep alive: no Drop, no GC

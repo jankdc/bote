@@ -56,13 +56,15 @@ async function heapPlateauPhase(path: string): Promise<HeapSample[]> {
   const baseline = process.memoryUsage().heapUsed
   const samples: HeapSample[] = []
   let seen = 0
-  for await (const _name of cursor.scan('/items', { select: '/name' })) {
-    seen += 1
-    if (seen % HEAP_SAMPLE_EVERY === 0) {
-      await collect()
-      samples.push({ itemsSeen: seen, heapDelta: process.memoryUsage().heapUsed - baseline })
+  outer: for await (const batch of cursor.scan('/items', { select: '/name' })) {
+    for (let i = 0; i < batch.length; i++) {
+      seen += 1
+      if (seen % HEAP_SAMPLE_EVERY === 0) {
+        await collect()
+        samples.push({ itemsSeen: seen, heapDelta: process.memoryUsage().heapUsed - baseline })
+      }
+      if (seen >= HEAP_ITEMS) break outer
     }
-    if (seen >= HEAP_ITEMS) break
   }
   await collect()
   samples.push({ itemsSeen: seen, heapDelta: process.memoryUsage().heapUsed - baseline })

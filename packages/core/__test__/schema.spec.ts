@@ -110,12 +110,19 @@ test('schema_has_true_only_when_valid', async (t) => {
 })
 
 test('schema_scan_yields_valid_then_throws', async (t) => {
+  // `batch: 1` exposes per-item yield ordering: the iterator emits each
+  // user before validating the next, so Alice and Bob land in `seen`
+  // before user 2 trips the validator. With the default batch all three
+  // would be grouped into one batch and the throw would drop that
+  // in-progress batch entirely - see `schema_scan_default_batch_throw_loses_partial`.
   const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
   t.after(() => cursor.close())
   const seen: User[] = []
   await assert.rejects(
     async () => {
-      for await (const u of cursor.scan('/users', userSchema())) seen.push(u)
+      for await (const batch of cursor.scan('/users', { schema: userSchema(), batch: 1 })) {
+        for (const u of batch) seen.push(u)
+      }
     },
     (err: unknown) => {
       assert.ok(err instanceof ValidationError)
@@ -129,12 +136,29 @@ test('schema_scan_yields_valid_then_throws', async (t) => {
   )
 })
 
+test('schema_scan_default_batch_throw_loses_partial', async (t) => {
+  // Documents the new tradeoff: when validation throws mid-batch, the
+  // batch is never yielded - earlier-validated items in the same batch
+  // are not observable. Users who need per-item observability set `batch: 1`.
+  const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
+  t.after(() => cursor.close())
+  const seen: User[] = []
+  await assert.rejects(async () => {
+    for await (const batch of cursor.scan('/users', userSchema())) {
+      for (const u of batch) seen.push(u)
+    }
+  }, ValidationError)
+  assert.deepEqual(seen, [])
+})
+
 test('schema_scan_completes_when_all_valid', async (t) => {
   const doc = JSON.stringify({ tags: ['a', 'b', 'c'] })
   const cursor = await open(memorySource(enc(doc)))
   t.after(() => cursor.close())
   const collected: string[] = []
-  for await (const tag of cursor.scan('/tags', asyncStringSchema())) collected.push(tag)
+  for await (const batch of cursor.scan('/tags', asyncStringSchema())) {
+    for (const tag of batch) collected.push(tag)
+  }
   assert.deepEqual(collected, ['a', 'b', 'c'])
 })
 
@@ -142,7 +166,9 @@ test('schema_scan_skip_filters_invalid', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const row of db.scan('/rows', { schema: numberN(), onInvalid: 'skip' })) ns.push(row.n)
+  for await (const batch of db.scan('/rows', { schema: numberN(), onInvalid: 'skip' })) {
+    for (const row of batch) ns.push(row.n)
+  }
   assert.deepEqual(ns, [1, 2, 4]) // the invalid row is dropped, not thrown
 })
 
@@ -150,7 +176,9 @@ test('schema_scan_skip_async_validator', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const row of db.scan('/rows', { schema: asyncNumberN(), onInvalid: 'skip' })) ns.push(row.n)
+  for await (const batch of db.scan('/rows', { schema: asyncNumberN(), onInvalid: 'skip' })) {
+    for (const row of batch) ns.push(row.n)
+  }
   assert.deepEqual(ns, [1, 2, 4])
 })
 
@@ -160,8 +188,8 @@ test('schema_scan_select_skip_validates_projected_shape', async (t) => {
   const db = await open(memorySource(enc(doc)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const row of db.scan('/rows', { select: { n: '/v' }, schema: numberN(), onInvalid: 'skip' })) {
-    ns.push(row.n)
+  for await (const batch of db.scan('/rows', { select: { n: '/v' }, schema: numberN(), onInvalid: 'skip' })) {
+    for (const row of batch) ns.push(row.n)
   }
   assert.deepEqual(ns, [1, 3])
 })
@@ -203,8 +231,8 @@ test('schema_scan_validates_all_yields', async (t) => {
     },
   }
   const ids: string[] = []
-  for await (const order of db.scan('/orders', { schema: orderId })) {
-    ids.push(order.id)
+  for await (const batch of db.scan('/orders', { schema: orderId })) {
+    for (const order of batch) ids.push(order.id)
   }
   assert.deepEqual(ids, ['a', 'b', 'c', 'd', 'e'])
 })

@@ -72,8 +72,9 @@ async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<
       return n
     }
     case 'scan': {
+      // `.scan` always yields batches; count items, not yields.
       let n = 0
-      for await (const _value of cursor.scan(pointer)) n += 1
+      for await (const batch of cursor.scan(pointer)) n += batch.length
       return n
     }
   }

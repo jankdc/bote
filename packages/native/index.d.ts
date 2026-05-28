@@ -83,7 +83,10 @@ export interface ReadArgs {
 export interface ScanArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /** Yield arrays of up to `batch` items instead of one at a time. */
+  /**
+   * Override the batch size. The facade always resolves a value here; `None`
+   * or sub-1 values fall back to `DEFAULT_SCAN_BATCH` defensively.
+   */
   batch?: number
   /**
    * Yield `[key, value]` tuples instead of bare values. The key is a string

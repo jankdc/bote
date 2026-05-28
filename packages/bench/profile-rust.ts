@@ -29,8 +29,8 @@ const PAD_WIDTH = 7
 
 async function scanAll(cursor: Cursor): Promise<number> {
   let count = 0
-  for await (const _name of cursor.scan('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
-    count += 1
+  for await (const batch of cursor.scan('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
+    count += batch.length
   }
   return count
 }

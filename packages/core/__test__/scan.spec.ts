@@ -1,67 +1,89 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, DEFAULT_SCAN_BATCH } from '../src/index.ts'
 import { memorySource, enc, ORDERS } from './fixtures.ts'
 
 // scan_ iteration over containers, plus the select (projection) and batch options.
-// schema-validated scans live in schema.spec.ts.
+// schema-validated scans live in schema.spec.ts. Every yield from `.scan` is a
+// batch (array) - that contract is exercised explicitly in scan_default_*
+// below and assumed by the flatten helper used by the rest.
+
+async function collect<T>(it: AsyncIterable<T[]>): Promise<T[]> {
+  const out: T[] = []
+  for await (const batch of it) for (const v of batch) out.push(v)
+  return out
+}
 
 test('scan_array_elements', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
-  const values: unknown[] = []
-  for await (const v of cursor.scan('/xs')) values.push(v)
-  assert.deepEqual(values, [10, 20, 30, 40])
+  assert.deepEqual(await collect(cursor.scan('/xs')), [10, 20, 30, 40])
 })
 
 test('scan_object_members', async () => {
   const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
-  const values: unknown[] = []
-  for await (const v of cursor.scan('/o')) values.push(v)
+  const values = await collect(cursor.scan('/o'))
   assert.deepEqual(values.sort(), [1, 2, 3])
 })
 
-test('scan_non_container_yields_nothing', async () => {
+test('scan_non_container_yields_no_batches', async () => {
+  // Empty result means *zero* yields, not a single empty batch - keeps the
+  // happy-path consumer (`for await (const b of ...) for (const v of b)`)
+  // from observing a meaningless `[]`.
   const cursor = await open(memorySource(enc('{"scalar":42}')))
-  const values: unknown[] = []
-  for await (const v of cursor.scan('/scalar')) values.push(v)
-  assert.deepEqual(values, [])
+  const batches: unknown[][] = []
+  for await (const b of cursor.scan('/scalar')) batches.push(b)
+  assert.deepEqual(batches, [])
+})
+
+test('scan_default_batch_size_is_DEFAULT_SCAN_BATCH', async () => {
+  // 2500 items at the default 1000-item batch -> sizes [1000, 1000, 500].
+  // Also asserts the exported constant matches the value the native side
+  // actually uses, so a mismatch surfaces here instead of a perf cliff.
+  assert.equal(DEFAULT_SCAN_BATCH, 1000)
+  const items = Array.from({ length: 2500 }, (_, i) => i)
+  const cursor = await open(memorySource(enc(JSON.stringify({ xs: items }))))
+  const sizes: number[] = []
+  for await (const batch of cursor.scan('/xs')) sizes.push(batch.length)
+  assert.deepEqual(sizes, [1000, 1000, 500])
+})
+
+test('scan_default_batch_flushes_partial_final_batch', async () => {
+  // Fewer items than the default batch: one yield, exactly that many items.
+  const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
+  const batches: number[][] = []
+  for await (const batch of cursor.scan('/xs')) batches.push(batch as number[])
+  assert.deepEqual(batches, [[10, 20, 30, 40]])
 })
 
 test('scan_select_single_pointer_yields_bare_values', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const totals: number[] = []
-  for await (const total of db.scan('/orders', { select: '/total' })) totals.push(total as number)
+  const totals = await collect(db.scan('/orders', { select: '/total' }))
   assert.deepEqual(totals, [120, 80, 50, 200, 999])
 })
 
 test('scan_select_map_yields_objects_in_declared_order', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows: Array<Record<string, unknown>> = []
-  for await (const row of db.scan('/orders', { select: { total: '/total', country: '/customer/country' } })) {
-    rows.push(row as Record<string, unknown>)
-  }
+  const rows = await collect(
+    db.scan('/orders', { select: { total: '/total', country: '/customer/country' } }),
+  )
   assert.deepEqual(rows[0], { total: 120, country: 'US' })
-  assert.deepEqual(Object.keys(rows[0]), ['total', 'country'])
+  assert.deepEqual(Object.keys(rows[0] as object), ['total', 'country'])
 })
 
 test('scan_select_missing_sub_pointer_yields_null', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const vals: unknown[] = []
-  for await (const v of db.scan('/orders', { select: '/nope' })) vals.push(v)
-  assert.deepEqual(vals, [null, null, null, null, null])
+  assert.deepEqual(await collect(db.scan('/orders', { select: '/nope' })), [null, null, null, null, null])
 })
 
-test('scan_batch_yields_arrays', async (t) => {
+test('scan_batch_override_yields_arrays', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const sizes: number[] = []
-  for await (const batch of db.scan('/orders', { select: '/id', batch: 3 })) {
-    sizes.push((batch as unknown[]).length)
-  }
+  for await (const batch of db.scan('/orders', { select: '/id', batch: 3 })) sizes.push(batch.length)
   assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
 })
 
@@ -104,8 +126,7 @@ test('scan_select_rejects_empty_map', async (t) => {
 
 test('scan_withKey_array_yields_index_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
-  const pairs: Array<[unknown, unknown]> = []
-  for await (const pair of cursor.scan('/xs', { withKey: true })) pairs.push(pair as [unknown, unknown])
+  const pairs = await collect(cursor.scan('/xs', { withKey: true }))
   assert.deepEqual(pairs, [
     [0, 10],
     [1, 20],
@@ -115,8 +136,7 @@ test('scan_withKey_array_yields_index_value_tuples', async () => {
 
 test('scan_withKey_object_yields_member_key_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2}}')))
-  const pairs: Array<[unknown, unknown]> = []
-  for await (const pair of cursor.scan('/o', { withKey: true })) pairs.push(pair as [unknown, unknown])
+  const pairs = await collect(cursor.scan('/o', { withKey: true }))
   assert.equal(pairs.length, 2)
   assert.deepEqual(
     pairs.find(([k]) => k === 'a'),
@@ -131,10 +151,7 @@ test('scan_withKey_object_yields_member_key_value_tuples', async () => {
 test('scan_withKey_with_select_yields_key_and_projected_value', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows: Array<[unknown, unknown]> = []
-  for await (const row of db.scan('/orders', { select: '/total', withKey: true })) {
-    rows.push(row as [unknown, unknown])
-  }
+  const rows = await collect(db.scan('/orders', { select: '/total', withKey: true }))
   assert.deepEqual(rows, [
     [0, 120],
     [1, 80],
@@ -147,19 +164,18 @@ test('scan_withKey_with_select_yields_key_and_projected_value', async (t) => {
 test('scan_withKey_with_select_map_yields_key_and_object', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows: Array<[unknown, Record<string, unknown>]> = []
-  for await (const row of db.scan('/orders', {
-    select: { total: '/total', country: '/customer/country' },
-    withKey: true,
-  })) {
-    rows.push(row as [unknown, Record<string, unknown>])
-  }
+  const rows = await collect(
+    db.scan('/orders', {
+      select: { total: '/total', country: '/customer/country' },
+      withKey: true,
+    }),
+  )
   assert.equal(rows.length, 5)
   assert.deepEqual(rows[0], [0, { total: 120, country: 'US' }])
   assert.deepEqual(rows[4], [4, { total: 999, country: 'US' }])
 })
 
-test('scan_withKey_batch_yields_arrays_of_tuples', async (t) => {
+test('scan_withKey_batch_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const batches: Array<Array<[unknown, unknown]>> = []
@@ -194,14 +210,13 @@ test('scan_withKey_with_schema_validates_value_part_only', async (t) => {
   } as const
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows: Array<[unknown, number]> = []
-  for await (const row of db.scan('/orders', {
-    select: '/total',
-    withKey: true,
-    schema: numberSchema,
-  })) {
-    rows.push(row)
-  }
+  const rows = await collect(
+    db.scan('/orders', {
+      select: '/total',
+      withKey: true,
+      schema: numberSchema,
+    }),
+  )
   assert.deepEqual(rows, [
     [0, 1200],
     [1, 800],
@@ -217,7 +232,7 @@ test('scan_select_batch_under_tight_budget_stays_bounded', async (t) => {
   const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256), { maxResidentChunks: 16 })
   t.after(() => db.close())
   let count = 0
-  for await (const batch of db.scan('', { select: '/id', batch: 256 })) count += (batch as unknown[]).length
+  for await (const batch of db.scan('', { select: '/id', batch: 256 })) count += batch.length
   assert.equal(count, 4000)
   const stats = db.cacheStats()
   assert.ok(stats.residentBytes + stats.bitmapBytes <= stats.ceilingBytes)

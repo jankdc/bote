@@ -53,9 +53,11 @@ async function scanSampling(cursor: Cursor, items: number): Promise<Reading> {
   }
 
   let seen = 0
-  for await (const _name of cursor.scan('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
-    seen += 1
-    if (seen % SAMPLE_EVERY === 0) sample()
+  for await (const batch of cursor.scan('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
+    for (let i = 0; i < batch.length; i++) {
+      seen += 1
+      if (seen % SAMPLE_EVERY === 0) sample()
+    }
   }
   sample()
   if (seen !== items) throw new Error(`scanned ${seen} of ${items} items`)

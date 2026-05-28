@@ -26,19 +26,18 @@ const user0: unknown = await cursor.get('/1234/users/0')
 // for .get and .scan, you can supply a validator
 const user1: User = await cursor.get('/1234/users/1', User)
 
-// if you want to sweep a list of values
-for await (const user of cursor.scan('/1234/users')) {
-  console.log(user)
+for await (const batch of cursor.scan('/1234/users')) {
+  for (const user of batch) console.log(user)
 }
 
 // project a single field per child without materializing the whole thing
-for await (const id of cursor.scan('/1234/users', { select: '/id' })) {
-  console.log({ id })
+for await (const batch of cursor.scan('/1234/users', { select: '/id' })) {
+  for (const id of batch) console.log({ id })
 }
 
 // add `withKey: true` to get the index (or member name) alongside the value
-for await (const [i, id] of cursor.scan('/1234/users', { select: '/id', withKey: true })) {
-  console.log({ i, id })
+for await (const batch of cursor.scan('/1234/users', { select: '/id', withKey: true })) {
+  for (const [i, id] of batch) console.log({ i, id })
 }
 
 // for open-ended per-child work (conditional reads, recursive descent, nested

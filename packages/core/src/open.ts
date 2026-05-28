@@ -21,11 +21,19 @@ type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : nev
 /** Member name for object children, zero-based index for array elements. */
 export type ScanKey = string | number
 
+/** Default batch size for `.scan()`. Each yield is an array of up to this many
+ *  items; the final batch may be smaller. Sized to amortize the per-yield
+ *  FFI/promise overhead across enough items that compute, not protocol, sets
+ *  the cost. Override via `ScanOptions.batch`. */
+export const DEFAULT_SCAN_BATCH = 1000
+
 export interface ScanOptions {
   /** Project each child before it crosses: a sub-pointer yields the bare value;
    *  a map yields an object of those sub-values. */
   select?: string | Record<string, string>
-  /** Yield arrays of up to `batch` items instead of one at a time.. */
+  /** Override the default batch size of {@link DEFAULT_SCAN_BATCH}. Must be a
+   *  positive integer. Larger amortizes FFI overhead further at the cost of
+   *  per-yield latency and transient JS-heap residency. */
   batch?: number
   /** Validate each yielded item against this schema (after `select`). */
   schema?: StandardSchemaV1
@@ -51,42 +59,30 @@ export interface Cursor {
 
   count<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<number>
 
-  scan<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown>
+  /** Stream children of `pointer` as batches. Each yield is an array of up to
+   *  {@link DEFAULT_SCAN_BATCH} items (override with `options.batch`); the
+   *  final batch may be smaller. Empty containers yield nothing. Batching is
+   *  not optional — single-item iteration cannot amortize the FFI overhead. */
+  scan<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown[]>
   scan<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     schema: Sch,
-  ): AsyncIterable<InferOutput<Sch>>
-  // withKey: true × (schema, batch) — must precede the non-withKey overloads
-  // below so TS resolves the tuple-yielding signatures first.
-  scan<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { withKey: true; schema: Sch; batch: number },
-  ): AsyncIterable<[ScanKey, InferOutput<Sch>][]>
+  ): AsyncIterable<InferOutput<Sch>[]>
+  // withKey overloads precede the non-withKey ones so TS resolves the
+  // tuple-yielding signatures first.
   scan<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { withKey: true; schema: Sch },
-  ): AsyncIterable<[ScanKey, InferOutput<Sch>]>
-  scan<S extends string>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { withKey: true; batch: number },
-  ): AsyncIterable<[ScanKey, unknown][]>
+  ): AsyncIterable<[ScanKey, InferOutput<Sch>][]>
   scan<S extends string>(
     pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { withKey: true },
-  ): AsyncIterable<[ScanKey, unknown]>
-  scan<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { schema: Sch; batch: number },
-  ): AsyncIterable<InferOutput<Sch>[]>
+  ): AsyncIterable<[ScanKey, unknown][]>
   scan<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { schema: Sch },
-  ): AsyncIterable<InferOutput<Sch>>
-  scan<S extends string>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: ScanOptions & { batch: number },
-  ): AsyncIterable<unknown[]>
-  scan<S extends string>(pointer: PointerLiteral<S> | Pointer, options: ScanOptions): AsyncIterable<unknown>
+  ): AsyncIterable<InferOutput<Sch>[]>
+  scan<S extends string>(pointer: PointerLiteral<S> | Pointer, options: ScanOptions): AsyncIterable<unknown[]>
 
   /** Stream child positions as cursors. */
   walk<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<Cursor>
@@ -197,36 +193,22 @@ function wrap(native: NativeCursor): Cursor {
     count(pointer: string): Promise<number> {
       return native.count(pointer)
     },
-    scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown> {
+    scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown[]> {
       const { schema, select, batch, onInvalid, withKey } = normalizeScanArgs(optionsOrSchema)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
         throw new RangeError(`scan: batch must be a positive integer, got ${batch}`)
       }
+      const resolvedBatch = batch ?? DEFAULT_SCAN_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const hasArgs = selectIr !== undefined || batch !== undefined || withKey === true
-      const inner = native.scan(pointer, hasArgs ? { selectIr, batch, withKey } : undefined)
-      if (!schema) return inner
+      const inner = native.scan(pointer, { selectIr, batch: resolvedBatch, withKey })
+      if (!schema) return inner as AsyncIterable<unknown[]>
       const policy = onInvalid ?? 'throw'
 
-      // The native side has already shaped each item: `value` when `!withKey`,
-      // `[key, value]` when `withKey`. Schema validation only ever runs against
-      // the value half; the key is passed through unchanged.
-      if (batch === undefined) {
-        return {
-          async *[Symbol.asyncIterator]() {
-            let i = 0
-            for await (const v of inner) {
-              const value = withKey ? (v as [ScanKey, unknown])[1] : v
-              const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
-              if ('skip' in result) continue
-              yield withKey ? [(v as [ScanKey, unknown])[0], result.value] : result.value
-            }
-          },
-        }
-      }
-
-      // Batched: each native yield is an array; validate (or skip) every
-      // element. With `onInvalid: 'skip'` a batch may shrink or come back empty.
+      // The native side has already shaped each item inside the batch:
+      // `value` when `!withKey`, `[key, value]` when `withKey`. Schema
+      // validation only ever runs against the value half; the key passes
+      // through unchanged. With `onInvalid: 'skip'` a batch may shrink or
+      // come back empty.
       return {
         async *[Symbol.asyncIterator]() {
           let i = 0
