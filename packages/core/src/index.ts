@@ -12,7 +12,7 @@ export {
   DEFAULT_ITER_BATCH,
   type Cursor,
   type RootCursor,
-  type IterKey,
+  type IterIndex as IterKey,
   type IterOptions,
   type SessionOptions,
 } from './open.ts'

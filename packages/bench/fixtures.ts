@@ -135,7 +135,9 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
 }
 
 // `{"k_000000":"v_000000",...}` - wide fanout off the root, no nesting.
-// Children are leaf strings, so `walk-get-name` doesn't apply.
+// Children are leaf strings, so `walk-get-name` doesn't apply. `iter-all`
+// doesn't apply either: iter is array-only, and the root here is an object
+// (use walk-all for the keyed-traversal throughput cell).
 function buildWideFlat(keys: number, padWidth: number): DocFixture {
   const parts: string[] = ['{']
   for (let i = 0; i < keys; i++) {
@@ -153,7 +155,7 @@ function buildWideFlat(keys: number, padWidth: number): DocFixture {
       mid: key(Math.floor(keys / 2)),
       deep: key(keys - 1),
       'walk-all': '',
-      'iter-all': '',
+      'iter-all': null,
       'walk-get-name': null,
       'walk-first': '',
     },

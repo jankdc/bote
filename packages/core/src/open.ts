@@ -18,8 +18,8 @@ export interface SessionOptions {
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
-/** Member name for object children, zero-based index for array elements. */
-export type IterKey = string | number
+/** Zero-based index of an array element. */
+export type IterIndex = number
 
 /** Default batch size for `.iter()`. Each yield is an array of up to this many
  *  items; the final batch may be smaller. Sized to amortize the per-yield
@@ -39,9 +39,11 @@ export interface IterOptions {
   schema?: StandardSchemaV1
   /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them, turning the schema into a filter. */
   onInvalid?: 'throw' | 'skip'
-  /** Yield `[key, value]` tuples instead of bare values. Key is the member
-   *  name for object children, or the zero-based index for array elements. */
-  withKey?: boolean
+  /** Yield `[index, value]` tuples instead of bare values, where `index` is
+   *  the zero-based position of the element in the source array. Useful when
+   *  a `schema` with `onInvalid: 'skip'` has dropped items and the caller
+   *  needs the original index. */
+  withIndex?: boolean
 }
 
 export interface Cursor {
@@ -59,10 +61,6 @@ export interface Cursor {
 
   count<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<number>
 
-  /** Stream children of `pointer` as batches. Each yield is an array of up to
-   *  {@link DEFAULT_ITER_BATCH} items (override with `options.batch`); the
-   *  final batch may be smaller. Empty containers yield nothing. Batching is
-   *  not optional — single-item iteration cannot amortize the FFI overhead. */
   iter<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown[]>
   iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
@@ -73,11 +71,11 @@ export interface Cursor {
   iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     options: IterOptions & { withKey: true; schema: Sch },
-  ): AsyncIterable<[IterKey, InferOutput<Sch>][]>
+  ): AsyncIterable<[IterIndex, InferOutput<Sch>][]>
   iter<S extends string>(
     pointer: PointerLiteral<S> | Pointer,
     options: IterOptions & { withKey: true },
-  ): AsyncIterable<[IterKey, unknown][]>
+  ): AsyncIterable<[IterIndex, unknown][]>
   iter<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     options: IterOptions & { schema: Sch },
@@ -162,7 +160,7 @@ function normalizeIterArgs(arg?: StandardSchemaV1 | IterOptions): {
     select: options.select,
     batch: options.batch,
     onInvalid: options.onInvalid,
-    withKey: options.withKey,
+    withKey: options.withIndex,
   }
 }
 
@@ -215,10 +213,10 @@ function wrap(native: NativeCursor): Cursor {
           for await (const b of inner) {
             const out: unknown[] = []
             for (const v of b as unknown[]) {
-              const value = withKey ? (v as [IterKey, unknown])[1] : v
+              const value = withKey ? (v as [IterIndex, unknown])[1] : v
               const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
               if ('skip' in result) continue
-              out.push(withKey ? [(v as [IterKey, unknown])[0], result.value] : result.value)
+              out.push(withKey ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
             }
             yield out
           }

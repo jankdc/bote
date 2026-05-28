@@ -20,10 +20,14 @@ test('iter_array_elements', async () => {
   assert.deepEqual(await collect(cursor.iter('/xs')), [10, 20, 30, 40])
 })
 
-test('iter_object_members', async () => {
+test('iter_on_object_target_throws', async () => {
   const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
-  const values = await collect(cursor.iter('/o'))
-  assert.deepEqual(values.sort(), [1, 2, 3])
+  await assert.rejects(
+    (async () => {
+      for await (const _ of cursor.iter('/o')) void _
+    })(),
+    /walk\(\)/,
+  )
 })
 
 test('iter_non_container_yields_no_batches', async () => {
@@ -126,7 +130,7 @@ test('iter_select_rejects_empty_map', async (t) => {
 
 test('iter_withKey_array_yields_index_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
-  const pairs = await collect(cursor.iter('/xs', { withKey: true }))
+  const pairs = await collect(cursor.iter('/xs', { withIndex: true }))
   assert.deepEqual(pairs, [
     [0, 10],
     [1, 20],
@@ -134,24 +138,10 @@ test('iter_withKey_array_yields_index_value_tuples', async () => {
   ])
 })
 
-test('iter_withKey_object_yields_member_key_value_tuples', async () => {
-  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2}}')))
-  const pairs = await collect(cursor.iter('/o', { withKey: true }))
-  assert.equal(pairs.length, 2)
-  assert.deepEqual(
-    pairs.find(([k]) => k === 'a'),
-    ['a', 1],
-  )
-  assert.deepEqual(
-    pairs.find(([k]) => k === 'b'),
-    ['b', 2],
-  )
-})
-
 test('iter_withKey_with_select_yields_key_and_projected_value', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows = await collect(db.iter('/orders', { select: '/total', withKey: true }))
+  const rows = await collect(db.iter('/orders', { select: '/total', withIndex: true }))
   assert.deepEqual(rows, [
     [0, 120],
     [1, 80],
@@ -167,7 +157,7 @@ test('iter_withKey_with_select_map_yields_key_and_object', async (t) => {
   const rows = await collect(
     db.iter('/orders', {
       select: { total: '/total', country: '/customer/country' },
-      withKey: true,
+      withIndex: true,
     }),
   )
   assert.equal(rows.length, 5)
@@ -179,7 +169,7 @@ test('iter_withKey_batch_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const batches: Array<Array<[unknown, unknown]>> = []
-  for await (const batch of db.iter('/orders', { select: '/total', withKey: true, batch: 3 })) {
+  for await (const batch of db.iter('/orders', { select: '/total', withIndex: true, batch: 3 })) {
     batches.push(batch as Array<[unknown, unknown]>)
   }
   assert.deepEqual(batches, [
@@ -213,7 +203,7 @@ test('iter_withKey_with_schema_validates_value_part_only', async (t) => {
   const rows = await collect(
     db.iter('/orders', {
       select: '/total',
-      withKey: true,
+      withIndex: true,
       schema: numberSchema,
     }),
   )

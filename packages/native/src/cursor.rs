@@ -18,7 +18,7 @@ use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
 use crate::cache::ChunkRef;
-use crate::resolve::{ChildEntry, Children, ValueLocation};
+use crate::resolve::{ChildEntry, Children, ContainerKind, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
@@ -318,6 +318,16 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         initialize_walker(&session, &mut guard)
           .await
           .map_err(map_err)?;
+        if let Some(w) = guard.walker.as_ref() {
+          if w.kind == ContainerKind::Object {
+            guard.pinned.clear();
+            guard.walker = None;
+            session.sync_bitmap_evictions();
+            return Err(NapiError::from_reason(
+              "iter target is an object; use walk() to iterate object members".to_string(),
+            ));
+          }
+        }
       }
       let IterState {
         walker,
@@ -619,6 +629,21 @@ mod tests {
         "resident {total} exceeded ceiling {ceiling} while batching"
       );
     }
+  }
+
+  #[tokio::test]
+  async fn iter_on_object_target_throws() {
+    let s = session(50, 256, 4);
+    let mut it = CursorIter::new(s.clone(), "".into(), 0, None, 8, false);
+    let err = it.next(None).await.expect_err("object target must throw");
+    assert!(
+      err.reason.contains("use walk()"),
+      "error should steer the caller to walk(), got: {}",
+      err.reason
+    );
+    let guard = it.state.lock().await;
+    assert!(guard.pinned.is_empty(), "gate must release pins");
+    assert!(guard.walker.is_none(), "gate must drop the walker");
   }
 
   #[tokio::test]
