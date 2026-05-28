@@ -1,7 +1,6 @@
 import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
 
 import type { PointerLiteral, Pointer } from './pointer.ts'
-import { serializePredicate, type Predicate } from './predicate.ts'
 import type { Source, SourceReader } from './sources.ts'
 import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts'
 
@@ -20,8 +19,6 @@ export interface SessionOptions {
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
 export interface ScanOptions {
-  /** Filter items natively here. */
-  where?: Predicate
   /** Project each child before it crosses: a sub-pointer yields the bare value;
    *  a map yields an object of those sub-values. */
   select?: string | Record<string, string>
@@ -46,7 +43,7 @@ export interface Cursor {
     schema: Sch,
   ): Promise<InferOutput<Sch>>
 
-  count<S extends string>(pointer: PointerLiteral<S> | Pointer, options?: { where?: Predicate }): Promise<number>
+  count<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<number>
 
   scan<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown>
   scan<S extends string, Sch extends StandardSchemaV1>(
@@ -67,8 +64,8 @@ export interface Cursor {
   ): AsyncIterable<unknown[]>
   scan<S extends string>(pointer: PointerLiteral<S> | Pointer, options: ScanOptions): AsyncIterable<unknown>
 
-  /** Stream child positions as cursors. With `where`, yields only matches - the filter runs natively, so a sparse descent crosses once per match. */
-  walk<S extends string>(pointer: PointerLiteral<S> | Pointer, options?: { where?: Predicate }): AsyncIterable<Cursor>
+  /** Stream child positions as cursors. */
+  walk<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<Cursor>
 
   /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
   cacheStats(): CacheStats
@@ -132,7 +129,6 @@ async function closeReader(reader: SourceReader): Promise<void> {
 
 function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
   schema?: StandardSchemaV1
-  where?: Predicate
   select?: string | Record<string, string>
   batch?: number
   onInvalid?: 'throw' | 'skip'
@@ -142,7 +138,6 @@ function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
   const options = arg as ScanOptions
   return {
     schema: options.schema,
-    where: options.where,
     select: options.select,
     batch: options.batch,
     onInvalid: options.onInvalid,
@@ -173,18 +168,17 @@ function wrap(native: NativeCursor): Cursor {
       const value = await native.get(pointer)
       return schema ? runStandardSchema(schema, value, pointer) : value
     },
-    count(pointer: string, options?: { where?: Predicate }): Promise<number> {
-      return native.count(pointer, options?.where ? serializePredicate(options.where) : undefined)
+    count(pointer: string): Promise<number> {
+      return native.count(pointer)
     },
     scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown> {
-      const { schema, where, select, batch, onInvalid } = normalizeScanArgs(optionsOrSchema)
+      const { schema, select, batch, onInvalid } = normalizeScanArgs(optionsOrSchema)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
         throw new RangeError(`scan: batch must be a positive integer, got ${batch}`)
       }
-      const whereIr = where ? serializePredicate(where) : undefined
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const hasArgs = whereIr !== undefined || selectIr !== undefined || batch !== undefined
-      const inner = native.scan(pointer, hasArgs ? { whereIr, selectIr, batch } : undefined)
+      const hasArgs = selectIr !== undefined || batch !== undefined
+      const inner = native.scan(pointer, hasArgs ? { selectIr, batch } : undefined)
       if (!schema) return inner
       const policy = onInvalid ?? 'throw'
 
@@ -218,11 +212,10 @@ function wrap(native: NativeCursor): Cursor {
         },
       }
     },
-    walk(pointer: string, options?: { where?: Predicate }) {
-      const whereIr = options?.where ? serializePredicate(options.where) : undefined
+    walk(pointer: string) {
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const child of native.walk(pointer, whereIr)) {
+          for await (const child of native.walk(pointer)) {
             yield wrap(child)
           }
         },

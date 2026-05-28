@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, pointer, eq } from '../src/index.ts'
+import { open, pointer } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // JSON Pointer (RFC 6901) resolution semantics observed through get_/has_: tilde
@@ -98,8 +98,6 @@ test('pointer_constructor_brands_dynamic_pointers', async (t) => {
   const idx: number = 1
   const dynamic: string = `/users/${idx}/name`
   assert.equal(await cursor.get(pointer(dynamic)), 'Bob')
-  // Works anywhere a pointer is accepted, including predicate constructors.
-  assert.equal(await cursor.count('/users', { where: eq(pointer(`/name`), 'Alice') }), 1)
 })
 
 test('pointer_constructor_defers_validation_to_native_parser', async (t) => {

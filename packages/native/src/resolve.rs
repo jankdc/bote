@@ -140,8 +140,7 @@ fn step_object<P: ChunkBytes + ?Sized>(
       false
     } else {
       let raw = walker.read_range(offset, key_close + 1)?;
-      crate::predicate::quoted_string_eq(&raw, target)
-        .map_err(|()| TraverseError::Malformed(offset))?
+      quoted_string_eq(&raw, target).map_err(|()| TraverseError::Malformed(offset))?
     };
     let post_key = walker.skip_whitespace(key_close + 1)?;
     if walker.byte_at(post_key)? != Some(b':') {
@@ -159,6 +158,25 @@ fn step_object<P: ChunkBytes + ?Sized>(
       _ => return Err(TraverseError::Malformed(after)),
     }
   }
+}
+
+/// Compare the raw bytes of a JSON-encoded string value (including the
+/// surrounding quotes) to a Rust `&str`. The hot path - interior contains no
+/// backslash - byte-compares directly; escaped strings invoke
+/// `serde_json::from_slice` to decode. Returns `Err(())` when an escaped
+/// interior fails to decode (i.e. the JSON is malformed); the caller maps
+/// that to [`TraverseError::Malformed`].
+fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
+  if value_raw.len() < 2 || value_raw[0] != b'"' || value_raw[value_raw.len() - 1] != b'"' {
+    return Ok(false);
+  }
+  let interior = &value_raw[1..value_raw.len() - 1];
+  if !interior.contains(&b'\\') {
+    return Ok(interior == target.as_bytes());
+  }
+  serde_json::from_slice::<String>(value_raw)
+    .map(|s| s == target)
+    .map_err(|_| ())
 }
 
 /// Advance an array scan, updating `state.offset` / `state.index` only

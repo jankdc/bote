@@ -3,10 +3,10 @@
 export declare class Cursor {
   has(pointer: string): Promise<boolean>
   get(pointer: string): Promise<unknown>
-  count(pointer: string, whereIr?: string | undefined | null): Promise<number>
+  count(pointer: string): Promise<number>
   get key(): string | number | null
   scan(pointer: string, options?: ScanArgs | undefined | null): CursorScan
-  walk(pointer: string, whereIr?: string | undefined | null): CursorWalk
+  walk(pointer: string): CursorWalk
   cacheStats(): CacheStats
 }
 
@@ -77,12 +77,10 @@ export interface ReadArgs {
 }
 
 /**
- * Options for `scan`. A `#[napi(object)]` so the facade can grow it (select,
- * batch, ...) without changing the method's arity. `whereIr` is the
- * serialized predicate IR (see `predicate.rs`); `None` means no filter.
+ * Options for `scan`. A `#[napi(object)]` so the facade can grow it
+ * without changing the method's arity.
  */
 export interface ScanArgs {
-  whereIr?: string
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
   /** Yield arrays of up to `batch` items instead of one at a time. */

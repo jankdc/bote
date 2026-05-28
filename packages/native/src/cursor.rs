@@ -18,25 +18,12 @@ use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
 use crate::cache::ChunkRef;
-use crate::predicate::CompiledPredicate;
 use crate::resolve::{ChildEntry, Children, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
 fn map_err(e: SessionError) -> NapiError {
   NapiError::from_reason(e.to_string())
-}
-
-/// Compile an optional serialized predicate IR. A malformed predicate errors
-/// here - for `count`, as the promise rejection; `scan`/`walk` defer parsing
-/// to the first `next()` (see `initialize_walker`).
-fn parse_where(where_ir: Option<&str>) -> napi::Result<Option<CompiledPredicate>> {
-  match where_ir {
-    None => Ok(None),
-    Some(json) => CompiledPredicate::parse(json)
-      .map(Some)
-      .map_err(|e| NapiError::from_reason(e.to_string())),
-  }
 }
 
 /// Live snapshot of the session's chunk-cache occupancy. The cache is
@@ -52,12 +39,10 @@ pub struct CacheStats {
   pub ceiling_bytes: f64,
 }
 
-/// Options for `scan`. A `#[napi(object)]` so the facade can grow it (select,
-/// batch, ...) without changing the method's arity. `whereIr` is the
-/// serialized predicate IR (see `predicate.rs`); `None` means no filter.
+/// Options for `scan`. A `#[napi(object)]` so the facade can grow it
+/// without changing the method's arity.
 #[napi(object)]
 pub struct ScanArgs {
-  pub where_ir: Option<String>,
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
   /// Yield arrays of up to `batch` items instead of one at a time.
@@ -122,9 +107,8 @@ impl Cursor {
   }
 
   #[napi]
-  pub async fn count(&self, pointer: String, where_ir: Option<String>) -> napi::Result<f64> {
-    let pred = parse_where(where_ir.as_deref())?;
-    crate::count::at(&self.session, &pointer, self.anchor_start(), pred.as_ref())
+  pub async fn count(&self, pointer: String) -> napi::Result<f64> {
+    crate::count::at(&self.session, &pointer, self.anchor_start())
       .await
       .map(|n| n as f64)
       .map_err(map_err)
@@ -141,28 +125,26 @@ impl Cursor {
 
   #[napi]
   pub fn scan(&self, pointer: String, options: Option<ScanArgs>) -> CursorScan {
-    let (where_ir, select_ir, batch) = match options {
+    let (select_ir, batch) = match options {
       Some(o) => (
-        o.where_ir,
         o.select_ir,
         // The facade rejects batch <= 0; guard here too (sub-1 -> no batching).
         o.batch.filter(|b| *b >= 1.0).map(|b| b as usize),
       ),
-      None => (None, None, None),
+      None => (None, None),
     };
     CursorScan::new(
       self.session.clone(),
       pointer,
       self.anchor_start(),
-      where_ir,
       select_ir,
       batch,
     )
   }
 
   #[napi]
-  pub fn walk(&self, pointer: String, where_ir: Option<String>) -> CursorWalk {
-    CursorWalk::new(self.session.clone(), pointer, self.anchor_start(), where_ir)
+  pub fn walk(&self, pointer: String) -> CursorWalk {
+    CursorWalk::new(self.session.clone(), pointer, self.anchor_start())
   }
 
   #[napi]
@@ -194,12 +176,6 @@ struct IterState {
   /// resident-pin count to 1, so the cap contract that motivated the
   /// original per-yield map is preserved.
   pinned: HashMap<u64, ChunkRef>,
-  /// Serialized predicate IR (the `where` filter), parsed lazily into `pred`
-  /// on first `next()` so a malformed predicate surfaces there.
-  where_ir: Option<String>,
-  /// Compiled `where` filter. `None` yields every child; `Some` yields only
-  /// matches - rejected children are never materialized.
-  pred: Option<CompiledPredicate>,
   /// Serialized projection IR, parsed lazily into `select` on first `next()`.
   select_ir: Option<String>,
   /// Compiled `select` projection (scan only). `None` yields the whole child.
@@ -212,7 +188,6 @@ impl IterState {
   fn new(
     pointer: String,
     anchor_start: u64,
-    where_ir: Option<String>,
     select_ir: Option<String>,
     batch: Option<usize>,
   ) -> Self {
@@ -222,8 +197,6 @@ impl IterState {
       initialized: false,
       walker: None,
       pinned: HashMap::new(),
-      where_ir,
-      pred: None,
       select_ir,
       select: None,
       batch,
@@ -232,13 +205,8 @@ impl IterState {
 }
 
 async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(), SessionError> {
-  // Compile the `where` predicate once, on first use. A malformed predicate
+  // Compile the `select` projection once, on first use. A malformed projection
   // (bad JSON or sub-pointer) surfaces here, as this first `next()`'s error.
-  let pred = match state.where_ir.as_deref() {
-    Some(json) => Some(CompiledPredicate::parse(json)?),
-    None => None,
-  };
-  state.pred = pred;
   let select = match state.select_ir.as_deref() {
     Some(json) => Some(CompiledSelect::parse(json)?),
     None => None,
@@ -276,37 +244,6 @@ async fn release_on_complete<Y>(
   Ok(None)
 }
 
-/// The shared core of `CursorScan::next` and `CursorWalk::next`: advance the
-/// walker until it produces a child satisfying `pred` (or `None` on
-/// exhaustion). Per-step pin pruning happens inside the loop on non-matches;
-/// the matched child is returned WITH pins still hot so the caller can
-/// materialize / project its bytes before driving the post-consume prune.
-///
-/// Takes disjoint borrows of `IterState`'s fields rather than `&mut IterState`
-/// so callers can hold concurrent borrows on the other fields (e.g. `select`,
-/// `batch`) across the same `next()` invocation.
-async fn next_matching_child(
-  session: &Session,
-  walker: &mut Children,
-  pinned: &mut HashMap<u64, ChunkRef>,
-  pred: Option<&CompiledPredicate>,
-) -> Result<Option<ChildEntry>, SessionError> {
-  loop {
-    let Some(child) = session.next_child(walker, pinned).await? else {
-      return Ok(None);
-    };
-    let keep = match pred {
-      Some(p) => crate::eval::matches(session, p, child.location().start, pinned).await?,
-      None => true,
-    };
-    if keep {
-      return Ok(Some(child));
-    }
-    // Non-match: never materialized. Prune the frontier, then advance.
-    session.prune_frontier_and_sync(pinned, walker.next_offset);
-  }
-}
-
 #[napi(async_iterator)]
 pub struct CursorScan {
   session: Arc<Session>,
@@ -318,7 +255,6 @@ impl CursorScan {
     session: Arc<Session>,
     pointer: String,
     anchor_start: u64,
-    where_ir: Option<String>,
     select_ir: Option<String>,
     batch: Option<usize>,
   ) -> Self {
@@ -327,7 +263,6 @@ impl CursorScan {
       state: Arc::new(AsyncMutex::new(IterState::new(
         pointer,
         anchor_start,
-        where_ir,
         select_ir,
         batch,
       ))),
@@ -357,7 +292,6 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       let IterState {
         walker,
         pinned,
-        pred,
         select,
         batch,
         ..
@@ -365,7 +299,6 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       let Some(walker) = walker.as_mut() else {
         return Ok(None);
       };
-      let pred = pred.as_ref();
       let select = select.as_ref();
       let batch = *batch;
       // Items are materialized eagerly and accumulated here, so the buffer
@@ -375,14 +308,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       let result: Result<Option<serde_json::Value>, SessionError> = async {
         let mut buf: Vec<serde_json::Value> = Vec::new();
         loop {
-          let Some(child) = next_matching_child(&session, walker, pinned, pred).await? else {
+          let Some(child) = session.next_child(walker, pinned).await? else {
             // Exhausted: flush a final partial batch, otherwise end.
             if batch.is_some() && !buf.is_empty() {
               return Ok(Some(serde_json::Value::Array(buf)));
             }
             return Ok(None);
           };
-          // Materialize / project the matched child while its pins are still hot.
+          // Materialize / project the child while its pins are still hot.
           let value = match select {
             Some(sel) => {
               crate::eval::project(&session, sel, child.location().start, pinned).await?
@@ -426,19 +359,13 @@ pub struct CursorWalk {
 }
 
 impl CursorWalk {
-  fn new(
-    session: Arc<Session>,
-    pointer: String,
-    anchor_start: u64,
-    where_ir: Option<String>,
-  ) -> Self {
+  fn new(session: Arc<Session>, pointer: String, anchor_start: u64) -> Self {
     Self {
       session,
       // walk navigates positions, so it never projects or batches.
       state: Arc::new(AsyncMutex::new(IterState::new(
         pointer,
         anchor_start,
-        where_ir,
         None,
         None,
       ))),
@@ -469,20 +396,17 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
           .map_err(map_err)?;
       }
       let IterState {
-        walker,
-        pinned,
-        pred,
-        ..
+        walker, pinned, ..
       } = &mut *guard;
       let Some(walker) = walker.as_mut() else {
         return Ok(None);
       };
-      let pred = pred.as_ref();
-      let entry = next_matching_child(&session, walker, pinned, pred)
+      let entry = session
+        .next_child(walker, pinned)
         .await
         .map_err(map_err)?;
-      // End-of-next defensive prune: matched and non-matched paths both
-      // converge here (the helper already pruned on non-match).
+      // End-of-next defensive prune: matched and exhausted paths both
+      // converge here.
       session.prune_frontier_and_sync(pinned, walker.next_offset);
       let Some(child) = entry else {
         return Ok(None);
@@ -539,7 +463,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, None);
+    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
     // Advance a few elements so the walker holds a live frontier pin.
     for _ in 0..3 {
       assert!(w.next(None).await.unwrap().is_some());
@@ -563,7 +487,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_safe_when_child_escapes() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, None);
+    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
     let child = w.next(None).await.unwrap().expect("first child");
 
     w.complete(None).await.unwrap();
@@ -582,7 +506,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, None);
+      let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
       // Partial walk, then early-terminate via complete() (the break path).
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
@@ -603,7 +527,7 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, None);
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -622,7 +546,7 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_batch_early_break_releases() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, Some(8));
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8));
     // Pull one batch, then early-terminate via complete() (the break path).
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
@@ -643,7 +567,6 @@ mod tests {
       s.clone(),
       "/items".into(),
       0,
-      None,
       Some(r#"{"one":"/total"}"#.to_string()),
       Some(64),
     );
@@ -666,7 +589,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, Some(8));
+      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8));
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       abandoned.push(it); // keep alive: no Drop, no GC
@@ -681,46 +604,5 @@ mod tests {
         abandoned.len(),
       );
     }
-  }
-
-  #[tokio::test]
-  async fn pred_compile_error_surfaces_on_first_scan_next() {
-    // Lazy-compile contract: `scan` and `walk` defer predicate parsing to the
-    // first `next()` so the error surfaces there (not on the sync constructor).
-    // `count` parses eagerly because its sync entry point returns a Promise -
-    // see `cursor.rs:32` (`parse_where`) versus `:234` (`initialize_walker`).
-    let s = session(5, 256, 4);
-    let mut it = CursorScan::new(
-      s.clone(),
-      "/items".into(),
-      0,
-      Some("not json".into()),
-      None,
-      None,
-    );
-    let err = it.next(None).await.unwrap_err();
-    let msg = err.to_string();
-    assert!(
-      msg.contains("invalid"),
-      "expected invalid-predicate error, got: {msg}",
-    );
-  }
-
-  #[tokio::test]
-  async fn pred_compile_error_surfaces_on_first_walk_next() {
-    let s = session(5, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0, Some("not json".into()));
-    // `.err().expect(..)` rather than `.unwrap_err()` because `Cursor` doesn't
-    // impl `Debug` and `unwrap_err` needs the Ok type printable.
-    let err = w
-      .next(None)
-      .await
-      .err()
-      .expect("expected error from malformed predicate");
-    let msg = err.to_string();
-    assert!(
-      msg.contains("invalid"),
-      "expected invalid-predicate error, got: {msg}",
-    );
   }
 }

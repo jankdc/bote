@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, eq, gte, and } from '../src/index.ts'
+import { open } from '../src/index.ts'
 import { memorySource, enc, ORDERS } from './fixtures.ts'
 
 // scan_ iteration over containers, plus the select (projection) and batch options.
-// where-filtered scans live in predicate.spec.ts; schema-validated scans in schema.spec.ts.
+// schema-validated scans live in schema.spec.ts.
 
 test('scan_array_elements', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
@@ -65,13 +65,12 @@ test('scan_batch_yields_arrays', async (t) => {
   assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
 })
 
-test('scan_where_select_batch_combined_byCountry_fold', async (t) => {
-  // The doc's headline example: filter natively, project, batch, fold in JS.
+test('scan_select_batch_combined_byCountry_fold', async (t) => {
+  // The doc's headline example: project, batch, fold in JS.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const byCountry = new Map<string, number>()
   for await (const rows of db.scan('/orders', {
-    where: and(eq('/status', 'paid'), gte('/total', 100)),
     select: { total: '/total', country: '/customer/country' },
     batch: 1024,
   })) {
@@ -79,10 +78,11 @@ test('scan_where_select_batch_combined_byCountry_fold', async (t) => {
       byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + row.total)
     }
   }
-  // paid AND total >= 100 -> a (US, 120), d (DE, 200)
-  assert.equal(byCountry.get('US'), 120)
+  // All 5 orders: a/c/e -> US (120+50+999=1169), b -> GB (80), d -> DE (200).
+  assert.equal(byCountry.get('US'), 1169)
+  assert.equal(byCountry.get('GB'), 80)
   assert.equal(byCountry.get('DE'), 200)
-  assert.equal(byCountry.size, 2)
+  assert.equal(byCountry.size, 3)
 })
 
 test('scan_batch_rejects_non_positive', async (t) => {

@@ -5,8 +5,7 @@ import { open } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // walk_ yields a subcursor per child: its `key` reflects the parent step and its
-// relative gets resolve against the child anchor. where-filtered walks live in
-// predicate.spec.ts.
+// relative gets resolve against the child anchor.
 
 test('walk_object_yields_keys_and_values', async () => {
   const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))

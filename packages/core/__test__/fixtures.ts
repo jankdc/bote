@@ -30,8 +30,7 @@ export const USERS_WITH_INVALID = JSON.stringify({
 // schema fails at `/rows/2`.
 export const MIXED = JSON.stringify({ rows: [{ n: 1 }, { n: 2 }, { n: 'bad' }, { n: 4 }] })
 
-// Orders used by the where-filtering and scan select/batch tests. `e` is the
-// lone `pending` row and the only total over the others' range.
+// Orders used by the scan select/batch tests.
 export const ORDERS = JSON.stringify({
   orders: [
     { id: 'a', status: 'paid', total: 120, customer: { country: 'US' } },

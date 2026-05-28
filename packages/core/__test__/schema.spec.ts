@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, eq, ValidationError, type StandardSchemaV1 } from '../src/index.ts'
+import { open, ValidationError, type StandardSchemaV1 } from '../src/index.ts'
 import { memorySource, enc, USERS_WITH_INVALID, MIXED, ORDERS } from './fixtures.ts'
 
 // Standard Schema validation across get / has / scan, including onInvalid, batch,
-// select, and where combinations. USERS_WITH_INVALID fails at /users/2; MIXED at /rows/2.
+// and select combinations. USERS_WITH_INVALID fails at /users/2; MIXED at /rows/2.
 
 type User = { id: number; name: string; tags: string[] }
 
@@ -187,8 +187,8 @@ test('schema_scan_batch_throws_on_invalid', async (t) => {
   }, ValidationError)
 })
 
-test('schema_scan_where_validates_filtered_yields', async (t) => {
-  // where filters natively first; the schema then validates only the yielded matches.
+test('schema_scan_validates_all_yields', async (t) => {
+  // The schema validates every yielded child.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const orderId: StandardSchemaV1<unknown, { id: string }> = {
@@ -203,8 +203,8 @@ test('schema_scan_where_validates_filtered_yields', async (t) => {
     },
   }
   const ids: string[] = []
-  for await (const order of db.scan('/orders', { where: eq('/status', 'paid'), schema: orderId })) {
+  for await (const order of db.scan('/orders', { schema: orderId })) {
     ids.push(order.id)
   }
-  assert.deepEqual(ids, ['a', 'c', 'd'])
+  assert.deepEqual(ids, ['a', 'b', 'c', 'd', 'e'])
 })

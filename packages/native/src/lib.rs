@@ -14,7 +14,6 @@ mod walker;
 
 // evaluation
 mod pointer;
-mod predicate;
 mod resolve;
 mod select;
 

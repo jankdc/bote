@@ -1,32 +1,25 @@
 //! Child-counting for `count`. Sits above [`Session`] in the operations
 //! layer alongside [`crate::eval`].
 //!
-//! [`at`] is the entry point. Two strategies, both bounded in document size:
-//!   - [`children`]: no predicate - a depth-0 comma popcount over the
-//!     container bytes (the same scan `step_array` uses), driven by the
-//!     resumable [`count_step`] state machine.
-//!   - [`matching`]: with a predicate - resolve each child and test it via
-//!     [`crate::eval::matches`], advancing one element at a time so pins
-//!     prune behind the frontier.
+//! [`at`] is the entry point. Strategy is a depth-0 comma popcount over the
+//! container bytes (the same scan `step_array` uses), driven by the resumable
+//! [`count_step`] state machine - bounded in document size regardless of
+//! container size.
 
 use std::collections::HashMap;
 
 use crate::cache::ChunkRef;
-use crate::eval;
 use crate::pointer::JsonPointer;
-use crate::predicate::CompiledPredicate;
-use crate::resolve::Children;
 use crate::session::{doubling_burst, Query, Session, SessionError};
 use crate::walker::{AdvanceCommas, ChunkBytes, TraverseError, Walker};
 
 /// Count the children of the container `pointer_str` resolves to, with no
 /// materialization. A missing pointer or a non-container value is `0` (total
-/// and non-throwing, like `has`). With `pred`, only matching children count.
+/// and non-throwing, like `has`).
 pub async fn at(
   session: &Session,
   pointer_str: &str,
   anchor_start: u64,
-  pred: Option<&CompiledPredicate>,
 ) -> Result<u64, SessionError> {
   let pointer = JsonPointer::parse(pointer_str)?;
   let mut q = Query::new(session);
@@ -42,10 +35,7 @@ pub async fn at(
   let Some(cw) = session.enter_container(start, &mut q.pinned).await? else {
     return Ok(0); // not an object or array
   };
-  match pred {
-    None => children(session, cw.next_offset, &mut q.pinned).await,
-    Some(p) => matching(session, cw, p, &mut q.pinned).await,
-  }
+  children(session, cw.next_offset, &mut q.pinned).await
 }
 
 /// Count the children of the container whose body starts at `start` (the byte
@@ -63,27 +53,6 @@ async fn children(
       |walker| count_step(walker, &mut state),
     )
     .await
-}
-
-/// Count the children matching `pred`. Unlike [`children`] there is no
-/// comma-popcount shortcut - each child is resolved against the predicate.
-/// Memory stays bounded because `next_child` advances one chunk at a time,
-/// pruning pins behind the frontier as it goes.
-async fn matching(
-  session: &Session,
-  mut cw: Children,
-  pred: &CompiledPredicate,
-  pinned: &mut HashMap<u64, ChunkRef>,
-) -> Result<u64, SessionError> {
-  let mut n = 0u64;
-  loop {
-    let Some(child) = session.next_child(&mut cw, pinned).await? else {
-      return Ok(n);
-    };
-    if eval::matches(session, pred, child.location().start, pinned).await? {
-      n += 1;
-    }
-  }
 }
 
 /// Persisted across `ChunkMiss` retries while counting a container's

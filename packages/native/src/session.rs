@@ -27,7 +27,6 @@ use thiserror::Error;
 use crate::bitmap::BitmapStore;
 use crate::cache::{CacheError, CacheOptions, ChunkCache, ChunkRef};
 use crate::pointer::{JsonPointer, PointerParseError};
-use crate::predicate::PredicateError;
 use crate::resolve::{self, ChildEntry, Children, ResolveState, ValueLocation};
 use crate::select::SelectError;
 use crate::source::Source;
@@ -45,8 +44,6 @@ pub enum SessionError {
   Json(#[from] serde_json::Error),
   #[error("pointer did not resolve to a value")]
   NotFound,
-  #[error(transparent)]
-  Predicate(#[from] PredicateError),
   #[error(transparent)]
   Select(#[from] SelectError),
 }
