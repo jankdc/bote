@@ -85,4 +85,9 @@ export interface ScanArgs {
   selectIr?: string
   /** Yield arrays of up to `batch` items instead of one at a time. */
   batch?: number
+  /**
+   * Yield `[key, value]` tuples instead of bare values. The key is a string
+   * for object members and a number for array elements.
+   */
+  withKey?: boolean
 }

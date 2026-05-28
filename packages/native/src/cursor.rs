@@ -47,6 +47,9 @@ pub struct ScanArgs {
   pub select_ir: Option<String>,
   /// Yield arrays of up to `batch` items instead of one at a time.
   pub batch: Option<f64>,
+  /// Yield `[key, value]` tuples instead of bare values. The key is a string
+  /// for object members and a number for array elements.
+  pub with_key: Option<bool>,
 }
 
 #[napi]
@@ -125,13 +128,14 @@ impl Cursor {
 
   #[napi]
   pub fn scan(&self, pointer: String, options: Option<ScanArgs>) -> CursorScan {
-    let (select_ir, batch) = match options {
+    let (select_ir, batch, with_key) = match options {
       Some(o) => (
         o.select_ir,
         // The facade rejects batch <= 0; guard here too (sub-1 -> no batching).
         o.batch.filter(|b| *b >= 1.0).map(|b| b as usize),
+        o.with_key.unwrap_or(false),
       ),
-      None => (None, None),
+      None => (None, None, false),
     };
     CursorScan::new(
       self.session.clone(),
@@ -139,6 +143,7 @@ impl Cursor {
       self.anchor_start(),
       select_ir,
       batch,
+      with_key,
     )
   }
 
@@ -182,6 +187,8 @@ struct IterState {
   select: Option<CompiledSelect>,
   /// Batch size (scan only). `Some(n)` yields arrays of up to `n` items.
   batch: Option<usize>,
+  /// Scan-only: wrap each yielded value in a `[key, value]` array.
+  with_key: bool,
 }
 
 impl IterState {
@@ -190,6 +197,7 @@ impl IterState {
     anchor_start: u64,
     select_ir: Option<String>,
     batch: Option<usize>,
+    with_key: bool,
   ) -> Self {
     Self {
       pointer,
@@ -200,6 +208,7 @@ impl IterState {
       select_ir,
       select: None,
       batch,
+      with_key,
     }
   }
 }
@@ -257,6 +266,7 @@ impl CursorScan {
     anchor_start: u64,
     select_ir: Option<String>,
     batch: Option<usize>,
+    with_key: bool,
   ) -> Self {
     Self {
       session,
@@ -265,8 +275,18 @@ impl CursorScan {
         anchor_start,
         select_ir,
         batch,
+        with_key,
       ))),
     }
+  }
+}
+
+/// Render a `ChildEntry`'s key as a JSON value for tuple yields. Member keys
+/// become strings; element indices become numbers.
+fn child_key_json(child: &ChildEntry) -> serde_json::Value {
+  match child {
+    ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
+    ChildEntry::Element { index, .. } => serde_json::Value::Number((*index as u64).into()),
   }
 }
 
@@ -294,6 +314,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
         pinned,
         select,
         batch,
+        with_key,
         ..
       } = &mut *guard;
       let Some(walker) = walker.as_mut() else {
@@ -301,6 +322,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
       };
       let select = select.as_ref();
       let batch = *batch;
+      let with_key = *with_key;
       // Items are materialized eagerly and accumulated here, so the buffer
       // (not chunk pins) is the in-flight batch; pins are pruned after each
       // item. The buffer lives in this `next()` frame, so early termination
@@ -315,6 +337,12 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             }
             return Ok(None);
           };
+          // Capture the key before its bytes get released by materialization.
+          let key = if with_key {
+            Some(child_key_json(&child))
+          } else {
+            None
+          };
           // Materialize / project the child while its pins are still hot.
           let value = match select {
             Some(sel) => {
@@ -324,10 +352,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
           };
           // The value is owned now; release the chunks that backed it.
           session.prune_frontier_and_sync(pinned, walker.next_offset);
+          let item = match key {
+            Some(k) => serde_json::Value::Array(vec![k, value]),
+            None => value,
+          };
           match batch {
-            None => return Ok(Some(value)),
+            None => return Ok(Some(item)),
             Some(n) => {
-              buf.push(value);
+              buf.push(item);
               if buf.len() >= n {
                 return Ok(Some(serde_json::Value::Array(buf)));
               }
@@ -362,12 +394,13 @@ impl CursorWalk {
   fn new(session: Arc<Session>, pointer: String, anchor_start: u64) -> Self {
     Self {
       session,
-      // walk navigates positions, so it never projects or batches.
+      // walk navigates positions, so it never projects, batches, or wraps.
       state: Arc::new(AsyncMutex::new(IterState::new(
         pointer,
         anchor_start,
         None,
         None,
+        false,
       ))),
     }
   }
@@ -527,7 +560,7 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None);
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, None, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -546,7 +579,7 @@ mod tests {
   #[tokio::test]
   async fn pins_scan_batch_early_break_releases() {
     let s = session(500, 256, 4);
-    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8));
+    let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8), false);
     // Pull one batch, then early-terminate via complete() (the break path).
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
@@ -569,6 +602,7 @@ mod tests {
       0,
       Some(r#"{"one":"/total"}"#.to_string()),
       Some(64),
+      false,
     );
     while it.next(None).await.unwrap().is_some() {
       let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
@@ -589,7 +623,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8));
+      let mut it = CursorScan::new(s.clone(), "/items".into(), 0, None, Some(8), false);
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       abandoned.push(it); // keep alive: no Drop, no GC

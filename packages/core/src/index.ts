@@ -7,7 +7,14 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
 export type { CacheStats } from '@botejs/native'
 export { ValidationError, type StandardSchemaV1 } from './validate.ts'
 export { pointer, type PointerLiteral, type Pointer } from './pointer.ts'
-export { open, type Cursor, type RootCursor, type ScanOptions, type SessionOptions } from './open.ts'
+export {
+  open,
+  type Cursor,
+  type RootCursor,
+  type ScanKey,
+  type ScanOptions,
+  type SessionOptions,
+} from './open.ts'
 
 export {
   fromBuffer,

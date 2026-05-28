@@ -1,5 +1,5 @@
 // Worker process for stress.ts. Runs under the tight V8 heap caps set
-// on its node invocation, walks the doc end-to-end, exits 0 on success.
+// on its node invocation, scans the doc end-to-end, exits 0 on success.
 // V8 OOM aborts the process with a non-zero status, which stress.ts
 // interprets as a failure.
 
@@ -13,8 +13,7 @@ if (!path) {
 
 await using cursor = await open(fromFile(path))
 let count = 0
-for await (const child of cursor.walk('/items')) {
-  const name = await child.get('/name')
+for await (const name of cursor.scan('/items', { select: '/name' })) {
   // Touch the resolved value so the optimizer can't elide the read.
   if (typeof name !== 'string' || !name.startsWith('item-')) {
     console.error(`stress-worker: unexpected value at item ${count}: ${JSON.stringify(name)}`)
@@ -22,4 +21,4 @@ for await (const child of cursor.walk('/items')) {
   }
   count += 1
 }
-console.error(`stress-worker: walked ${count} items OK`)
+console.error(`stress-worker: scanned ${count} items OK`)

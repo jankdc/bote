@@ -18,6 +18,9 @@ export interface SessionOptions {
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
+/** Member name for object children, zero-based index for array elements. */
+export type ScanKey = string | number
+
 export interface ScanOptions {
   /** Project each child before it crosses: a sub-pointer yields the bare value;
    *  a map yields an object of those sub-values. */
@@ -28,6 +31,9 @@ export interface ScanOptions {
   schema?: StandardSchemaV1
   /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them, turning the schema into a filter. */
   onInvalid?: 'throw' | 'skip'
+  /** Yield `[key, value]` tuples instead of bare values. Key is the member
+   *  name for object children, or the zero-based index for array elements. */
+  withKey?: boolean
 }
 
 export interface Cursor {
@@ -50,6 +56,24 @@ export interface Cursor {
     pointer: PointerLiteral<S> | Pointer,
     schema: Sch,
   ): AsyncIterable<InferOutput<Sch>>
+  // withKey: true × (schema, batch) — must precede the non-withKey overloads
+  // below so TS resolves the tuple-yielding signatures first.
+  scan<S extends string, Sch extends StandardSchemaV1>(
+    pointer: PointerLiteral<S> | Pointer,
+    options: ScanOptions & { withKey: true; schema: Sch; batch: number },
+  ): AsyncIterable<[ScanKey, InferOutput<Sch>][]>
+  scan<S extends string, Sch extends StandardSchemaV1>(
+    pointer: PointerLiteral<S> | Pointer,
+    options: ScanOptions & { withKey: true; schema: Sch },
+  ): AsyncIterable<[ScanKey, InferOutput<Sch>]>
+  scan<S extends string>(
+    pointer: PointerLiteral<S> | Pointer,
+    options: ScanOptions & { withKey: true; batch: number },
+  ): AsyncIterable<[ScanKey, unknown][]>
+  scan<S extends string>(
+    pointer: PointerLiteral<S> | Pointer,
+    options: ScanOptions & { withKey: true },
+  ): AsyncIterable<[ScanKey, unknown]>
   scan<S extends string, Sch extends StandardSchemaV1>(
     pointer: PointerLiteral<S> | Pointer,
     options: ScanOptions & { schema: Sch; batch: number },
@@ -132,6 +156,7 @@ function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
   select?: string | Record<string, string>
   batch?: number
   onInvalid?: 'throw' | 'skip'
+  withKey?: boolean
 } {
   if (!arg) return {}
   if ('~standard' in arg) return { schema: arg as StandardSchemaV1 }
@@ -141,6 +166,7 @@ function normalizeScanArgs(arg?: StandardSchemaV1 | ScanOptions): {
     select: options.select,
     batch: options.batch,
     onInvalid: options.onInvalid,
+    withKey: options.withKey,
   }
 }
 
@@ -172,24 +198,28 @@ function wrap(native: NativeCursor): Cursor {
       return native.count(pointer)
     },
     scan(pointer: string, optionsOrSchema?: StandardSchemaV1 | ScanOptions): AsyncIterable<unknown> {
-      const { schema, select, batch, onInvalid } = normalizeScanArgs(optionsOrSchema)
+      const { schema, select, batch, onInvalid, withKey } = normalizeScanArgs(optionsOrSchema)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
         throw new RangeError(`scan: batch must be a positive integer, got ${batch}`)
       }
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const hasArgs = selectIr !== undefined || batch !== undefined
-      const inner = native.scan(pointer, hasArgs ? { selectIr, batch } : undefined)
+      const hasArgs = selectIr !== undefined || batch !== undefined || withKey === true
+      const inner = native.scan(pointer, hasArgs ? { selectIr, batch, withKey } : undefined)
       if (!schema) return inner
       const policy = onInvalid ?? 'throw'
 
+      // The native side has already shaped each item: `value` when `!withKey`,
+      // `[key, value]` when `withKey`. Schema validation only ever runs against
+      // the value half; the key is passed through unchanged.
       if (batch === undefined) {
         return {
           async *[Symbol.asyncIterator]() {
             let i = 0
             for await (const v of inner) {
-              const result = await validateItem(schema, v, `${pointer}/${i++}`, policy)
+              const value = withKey ? (v as [ScanKey, unknown])[1] : v
+              const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
               if ('skip' in result) continue
-              yield result.value
+              yield withKey ? [(v as [ScanKey, unknown])[0], result.value] : result.value
             }
           },
         }
@@ -203,9 +233,10 @@ function wrap(native: NativeCursor): Cursor {
           for await (const b of inner) {
             const out: unknown[] = []
             for (const v of b as unknown[]) {
-              const result = await validateItem(schema, v, `${pointer}/${i++}`, policy)
+              const value = withKey ? (v as [ScanKey, unknown])[1] : v
+              const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
               if ('skip' in result) continue
-              out.push(result.value)
+              out.push(withKey ? [(v as [ScanKey, unknown])[0], result.value] : result.value)
             }
             yield out
           }

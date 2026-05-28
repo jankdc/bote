@@ -1,20 +1,21 @@
 // JS-layer retention profile for the `bote` facade.
 //
-// Verifies two properties of the JS wrapper Cursors yielded by `walk`,
-// in two independent phases so each phase's bookkeeping can't pollute
-// the other's signal:
+// Verifies two properties of the JS layer, in two independent phases so
+// each phase's bookkeeping can't pollute the other's signal:
 //
-//   1. heap-plateau phase - walks N items, samples
-//      `process.memoryUsage().heapUsed` (after a forced GC) at regular
-//      intervals, keeps no per-item state. If the JS facade retained
-//      yielded Cursors or resolved values, heap would climb linearly
+//   1. heap-plateau phase - scans N items (the common consumption path),
+//      samples `process.memoryUsage().heapUsed` (after a forced GC) at
+//      regular intervals, keeps no per-item state. If the facade retained
+//      resolved values or async-iterator state, heap would climb linearly
 //      with N. A flat tail is the pass condition.
 //
 //   2. weakref phase - walks a smaller sample, records a WeakRef per
-//      yielded Cursor, drops the strong reference at the loop boundary,
-//      forces GC, asserts all refs deref to undefined. This phase keeps
-//      the refs array around, so it intentionally inflates heapUsed -
-//      which is why it doesn't share a run with phase 1.
+//      yielded Cursor wrapper, drops the strong reference at the loop
+//      boundary, forces GC, asserts all refs deref to undefined. This
+//      phase keeps the refs array around, so it intentionally inflates
+//      heapUsed - which is why it doesn't share a run with phase 1. Stays
+//      on `walk` because the property under test is specifically that
+//      walked Cursor wrappers are reclaimable.
 //
 // Must be run with `--expose-gc`; the harness asserts gc is available
 // and exits otherwise.
@@ -55,8 +56,7 @@ async function heapPlateauPhase(path: string): Promise<HeapSample[]> {
   const baseline = process.memoryUsage().heapUsed
   const samples: HeapSample[] = []
   let seen = 0
-  for await (const child of cursor.walk('/items')) {
-    await child.get('/name')
+  for await (const _name of cursor.scan('/items', { select: '/name' })) {
     seen += 1
     if (seen % HEAP_SAMPLE_EVERY === 0) {
       await collect()
@@ -93,7 +93,7 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(`Doc size: ${fmtBytes(buf.byteLength)}`)
 
   console.log(
-    `\n[phase 1] heap plateau - walking ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`,
+    `\n[phase 1] heap plateau - scanning ${HEAP_ITEMS.toLocaleString()} items, sample every ${HEAP_SAMPLE_EVERY.toLocaleString()}\n`,
   )
   const samples = await heapPlateauPhase(path)
   for (const s of samples) {

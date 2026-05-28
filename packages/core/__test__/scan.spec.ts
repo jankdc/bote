@@ -102,6 +102,115 @@ test('scan_select_rejects_empty_map', async (t) => {
   assert.throws(() => db.scan('/orders', { select: {} }), RangeError)
 })
 
+test('scan_withKey_array_yields_index_value_tuples', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
+  const pairs: Array<[unknown, unknown]> = []
+  for await (const pair of cursor.scan('/xs', { withKey: true })) pairs.push(pair as [unknown, unknown])
+  assert.deepEqual(pairs, [
+    [0, 10],
+    [1, 20],
+    [2, 30],
+  ])
+})
+
+test('scan_withKey_object_yields_member_key_value_tuples', async () => {
+  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2}}')))
+  const pairs: Array<[unknown, unknown]> = []
+  for await (const pair of cursor.scan('/o', { withKey: true })) pairs.push(pair as [unknown, unknown])
+  assert.equal(pairs.length, 2)
+  assert.deepEqual(
+    pairs.find(([k]) => k === 'a'),
+    ['a', 1],
+  )
+  assert.deepEqual(
+    pairs.find(([k]) => k === 'b'),
+    ['b', 2],
+  )
+})
+
+test('scan_withKey_with_select_yields_key_and_projected_value', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const rows: Array<[unknown, unknown]> = []
+  for await (const row of db.scan('/orders', { select: '/total', withKey: true })) {
+    rows.push(row as [unknown, unknown])
+  }
+  assert.deepEqual(rows, [
+    [0, 120],
+    [1, 80],
+    [2, 50],
+    [3, 200],
+    [4, 999],
+  ])
+})
+
+test('scan_withKey_with_select_map_yields_key_and_object', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const rows: Array<[unknown, Record<string, unknown>]> = []
+  for await (const row of db.scan('/orders', {
+    select: { total: '/total', country: '/customer/country' },
+    withKey: true,
+  })) {
+    rows.push(row as [unknown, Record<string, unknown>])
+  }
+  assert.equal(rows.length, 5)
+  assert.deepEqual(rows[0], [0, { total: 120, country: 'US' }])
+  assert.deepEqual(rows[4], [4, { total: 999, country: 'US' }])
+})
+
+test('scan_withKey_batch_yields_arrays_of_tuples', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const batches: Array<Array<[unknown, unknown]>> = []
+  for await (const batch of db.scan('/orders', { select: '/total', withKey: true, batch: 3 })) {
+    batches.push(batch as Array<[unknown, unknown]>)
+  }
+  assert.deepEqual(batches, [
+    [
+      [0, 120],
+      [1, 80],
+      [2, 50],
+    ],
+    [
+      [3, 200],
+      [4, 999],
+    ],
+  ])
+})
+
+test('scan_withKey_with_schema_validates_value_part_only', async (t) => {
+  // The schema sees the projected value (a number), not the [key, value] tuple.
+  // The key is passed through unchanged in the yielded pair.
+  const numberSchema = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (v: unknown) =>
+        typeof v === 'number'
+          ? { value: v * 10 }
+          : { issues: [{ message: 'not a number' }] },
+    },
+  } as const
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const rows: Array<[unknown, number]> = []
+  for await (const row of db.scan('/orders', {
+    select: '/total',
+    withKey: true,
+    schema: numberSchema,
+  })) {
+    rows.push(row)
+  }
+  assert.deepEqual(rows, [
+    [0, 1200],
+    [1, 800],
+    [2, 500],
+    [3, 2000],
+    [4, 9990],
+  ])
+})
+
 test('scan_select_batch_under_tight_budget_stays_bounded', async (t) => {
   // Projecting + batching a big array under a tight cap stays under the ceiling.
   const rows = Array.from({ length: 4000 }, (_, i) => `{"id":${i},"v":"value-${i}"}`)

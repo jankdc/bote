@@ -31,10 +31,22 @@ for await (const user of cursor.scan('/1234/users')) {
   console.log(user)
 }
 
-// if you want to iterate but not fully resolve an array or object
-for await (const userCursor of cursor.walk('/1234/users')) {
-  const id = await userCursor.get('/id')
+// project a single field per child without materializing the whole thing
+for await (const id of cursor.scan('/1234/users', { select: '/id' })) {
   console.log({ id })
+}
+
+// add `withKey: true` to get the index (or member name) alongside the value
+for await (const [i, id] of cursor.scan('/1234/users', { select: '/id', withKey: true })) {
+  console.log({ i, id })
+}
+
+// for open-ended per-child work (conditional reads, recursive descent, nested
+// scans), `walk` still yields a subcursor positioned at each child:
+for await (const userCursor of cursor.walk('/1234/users')) {
+  if (await userCursor.has('/details')) {
+    console.log(await userCursor.get('/details'))
+  }
 }
 
 // 'await using' would normally clean up resources for you
