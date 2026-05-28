@@ -19,22 +19,18 @@ use std::sync::Arc;
 use crate::simd::{scan_block, ScanCarry, WINDOW};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum Structural {
-  // for diagnostic purposes only
-  Colon = 0,
-  Comma = 1,
-  LBrace = 2,
-  RBrace = 3,
-  LBracket = 4,
-  RBracket = 5,
+  Comma,
+  LBrace,
+  RBrace,
+  LBracket,
+  RBracket,
 }
 
 impl Structural {
-  const COUNT: usize = 6;
+  const COUNT: usize = 5;
   #[cfg(test)]
   const ALL: [Structural; Self::COUNT] = [
-    Structural::Colon,
     Structural::Comma,
     Structural::LBrace,
     Structural::RBrace,
@@ -44,7 +40,6 @@ impl Structural {
 
   pub fn byte(self) -> u8 {
     match self {
-      Self::Colon => b':',
       Self::Comma => b',',
       Self::LBrace => b'{',
       Self::RBrace => b'}',
@@ -283,13 +278,10 @@ mod tests {
     chunk[..14].copy_from_slice(b"{\"k\":\"a,b{c}\"}");
     let mut bm = ChunkBitmaps::build_basic(&chunk, ScanCarry::default());
 
-    let colon = bm.ensure_structural(&chunk, Structural::Colon).to_vec();
     let comma = bm.ensure_structural(&chunk, Structural::Comma).to_vec();
     let lbrace = bm.ensure_structural(&chunk, Structural::LBrace).to_vec();
     let rbrace = bm.ensure_structural(&chunk, Structural::RBrace).to_vec();
 
-    // Only the colon at byte 4 counts; nothing inside the string.
-    assert_eq!(bit_positions(&colon), vec![4]);
     // The comma inside the string is masked out.
     assert_eq!(bit_positions(&comma), Vec::<usize>::new());
     // Only the outer `{` at byte 0 counts; the one inside the string is masked.
@@ -327,7 +319,7 @@ mod tests {
     // Chunk starts mid-string. Provide inside_string carry so the parser
     // knows to treat early bytes as string content.
     let mut chunk = vec![b' '; 64];
-    chunk[..6].copy_from_slice(b"end\":1"); // `end":1` - closes the inherited string, then `:1`
+    chunk[..6].copy_from_slice(b"end\",1"); // `end",1` - closes the inherited string, then `,1`
     let entry = ScanCarry {
       prev_escaped: 0,
       inside_string: !0,
@@ -335,9 +327,9 @@ mod tests {
     let mut bm = ChunkBitmaps::build_basic(&chunk, entry);
     // The string ends at the `"` at byte 3. Inside-string covers bytes 0..=2.
     assert_eq!(bm.in_string[0] & 0xFF, 0b0000_0111);
-    // Colon at byte 4 should be picked up; nothing else.
-    let colon = bm.ensure_structural(&chunk, Structural::Colon).to_vec();
-    assert_eq!(bit_positions(&colon), vec![4]);
+    // Comma at byte 4 should be picked up; nothing else.
+    let comma = bm.ensure_structural(&chunk, Structural::Comma).to_vec();
+    assert_eq!(bit_positions(&comma), vec![4]);
   }
 
   #[test]

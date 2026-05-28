@@ -627,24 +627,13 @@ fn scan_first_zero_in(
   chunk_offset: u64,
   cap: u64,
 ) -> Option<u64> {
-  let head = !in_string[from_word] & word_mask_from(from_bit);
-  if head != 0 {
-    let bit = head.trailing_zeros() as usize;
-    let abs = chunk_offset + (from_word * WINDOW + bit) as u64;
-    if abs < cap {
-      return Some(abs);
-    }
-    return None;
-  }
-  for (w, &word) in in_string.iter().enumerate().skip(from_word + 1) {
-    let m = !word;
+  for (w, &word) in in_string.iter().enumerate().skip(from_word) {
+    let mask = if w == from_word { word_mask_from(from_bit) } else { !0u64 };
+    let m = !word & mask;
     if m != 0 {
       let bit = m.trailing_zeros() as usize;
       let abs = chunk_offset + (w * WINDOW + bit) as u64;
-      if abs < cap {
-        return Some(abs);
-      }
-      return None;
+      return (abs < cap).then_some(abs);
     }
   }
   None
