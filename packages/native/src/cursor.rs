@@ -106,11 +106,15 @@ impl Cursor {
   }
 
   #[napi(ts_return_type = "Promise<unknown>")]
-  pub async fn get(&self, pointer: String) -> napi::Result<serde_json::Value> {
+  pub async fn get(&self, pointer: String) -> napi::Result<Either<serde_json::Value, ()>> {
     self
       .session
       .get_at(&pointer, self.anchor_start())
       .await
+      .map(|opt| match opt {
+        Some(v) => Either::A(v),
+        None => Either::B(()),
+      })
       .map_err(map_err)
   }
 
@@ -542,10 +546,10 @@ mod tests {
 
     assert!(w.state.lock().await.pinned.is_empty());
     // The escaped child is still fully usable: its session outlives the walk.
-    assert_eq!(
+    assert!(matches!(
       child.get("/name".into()).await.unwrap(),
-      serde_json::json!("i0000")
-    );
+      Either::A(ref v) if v == &serde_json::json!("i0000")
+    ));
   }
 
   #[tokio::test]

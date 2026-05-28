@@ -42,8 +42,6 @@ pub enum SessionError {
   Cache(#[from] CacheError),
   #[error("failed to parse JSON value: {0}")]
   Json(#[from] serde_json::Error),
-  #[error("pointer did not resolve to a value")]
-  NotFound,
   #[error(transparent)]
   Select(#[from] SelectError),
 }
@@ -111,15 +109,17 @@ impl Session {
     &self,
     pointer_str: &str,
     anchor_start: u64,
-  ) -> Result<serde_json::Value, SessionError> {
+  ) -> Result<Option<serde_json::Value>, SessionError> {
     let pointer = JsonPointer::parse(pointer_str)?;
     let mut q = Query::new(self);
-    let loc = self
+    let Some(loc) = self
       .run_resolve(&pointer, anchor_start, &mut q.pinned)
       .await?
-      .ok_or(SessionError::NotFound)?;
+    else {
+      return Ok(None);
+    };
     let bytes = self.read_range(loc.start, loc.end, &mut q.pinned).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(Some(serde_json::from_slice(&bytes)?))
   }
 
   /// Drop bitmaps for chunks the cache has evicted since the last drain.

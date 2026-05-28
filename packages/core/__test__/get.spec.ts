@@ -35,9 +35,12 @@ test('get_string_with_structural_chars', async () => {
   assert.equal(await cursor.get('/x'), 'has } and , inside')
 })
 
-test('get_missing_rejects', async () => {
-  const cursor = await open(memorySource(enc('{"a":1}')))
-  await assert.rejects(cursor.get('/missing'))
+test('get_missing_returns_undefined_distinct_from_json_null', async () => {
+  const cursor = await open(memorySource(enc('{"a":1,"b":null}')))
+  assert.equal(await cursor.get('/missing'), undefined)
+  assert.equal(await cursor.get('/b'), null)
+  assert.equal(await cursor.has('/missing'), false)
+  assert.equal(await cursor.has('/b'), true)
 })
 
 test('has_presence_and_absence', async () => {
