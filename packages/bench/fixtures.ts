@@ -10,9 +10,11 @@ export interface Source {
   /** Preferred read granularity (non-zero multiple of 64). Defaults to
    *  64 KiB inside the native binding when omitted. */
   chunkBytes?: number
-  /** Fill `args.buf` starting at `args.offset` and resolve with bytesRead.
-   *  `args.buf` is native-owned and must not be retained past the promise. */
-  read(args: { offset: number; buf: Uint8Array }): Promise<number>
+  /** Read up to `args.length` bytes at `args.offset` and resolve with a
+   *  `Uint8Array` of bytes read. The returned `.byteLength` is the actual
+   *  count, shorter only at end-of-source. The buffer is JS-owned; bote
+   *  copies what it needs before the promise settles. */
+  read(args: { offset: number; length: number }): Promise<Uint8Array>
   /** Release resources owned by the source (e.g. an open file handle).
    *  Call after the consuming cursor is no longer in use. */
   close?(): Promise<void>
@@ -22,12 +24,8 @@ export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
   return {
     size: data.length,
     chunkBytes,
-    read: ({ offset, buf }) => {
-      const end = Math.min(offset + buf.byteLength, data.length)
-      const n = Math.max(0, end - offset)
-      if (n > 0) buf.set(data.subarray(offset, end))
-      return Promise.resolve(n)
-    },
+    read: ({ offset, length }) =>
+      Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
   }
 }
 
@@ -38,9 +36,10 @@ export async function fileSource(path: string, chunkBytes?: number): Promise<Sou
   return {
     size: stat.size,
     chunkBytes,
-    read: async ({ offset, buf }) => {
-      const { bytesRead } = await handle.read(buf, 0, buf.byteLength, offset)
-      return bytesRead
+    read: async ({ offset, length }) => {
+      const buf = Buffer.allocUnsafe(length)
+      const { bytesRead } = await handle.read(buf, 0, length, offset)
+      return buf.subarray(0, bytesRead)
     },
     close: () => handle.close(),
   }

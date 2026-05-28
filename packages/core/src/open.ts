@@ -104,7 +104,7 @@ export async function open(source: Source, options?: SessionOptions): Promise<Ro
       {
         size: reader.size,
         chunkBytes: reader.chunkBytes,
-        read: async ({ offset, buf }: { offset: number; buf: Uint8Array }) => reader.read(offset, buf),
+        read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
       },
       {
         maxResidentChunks: options?.maxResidentChunks,

@@ -30,10 +30,16 @@ pub async fn at(
 ) -> Result<u64, SessionError> {
   let pointer = JsonPointer::parse(pointer_str)?;
   let mut q = Query::new(session);
-  let Some(loc) = session.run_resolve(&pointer, anchor_start, &mut q.pinned).await? else {
+  // run_locate (not run_resolve): we only need the container's start; the
+  // child count comes from a per-comma scan started at the opener, not
+  // from the value's end offset.
+  let Some(start) = session
+    .run_locate(&pointer, anchor_start, &mut q.pinned)
+    .await?
+  else {
     return Ok(0); // missing pointer
   };
-  let Some(cw) = session.enter_container(loc, &mut q.pinned).await? else {
+  let Some(cw) = session.enter_container(start, &mut q.pinned).await? else {
     return Ok(0); // not an object or array
   };
   match pred {

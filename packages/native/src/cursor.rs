@@ -244,11 +244,13 @@ async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(
     None => None,
   };
   state.select = select;
-  let loc_opt = session
-    .resolve_at(&state.pointer, state.anchor_start)
+
+  let start_opt = session
+    .locate_at(&state.pointer, state.anchor_start)
     .await?;
-  if let Some(loc) = loc_opt {
-    state.walker = session.enter_container(loc, &mut state.pinned).await?;
+
+  if let Some(start) = start_opt {
+    state.walker = session.enter_container(start, &mut state.pinned).await?;
     // Hand off to the per-yield pruning loop: keep just the chunk at
     // the upcoming `next_offset` so the first yield's read is hot.
     if let Some(w) = &state.walker {
@@ -362,9 +364,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             return Ok(None);
           };
           let keep = match pred {
-            Some(p) => {
-              crate::eval::matches(&session, p, child.location().start, pinned).await?
-            }
+            Some(p) => crate::eval::matches(&session, p, child.location().start, pinned).await?,
             None => true,
           };
           if !keep {
@@ -374,7 +374,9 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorScan {
             continue;
           }
           let value = match select {
-            Some(sel) => crate::eval::project(&session, sel, child.location().start, pinned).await?,
+            Some(sel) => {
+              crate::eval::project(&session, sel, child.location().start, pinned).await?
+            }
             None => session.materialize(child.location(), pinned).await?,
           };
           // The value is owned now; release the chunks that backed it.
@@ -472,9 +474,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
             return Ok::<Option<ChildEntry>, SessionError>(None);
           };
           let keep = match pred {
-            Some(p) => {
-              crate::eval::matches(&session, p, child.location().start, pinned).await?
-            }
+            Some(p) => crate::eval::matches(&session, p, child.location().start, pinned).await?,
             None => true,
           };
           if keep {

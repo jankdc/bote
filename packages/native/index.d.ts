@@ -63,30 +63,24 @@ export declare function heapProfileStop(): void
  *
  * The `source` argument must be a JS object with:
  *   - `size: number`                 total source size in bytes
- *   - `read(args): Promise<number>`  `args.offset: number`, `args.buf: Uint8Array`;
- *                                    JS writes bytes into `args.buf` and resolves
- *                                    with the number of bytes written
+ *   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
+ *                                    JS resolves with a `Uint8Array` of bytes read
+ *                                    (its `.byteLength` is the actual count, `<= length`)
  *   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
  */
-export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> }, options?: BoteOptions | undefined | null): Cursor
+export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options?: BoteOptions | undefined | null): Cursor
 
 /**
  * Arguments passed to the JS `read(args)` callback.
  *
- * We funnel `(offset, buf)` through a single object so the napi-rs
+ * We funnel `(offset, length)` through a single object so the napi-rs
  * `ThreadsafeFunction` only has to model a single argument - keeping the
  * type signature in Rust simple. The TS facade wraps the user's
- * `read(offset, buf)` API into this shape.
- *
- * `buf` is an external `Uint8Array` view over a Rust-owned heap buffer of
- * `chunk_size` bytes; JS writes into it and resolves the returned promise
- * with the number of bytes written. JS must not retain a reference to `buf`
- * or read from it after that promise resolves - see [`JsSource::read`] for
- * the ownership protocol.
+ * `read(offset, length)` API into this shape.
  */
 export interface ReadArgs {
   offset: number
-  buf: Uint8Array
+  length: number
 }
 
 /**

@@ -41,12 +41,9 @@ test('cache_reads_are_chunk_aligned', async () => {
       Promise.resolve({
         size: data.length,
         chunkBytes: 64,
-        read: async (offset, dst) => {
-          reads.push({ offset, length: dst.byteLength })
-          const end = Math.min(offset + dst.byteLength, data.length)
-          const n = Math.max(0, end - offset)
-          if (n > 0) dst.set(data.subarray(offset, end))
-          return n
+        read: (offset, length) => {
+          reads.push({ offset, length })
+          return Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length)))
         },
       }),
   }

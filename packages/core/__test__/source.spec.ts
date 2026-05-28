@@ -38,12 +38,7 @@ test('source_open_is_deferred_until_open_call', async () => {
       const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
-        read: async (offset, dst) => {
-          const end = Math.min(offset + dst.byteLength, data.length)
-          const n = Math.max(0, end - offset)
-          if (n > 0) dst.set(data.subarray(offset, end))
-          return n
-        },
+        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
       })
     },
   }
@@ -60,12 +55,7 @@ test('lifecycle_close_drives_reader_close_exactly_once', async () => {
       const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
-        read: async (offset, dst) => {
-          const end = Math.min(offset + dst.byteLength, data.length)
-          const n = Math.max(0, end - offset)
-          if (n > 0) dst.set(data.subarray(offset, end))
-          return n
-        },
+        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
         close: async () => {
           closeCalls += 1
         },
@@ -86,12 +76,7 @@ test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
       const data = enc(DOC)
       return Promise.resolve({
         size: data.length,
-        read: async (offset, dst) => {
-          const end = Math.min(offset + dst.byteLength, data.length)
-          const n = Math.max(0, end - offset)
-          if (n > 0) dst.set(data.subarray(offset, end))
-          return n
-        },
+        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
         close: async () => {
           closeCalls += 1
         },

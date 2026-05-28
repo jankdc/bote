@@ -31,7 +31,7 @@ use crate::predicate::PredicateError;
 use crate::resolve::{self, ChildEntry, Children, ResolveState, ValueLocation};
 use crate::select::SelectError;
 use crate::source::Source;
-use crate::walker::{ChunkBytes, ChunkMiss, TraverseError, Walker};
+use crate::walker::{self, ChunkBytes, ChunkMiss, SkipState, TraverseError, Walker};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -82,18 +82,18 @@ impl Session {
     }))
   }
 
-  pub async fn resolve_at(
+  pub async fn locate_at(
     &self,
     pointer_str: &str,
     anchor_start: u64,
-  ) -> Result<Option<ValueLocation>, SessionError> {
+  ) -> Result<Option<u64>, SessionError> {
     let pointer = JsonPointer::parse(pointer_str)?;
     let mut q = Query::new(self);
-    self.run_resolve(&pointer, anchor_start, &mut q.pinned).await
+    self.run_locate(&pointer, anchor_start, &mut q.pinned).await
   }
 
   pub async fn has_at(&self, pointer_str: &str, anchor_start: u64) -> Result<bool, SessionError> {
-    Ok(self.resolve_at(pointer_str, anchor_start).await?.is_some())
+    Ok(self.locate_at(pointer_str, anchor_start).await?.is_some())
   }
 
   pub async fn get_at(
@@ -117,7 +117,7 @@ impl Session {
   /// ~90 MB (one set per chunk x 8 bitmap kinds x ~8 KB).
   ///
   /// Called from every place that releases per-query pins
-  /// (`get_at` / `resolve_at` end-of-query, iter/walk end-of-yield)
+  /// (`get_at` / `locate_at` end-of-query, iter/walk end-of-yield)
   /// so the bitmap store stays in lockstep with the chunk cache.
   pub(crate) fn sync_bitmap_evictions(&self) {
     let evicted = self.cache.drain_evicted();
@@ -130,18 +130,18 @@ impl Session {
     }
   }
 
-  /// Open a child iterator over the container at `value_loc`. Returns
-  /// `Ok(None)` if the value isn't an object or array.
+  /// Open a child iterator over the container starting at `value_start`.
+  /// Returns `Ok(None)` if the value isn't an object or array.
   pub async fn enter_container(
     &self,
-    value_loc: ValueLocation,
+    value_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<Option<Children>, SessionError> {
     self
       .drive(
         pinned,
         |_| 1,
-        |walker| resolve::enter_container(walker, value_loc),
+        |walker| resolve::enter_container(walker, value_start),
       )
       .await
   }
@@ -171,12 +171,19 @@ impl Session {
     Ok(serde_json::from_slice(&bytes)?)
   }
 
-  pub(crate) async fn run_resolve(
+  /// Resolve `pointer` starting at `anchor_start`, returning only the
+  /// resolved value's **start offset** (no extent walk).
+  ///
+  /// Used by the entry points that don't need the value's bytes
+  /// (`locate_at`, container-walking iterators, `count`). Pairs with
+  /// [`Session::skip_value_at`] in `run_resolve` to build the full
+  /// `ValueLocation` only when a caller actually needs it.
+  pub(crate) async fn run_locate(
     &self,
     pointer: &JsonPointer,
     anchor_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
-  ) -> Result<Option<ValueLocation>, SessionError> {
+  ) -> Result<Option<u64>, SessionError> {
     // ResolveState persists across `ChunkMiss` retries. The inner
     // `resolve_step` updates state only at iteration boundaries, so a
     // chunk fault during a long array walk redoes at most one element on
@@ -192,6 +199,44 @@ impl Session {
           n
         },
         |walker| resolve::resolve_step(walker, pointer, &mut state),
+      )
+      .await
+  }
+
+  /// Resolve `pointer` to a full `[start, end)` byte range. Equivalent to
+  /// `run_locate` followed by `skip_value_at` on the start.
+  pub(crate) async fn run_resolve(
+    &self,
+    pointer: &JsonPointer,
+    anchor_start: u64,
+    pinned: &mut HashMap<u64, ChunkRef>,
+  ) -> Result<Option<ValueLocation>, SessionError> {
+    let Some(start) = self.run_locate(pointer, anchor_start, pinned).await? else {
+      return Ok(None);
+    };
+    let end = self.skip_value_at(start, pinned).await?;
+    Ok(Some(ValueLocation { start, end }))
+  }
+
+  pub(crate) async fn skip_value_at(
+    &self,
+    from: u64,
+    pinned: &mut HashMap<u64, ChunkRef>,
+  ) -> Result<u64, SessionError> {
+    let mut state = SkipState::start(from);
+    let mut burst = 1u64;
+    self
+      .drive(
+        pinned,
+        // Adaptive burst: the value's extent is unknown. Doubling
+        // (1, 2, 4, ..., MAX_BURST) so short values pay no over-fetch and
+        // long ones converge to near-single-pass once the burst caps out.
+        |_| {
+          let n = burst;
+          burst = burst.saturating_mul(2).min(MAX_BURST);
+          n
+        },
+        |walker| walker::skip_value_step(walker, &mut state),
       )
       .await
   }
@@ -306,7 +351,7 @@ impl ChunkBytes for PinnedChunks<'_> {
   }
 }
 
-/// RAII scope for a one-shot query (`resolve_at` / `get_at` / `count_at`):
+/// RAII scope for a one-shot query (`locate_at` / `get_at` / `count_at`):
 /// owns the pinned-chunk map and, on drop, releases its pins and drains
 /// bitmap evictions so both native pools return under cap - including on the
 /// early-`?` and early-`return` paths. Encodes "pins released and bitmaps

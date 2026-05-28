@@ -30,7 +30,10 @@ pub async fn matches(
   pinned: &mut HashMap<u64, ChunkRef>,
 ) -> Result<bool, SessionError> {
   for leaf in pred.leaves() {
-    let Some(loc) = session.run_resolve(leaf.pointer(), child_start, pinned).await? else {
+    let Some(loc) = session
+      .run_resolve(leaf.pointer(), child_start, pinned)
+      .await?
+    else {
       return Ok(false);
     };
     if leaf.needs_value() {

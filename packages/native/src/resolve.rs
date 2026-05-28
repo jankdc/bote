@@ -69,19 +69,11 @@ impl ResolveState {
 }
 
 /// Drive the resolver forward against the current `state`.
-///
-/// Each call tries to make as much progress as possible. On success, the
-/// final `ValueLocation` is returned and `state` is left at the terminal
-/// position. On a `ChunkMiss` chunk fault, `state` is updated to the last
-/// **iteration boundary** (start of the key/value being scanned) and the
-/// error is propagated - re-calling with the same `state` after fetching
-/// the missing chunk resumes from that point, redoing at most one
-/// element's worth of work instead of the whole traversal.
 pub fn resolve_step<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
   pointer: &JsonPointer,
   state: &mut ResolveState,
-) -> Result<Option<ValueLocation>, TraverseError> {
+) -> Result<Option<u64>, TraverseError> {
   let tokens = pointer.tokens();
   while state.token_idx < tokens.len() {
     if state.loop_state.is_none() {
@@ -119,11 +111,7 @@ pub fn resolve_step<P: ChunkBytes + ?Sized>(
       None => return Ok(None),
     }
   }
-  let end = walker.skip_value(state.start)?;
-  Ok(Some(ValueLocation {
-    start: state.start,
-    end,
-  }))
+  Ok(Some(state.start))
 }
 
 /// Advance an object scan, updating `state.offset` only after each fully
@@ -297,13 +285,18 @@ impl ChildEntry {
   }
 }
 
-/// Position a [`Children`] at the first child of the container at
-/// `value_loc`. Returns `Ok(None)` if the value isn't a container.
+/// Position a [`Children`] at the first child of the container that begins
+/// at `value_start`. Returns `Ok(None)` if the value isn't a container.
+///
+/// Takes a bare start offset (not a [`ValueLocation`]) because container
+/// iteration doesn't need the value's end - skipping the closing brace is
+/// what iteration *does*. Callers that have a `ValueLocation` should pass
+/// `loc.start`.
 pub fn enter_container<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
-  value_loc: ValueLocation,
+  value_start: u64,
 ) -> Result<Option<Children>, TraverseError> {
-  let open = walker.skip_whitespace(value_loc.start)?;
+  let open = walker.skip_whitespace(value_start)?;
   let byte = walker
     .byte_at(open)?
     .ok_or(TraverseError::UnexpectedEof(open))?;

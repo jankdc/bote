@@ -29,7 +29,7 @@ mod cursor;
 
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise};
+use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, Uint8Array};
 use napi_derive::napi;
 
 use crate::cache::CacheOptions;
@@ -57,14 +57,14 @@ pub struct BoteOptions {
 ///
 /// The `source` argument must be a JS object with:
 ///   - `size: number`                 total source size in bytes
-///   - `read(args): Promise<number>`  `args.offset: number`, `args.buf: Uint8Array`;
-///                                    JS writes bytes into `args.buf` and resolves
-///                                    with the number of bytes written
+///   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
+///                                    JS resolves with a `Uint8Array` of bytes read
+///                                    (its `.byteLength` is the actual count, `<= length`)
 ///   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
 #[napi]
 pub fn open(
   #[napi(
-    ts_arg_type = "{ size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<number> }"
+    ts_arg_type = "{ size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
   )]
   source: Object<'_>,
   options: Option<BoteOptions>,
@@ -75,7 +75,7 @@ pub fn open(
       "source.size must be a non-negative finite number, got {size}"
     )));
   }
-  let read_fn: Function<ReadArgs, Promise<f64>> = source.get_named_property("read")?;
+  let read_fn: Function<ReadArgs, Promise<Uint8Array>> = source.get_named_property("read")?;
   let ts_read_fn = read_fn.build_threadsafe_function().weak::<true>().build()?;
 
   let chunk_size = match source.get_named_property::<Option<f64>>("chunkBytes") {
