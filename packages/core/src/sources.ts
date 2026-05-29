@@ -78,8 +78,13 @@ export function fromFile(path: string, options?: FactoryOptions): Source {
         chunkBytes,
         read: async (offset, length) => {
           const buf = Buffer.allocUnsafe(length)
-          const { bytesRead } = await handle.read(buf, 0, length, offset)
-          return buf.subarray(0, bytesRead)
+          let filled = 0
+          while (filled < length) {
+            const { bytesRead } = await handle.read(buf, filled, length - filled, offset + filled)
+            if (bytesRead === 0) break
+            filled += bytesRead
+          }
+          return buf.subarray(0, filled)
         },
         close: async () => {
           if (closed) return

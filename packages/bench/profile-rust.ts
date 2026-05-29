@@ -18,6 +18,7 @@
 import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
+import { DEFAULT_ITER_BATCH } from '@botejs/core'
 import { heapProfilePeakBytes, heapProfileStart, heapProfileStop, open, type Cursor } from '@botejs/native'
 
 import { arg } from './cli.ts'
@@ -29,7 +30,10 @@ const PAD_WIDTH = 7
 
 async function iterAll(cursor: Cursor): Promise<number> {
   let count = 0
-  for await (const batch of cursor.iter(['items'], { selectIr: JSON.stringify({ one: ['name'] }) })) {
+  for await (const batch of cursor.iter(['items'], {
+    selectIr: JSON.stringify({ one: ['name'] }),
+    batch: DEFAULT_ITER_BATCH,
+  })) {
     count += batch.length
   }
   return count

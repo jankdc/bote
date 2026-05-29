@@ -101,6 +101,12 @@ test('schema_get_async_awaits_validator', async (t) => {
   await assert.rejects(() => cursor.get('meta', 'enabled', asyncStringSchema()), ValidationError)
 })
 
+test('schema_get_missing_path_returns_undefined_without_validating', async (t) => {
+  const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
+  t.after(() => cursor.close())
+  assert.equal(await cursor.get('does', 'not', 'exist', userSchema()), undefined)
+})
+
 test('schema_has_true_only_when_valid', async (t) => {
   const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
   t.after(() => cursor.close())

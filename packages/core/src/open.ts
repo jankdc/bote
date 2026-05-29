@@ -210,11 +210,17 @@ function serializeSelect(select: Segment | Path | Record<string, Segment | Path>
   }
   if (Array.isArray(select)) {
     validatePath(select)
+    if (select.length === 0) {
+      throw new RangeError('iter: select sub-path must have at least one segment')
+    }
     return JSON.stringify({ one: select })
   }
   const entries = Object.entries(select).map(([k, sub]) => {
     const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
     validatePath(path)
+    if (path.length === 0) {
+      throw new RangeError(`iter: select field ${JSON.stringify(k)} sub-path must have at least one segment`)
+    }
     return [k, path] as const
   })
   if (entries.length === 0) {
@@ -232,13 +238,18 @@ function wrap(native: NativeCursor): Cursor {
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
       if (!schema) return native.has(path)
       if (!(await native.has(path))) return false
-      const result = await schema['~standard'].validate(await native.get(path))
-      return result.issues === undefined
+      const result = await validateItem(schema, await native.get(path), path, 'skip')
+      return !('skip' in result)
     },
     async get(...args: VariadicPathArgs<StandardSchemaV1>): Promise<unknown> {
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
       const value = await native.get(path)
-      return schema ? runStandardSchema(schema, value, path) : value
+      // A missing path resolves to `undefined` (JSON values are never
+      // `undefined`, so this is unambiguous). There is nothing to validate, so
+      // return `undefined` rather than running the schema against it - matches
+      // the no-schema `get` and avoids a spurious ValidationError / silent pass.
+      if (!schema || value === undefined) return value
+      return runStandardSchema(schema, value, path)
     },
     count(...path: Segment[]): Promise<number> {
       validatePath(path)

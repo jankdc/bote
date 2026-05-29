@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { DEFAULT_ITER_BATCH } from '@botejs/core'
 import { open, type Cursor } from '@botejs/native'
 
 import type { Cell, Reference, Result, Timing } from './cells.ts'
@@ -79,7 +80,7 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
     case 'iter': {
       // `.iter` always yields batches; count items, not yields.
       let n = 0
-      for await (const batch of cursor.iter(p)) n += batch.length
+      for await (const batch of cursor.iter(p, { batch: DEFAULT_ITER_BATCH })) n += batch.length
       return n
     }
   }

@@ -58,6 +58,12 @@ test('has_presence_and_absence', async () => {
   assert.equal(await cursor.has('b', 5), false)
 })
 
+test('has_resolves_value_like_get', async () => {
+  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has(), true)
+  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has('missing'), false)
+  await assert.rejects((await open(memorySource(enc('')))).has())
+})
+
 test('get_path_segments_can_be_spread_from_an_array', async (t) => {
   // Variadic accepts a spread from any accumulated path - the common case
   // for code that builds a path during traversal.

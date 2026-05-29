@@ -5,7 +5,7 @@ export declare class Cursor {
   get(path: Array<string | number>): Promise<unknown>
   count(path: Array<string | number>): Promise<number>
   get key(): string | number | null
-  iter(path: Array<string | number>, options?: IterArgs | null): CursorIter
+  iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): CursorWalk
   cacheStats(): CacheStats
 }
@@ -66,10 +66,12 @@ export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
   /**
-   * Override the batch size. The facade always resolves a value here; `None`
-   * or sub-1 values fall back to `DEFAULT_ITER_BATCH` defensively.
+   * Batch size: each yield is an array of up to this many items. Required, so
+   * the caller owns the default - the `@botejs/core` facade resolves its
+   * public `DEFAULT_ITER_BATCH`, and direct native consumers pass their own -
+   * keeping a single source of truth. Floored at 1 to guarantee progress.
    */
-  batch?: number
+  batch: number
   /**
    * Yield `[key, value]` tuples instead of bare values. The key is a string
    * for object members and a number for array elements.

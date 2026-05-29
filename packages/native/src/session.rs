@@ -99,7 +99,13 @@ impl Session {
   }
 
   pub async fn has_at(&self, path: &[Segment], anchor_start: u64) -> Result<bool, SessionError> {
-    Ok(self.locate_at(path, anchor_start).await?.is_some())
+    let mut q = Query::new(self);
+    Ok(
+      self
+        .run_resolve(path, anchor_start, &mut q.pinned)
+        .await?
+        .is_some(),
+    )
   }
 
   pub async fn get_at(

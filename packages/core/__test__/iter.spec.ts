@@ -161,6 +161,16 @@ test('iter_select_rejects_empty_map', async (t) => {
   assert.throws(() => db.iter('orders', { select: {} }), RangeError)
 })
 
+test('iter_select_rejects_empty_sub_path', async (t) => {
+  // An empty sub-path (`select: []`, or a map field mapped to `[]`) would
+  // project the whole child, silently defeating select's purpose. Reject it
+  // at the facade like the empty-map case above.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.throws(() => db.iter('orders', { select: [] }), RangeError)
+  assert.throws(() => db.iter('orders', { select: { whole: [] } }), RangeError)
+})
+
 test('iter_withIndex_array_yields_index_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
   const pairs = await collect(cursor.iter('xs', { withIndex: true }))
