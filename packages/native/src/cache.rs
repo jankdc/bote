@@ -13,8 +13,8 @@ const MIN_CHUNK_SIZE: usize = 64;
 
 /// Multiplier applied to `max_resident_chunks x chunk_size` to derive the
 /// total-bytes ceiling. The factor of 2 covers worst-case bitmap growth:
-/// one `in_string` bitmap (~chunk/8 bytes) plus up to six structural
-/// bitmaps (each ~chunk/8 bytes) =~ chunk x 7/8, comfortably below 1x
+/// one `in_string` bitmap (~chunk/8 bytes) plus up to five structural
+/// bitmaps (each ~chunk/8 bytes) =~ chunk x 3/4, comfortably below 1x
 /// chunk per slot of bitmap overhead. The 2x total leaves room for
 /// padding without ever causing the cache to evict purely on bytes for
 /// well-behaved workloads.

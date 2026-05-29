@@ -235,36 +235,38 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
     Ok(out)
   }
 
-  /// Skip ASCII whitespace (`' '`, `'\t'`, `'\n'`, `'\r'`) starting at
-  /// `from`. Returns the offset of the first non-whitespace byte or
-  /// `source_size` if the input ends in whitespace.
+  /// Advance from `from` while `pred` holds, stopping at the first byte that
+  /// fails it, at end-of-source, or at end-of-loaded-data. Shared loop body
+  /// behind [`skip_whitespace`](Self::skip_whitespace) and
+  /// [`skip_primitive`](Self::skip_primitive).
   #[inline]
-  pub fn skip_whitespace(&mut self, from: u64) -> Result<u64, ChunkMiss> {
+  fn skip_while(&mut self, from: u64, pred: impl Fn(u8) -> bool) -> Result<u64, ChunkMiss> {
     let mut offset = from;
     while offset < self.source_size {
       match self.byte_at(offset)? {
         None => return Ok(offset),
-        Some(b' ' | b'\t' | b'\n' | b'\r') => offset += 1,
+        Some(b) if pred(b) => offset += 1,
         Some(_) => return Ok(offset),
       }
     }
     Ok(offset)
   }
 
+  /// Skip ASCII whitespace (`' '`, `'\t'`, `'\n'`, `'\r'`) starting at
+  /// `from`. Returns the offset of the first non-whitespace byte or
+  /// `source_size` if the input ends in whitespace.
+  #[inline]
+  pub fn skip_whitespace(&mut self, from: u64) -> Result<u64, ChunkMiss> {
+    self.skip_while(from, |b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+  }
+
   /// Skip a JSON primitive (number, `true`, `false`, `null`) starting at
   /// `from` whose first byte has already been determined to belong to a
   /// primitive. Returns the offset of the first byte not part of the
   /// primitive's lexical form.
+  #[inline]
   pub fn skip_primitive(&mut self, from: u64) -> Result<u64, ChunkMiss> {
-    let mut offset = from;
-    while offset < self.source_size {
-      match self.byte_at(offset)? {
-        None => return Ok(offset),
-        Some(b) if is_primitive_byte(b) => offset += 1,
-        Some(_) => return Ok(offset),
-      }
-    }
-    Ok(offset)
+    self.skip_while(from, is_primitive_byte)
   }
 
   /// Skip past a JSON value starting at `from` (which must point at the
@@ -275,10 +277,7 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
     skip_value_step(self, &mut state)
   }
 
-  pub fn skip_container_step(
-    &mut self,
-    state: &mut ContainerSkipState,
-  ) -> Result<u64, TraverseError> {
+  fn skip_container_step(&mut self, state: &mut ContainerSkipState) -> Result<u64, TraverseError> {
     let open = state.open;
     let close = state.close;
     while state.offset < self.source_size {
@@ -520,14 +519,14 @@ enum SkipKind {
 /// [`ResolveState::ArrayLoopState`](crate::resolve::ResolveState) and
 /// `CountState`.
 #[derive(Debug, Clone, Copy)]
-pub struct ContainerSkipState {
+struct ContainerSkipState {
   /// Next byte to scan. Committed to a chunk boundary before any
   /// `ChunkMiss` propagates, so resumption picks up here.
-  pub offset: u64,
+  offset: u64,
   /// Nesting depth at `offset`, relative to the container being skipped.
-  pub depth: u32,
-  pub open: Structural,
-  pub close: Structural,
+  depth: u32,
+  open: Structural,
+  close: Structural,
 }
 
 impl SkipState {

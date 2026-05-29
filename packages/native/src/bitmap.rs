@@ -4,11 +4,12 @@
 //! Within a chunk, we process 64-byte windows back-to-back, chaining
 //! [`ScanCarry`] from each window to the next.
 //!
-//! The basic bitmaps (`quote`, `in_string`) are always built up front because
-//! the structural bitmaps depend on `in_string` to mask out characters that
-//! happen to appear inside string literals. The structural bitmaps
-//! themselves (`:`, `,`, `{`, `}`, `[`, `]`) are built **lazily**: each kind
-//! is computed and cached on first access via [`ChunkBitmaps::ensure_structural`].
+//! The basic `in_string` bitmap is always built up front because the
+//! structural bitmaps depend on it to mask out characters that happen to
+//! appear inside string literals. The structural bitmaps themselves
+//! (`,`, `{`, `}`, `[`, `]`) are built **lazily**: each kind is computed and
+//! cached on first access via [`ChunkBitmaps::ensure_structural`]. (Colons
+//! aren't bitmapped; the resolver locates them with `byte_at`.)
 
 use std::collections::HashMap;
 use std::simd::cmp::SimdPartialEq;
@@ -176,15 +177,10 @@ impl BitmapStore {
 
   /// Insert pre-built bitmaps for a chunk. The caller is responsible for
   /// providing the correct `entry_carry` for the chunk's starting position.
-  pub fn insert(&mut self, chunk_offset: u64, bitmaps: ChunkBitmaps) -> &mut ChunkBitmaps {
+  pub fn insert(&mut self, chunk_offset: u64, bitmaps: ChunkBitmaps) {
     let added = bitmaps.bytes();
-    let entry = self
-      .chunks
-      .entry(chunk_offset)
-      .insert_entry(bitmaps)
-      .into_mut();
+    self.chunks.insert(chunk_offset, bitmaps);
     self.bytes_counter.fetch_add(added, Ordering::Relaxed);
-    entry
   }
 
   /// Build the structural bitmap for `kind` on `chunk_offset` if it isn't
@@ -197,8 +193,7 @@ impl BitmapStore {
     if bm.structural(kind).is_some() {
       return;
     }
-    bm.ensure_structural(chunk, kind);
-    let added = bm.structural(kind).map(|b| b.len() * 8).unwrap_or(0);
+    let added = bm.ensure_structural(chunk, kind).len() * 8;
     self.bytes_counter.fetch_add(added, Ordering::Relaxed);
   }
 

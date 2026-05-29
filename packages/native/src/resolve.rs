@@ -109,6 +109,20 @@ pub fn resolve_step<P: ChunkBytes + ?Sized>(
   Ok(Some(state.start))
 }
 
+/// Given the offset of a member key's closing quote, skip the `:` separator
+/// (with surrounding whitespace) and return the offset of the value's first
+/// byte. Shared by [`step_object`] and [`next_object_member`].
+fn member_value_start<P: ChunkBytes + ?Sized>(
+  walker: &mut Walker<P>,
+  key_close: u64,
+) -> Result<u64, TraverseError> {
+  let post_key = walker.skip_whitespace(key_close + 1)?;
+  if walker.byte_at(post_key)? != Some(b':') {
+    return Err(TraverseError::Malformed(post_key));
+  }
+  Ok(walker.skip_whitespace(post_key + 1)?)
+}
+
 /// Advance an object scan, updating `state.offset` only after each fully
 /// successful iteration. A `ChunkMiss` mid-iteration leaves `state` at the
 /// previous iteration's boundary, so resumption redoes at most one key.
@@ -145,11 +159,7 @@ fn step_object<P: ChunkBytes + ?Sized>(
       let raw = walker.read_range(offset, key_close + 1)?;
       quoted_string_eq(&raw, target).map_err(|()| TraverseError::Malformed(offset))?
     };
-    let post_key = walker.skip_whitespace(key_close + 1)?;
-    if walker.byte_at(post_key)? != Some(b':') {
-      return Err(TraverseError::Malformed(post_key));
-    }
-    let value_start = walker.skip_whitespace(post_key + 1)?;
+    let value_start = member_value_start(walker, key_close)?;
     if matches {
       return Ok(Some(value_start));
     }
@@ -350,11 +360,7 @@ fn next_object_member<P: ChunkBytes + ?Sized>(
     .ok_or(TraverseError::UnexpectedEof(offset))?;
   let raw = walker.read_range(offset, key_close + 1)?;
   let key: String = serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(offset))?;
-  let post_key = walker.skip_whitespace(key_close + 1)?;
-  if walker.byte_at(post_key)? != Some(b':') {
-    return Err(TraverseError::Malformed(post_key));
-  }
-  let value_start = walker.skip_whitespace(post_key + 1)?;
+  let value_start = member_value_start(walker, key_close)?;
   let value_end = walker.skip_value(value_start)?;
   let after = walker.skip_whitespace(value_end)?;
   cw.next_offset = match walker.byte_at(after)? {

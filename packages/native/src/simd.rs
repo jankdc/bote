@@ -120,6 +120,19 @@ mod tests {
     assert_eq!(out_carry, ref_carry, "carry out");
   }
 
+  /// Advance the LCG `state` and fill one 64-byte block from `alphabet`.
+  /// Shared by the fuzz tests so the generator constants live in one place.
+  fn fill_block(state: &mut u64, alphabet: &[u8]) -> [u8; WINDOW] {
+    let mut block = [0u8; WINDOW];
+    for slot in &mut block {
+      *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+      *slot = alphabet[((*state >> 33) as usize) % alphabet.len()];
+    }
+    block
+  }
+
   #[test]
   fn scan_empty_block_has_zero_bitmaps() {
     let block = [b' '; WINDOW];
@@ -249,13 +262,7 @@ mod tests {
     let alphabet: &[u8] = b"abc{}[],:\"\\ \n";
     let mut state: u64 = 0xdead_beef_cafe_babe;
     for _ in 0..256 {
-      let mut block = [0u8; WINDOW];
-      for slot in &mut block {
-        state = state
-          .wrapping_mul(6364136223846793005)
-          .wrapping_add(1442695040888963407);
-        *slot = alphabet[((state >> 33) as usize) % alphabet.len()];
-      }
+      let block = fill_block(&mut state, alphabet);
       assert_matches_reference(&block, ScanCarry::default());
     }
   }
@@ -270,13 +277,7 @@ mod tests {
     let mut simd_carry = ScanCarry::default();
     let mut ref_carry = ScanCarry::default();
     for block_idx in 0..32 {
-      let mut block = [0u8; WINDOW];
-      for slot in &mut block {
-        state = state
-          .wrapping_mul(6364136223846793005)
-          .wrapping_add(1442695040888963407);
-        *slot = alphabet[((state >> 33) as usize) % alphabet.len()];
-      }
+      let block = fill_block(&mut state, alphabet);
       let (simd_in_string, simd_next) = scan_block(&block, simd_carry);
       let (ref_in_string, ref_next) = scalar_reference(&block, ref_carry);
       assert_eq!(
@@ -298,13 +299,7 @@ mod tests {
       inside_string: !0,
     };
     for _ in 0..256 {
-      let mut block = [0u8; WINDOW];
-      for slot in &mut block {
-        state = state
-          .wrapping_mul(6364136223846793005)
-          .wrapping_add(1442695040888963407);
-        *slot = alphabet[((state >> 33) as usize) % alphabet.len()];
-      }
+      let block = fill_block(&mut state, alphabet);
       assert_matches_reference(&block, carry);
     }
   }
