@@ -22,8 +22,8 @@ function mockFetch(handler: (url: string, init: RequestInit) => Response | Promi
 test('source_custom_open_and_get', async (t) => {
   const cursor = await open(fromBuffer(enc(DOC)))
   t.after(() => cursor.close())
-  assert.equal(await cursor.get('/users/0/name'), 'Alice')
-  assert.equal(await cursor.get('/meta/enabled'), true)
+  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
+  assert.equal(await cursor.get('meta', 'enabled'), true)
 })
 
 test('source_from_file_reads_from_disk', async (t) => {
@@ -32,9 +32,9 @@ test('source_from_file_reads_from_disk', async (t) => {
   writeFileSync(path, DOC)
   const cursor = await open(fromFile(path, { chunkBytes: 64 }), { maxResidentChunks: 16 })
   t.after(() => cursor.close())
-  assert.equal(await cursor.get('/users/0/name'), 'Alice')
+  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
   const names: string[] = []
-  for await (const batch of cursor.iter('/users', { select: '/name' })) {
+  for await (const batch of cursor.iter('users', { select: ['name'] })) {
     for (const name of batch) names.push(name as string)
   }
   assert.deepEqual(names, ['Alice', 'Bob'])
@@ -73,7 +73,7 @@ test('lifecycle_close_drives_reader_close_exactly_once', async () => {
     },
   }
   const cursor = await open(source)
-  assert.equal(await cursor.get('/users/0/name'), 'Alice')
+  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
   await cursor.close()
   await cursor.close()
   assert.equal(closeCalls, 1)
@@ -95,7 +95,7 @@ test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
   }
   const cursor = await open(source)
   try {
-    assert.equal(await cursor.get('/users/0/name'), 'Alice')
+    assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
     assert.equal(closeCalls, 0, 'reader stays open inside the scope')
   } finally {
     await cursor[Symbol.asyncDispose]()
@@ -158,31 +158,26 @@ test('source_from_http_range_reads_with_head_then_get_range', async (t) => {
 
   const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
   t.after(() => cursor.close())
-  assert.equal(await cursor.get('/users/0/name'), 'Alice')
-  assert.equal(await cursor.get('/meta/enabled'), true)
+  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
+  assert.equal(await cursor.get('meta', 'enabled'), true)
 })
 
 test('source_from_http_range_rejects_when_accept_ranges_missing', async (t) => {
-  const restore = mockFetch(() =>
-    new Response(null, {
-      status: 200,
-      headers: { 'content-length': '100' }, // no accept-ranges advertised
-    }),
+  const restore = mockFetch(
+    () =>
+      new Response(null, {
+        status: 200,
+        headers: { 'content-length': '100' }, // no accept-ranges advertised
+      }),
   )
   t.after(restore)
-  await assert.rejects(
-    () => open(fromHttpRange('https://example.test/doc.json')),
-    /does not advertise Accept-Ranges/,
-  )
+  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /does not advertise Accept-Ranges/)
 })
 
 test('source_from_http_range_rejects_when_head_not_ok', async (t) => {
   const restore = mockFetch(() => new Response(null, { status: 404, statusText: 'Not Found' }))
   t.after(restore)
-  await assert.rejects(
-    () => open(fromHttpRange('https://example.test/doc.json')),
-    /HEAD .* failed: 404/,
-  )
+  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /HEAD .* failed: 404/)
 })
 
 test('source_from_http_range_rejects_when_get_returns_200_ignoring_range', async (t) => {
@@ -205,5 +200,5 @@ test('source_from_http_range_rejects_when_get_returns_200_ignoring_range', async
   t.after(restore)
   const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
   t.after(() => cursor.close())
-  await assert.rejects(() => cursor.get('/users/0/name'), /ignored Range and returned 200/)
+  await assert.rejects(() => cursor.get('users', 0, 'name'), /ignored Range and returned 200/)
 })

@@ -5,8 +5,15 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
 }
 
 export type { CacheStats } from '@botejs/native'
-export { ValidationError, type StandardSchemaV1 } from './validate.ts'
-export { pointer, type PointerLiteral, type Pointer } from './pointer.ts'
+
+export {
+  ValidationError,
+  formatPath,
+  type Path,
+  type Segment,
+  type StandardSchemaV1
+} from './validate.ts'
+
 export {
   open,
   DEFAULT_ITER_BATCH,

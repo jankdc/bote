@@ -628,7 +628,11 @@ fn scan_first_zero_in(
   cap: u64,
 ) -> Option<u64> {
   for (w, &word) in in_string.iter().enumerate().skip(from_word) {
-    let mask = if w == from_word { word_mask_from(from_bit) } else { !0u64 };
+    let mask = if w == from_word {
+      word_mask_from(from_bit)
+    } else {
+      !0u64
+    };
     let m = !word & mask;
     if m != 0 {
       let bit = m.trailing_zeros() as usize;

@@ -53,7 +53,7 @@ async function iterSampling(cursor: Cursor, items: number): Promise<Reading> {
   }
 
   let seen = 0
-  for await (const batch of cursor.iter('/items', { selectIr: JSON.stringify({ one: '/name' }) })) {
+  for await (const batch of cursor.iter(['items'], { selectIr: JSON.stringify({ one: ['name'] }) })) {
     for (let i = 0; i < batch.length; i++) {
       seen += 1
       if (seen % SAMPLE_EVERY === 0) sample()

@@ -13,7 +13,7 @@ if (!path) {
 
 await using cursor = await open(fromFile(path))
 let count = 0
-for await (const batch of cursor.iter('/items', { select: '/name' })) {
+for await (const batch of cursor.iter('items', { select: ['name'] })) {
   for (const name of batch) {
     // Touch the resolved value so the optimizer can't elide the read.
     if (typeof name !== 'string' || !name.startsWith('item-')) {

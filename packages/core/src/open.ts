@@ -1,8 +1,7 @@
 import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
 
-import type { PointerLiteral, Pointer } from './pointer.ts'
 import type { Source, SourceReader } from './sources.ts'
-import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts'
+import { runStandardSchema, validateItem, type Path, type Segment, type StandardSchemaV1 } from './validate.ts'
 
 export interface SessionOptions {
   /**
@@ -18,6 +17,8 @@ export interface SessionOptions {
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
+type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
+
 /** Zero-based index of an array element. */
 export type IterIndex = number
 
@@ -28,9 +29,7 @@ export type IterIndex = number
 export const DEFAULT_ITER_BATCH = 1000
 
 export interface IterOptions {
-  /** Project each child before it crosses: a sub-pointer yields the bare value;
-   *  a map yields an object of those sub-values. */
-  select?: string | Record<string, string>
+  select?: Segment | Path | Record<string, Segment | Path>
   /** Override the default batch size of {@link DEFAULT_ITER_BATCH}. Must be a
    *  positive integer. Larger amortizes FFI overhead further at the cost of
    *  per-yield latency and transient JS-heap residency. */
@@ -46,44 +45,39 @@ export interface IterOptions {
   withIndex?: boolean
 }
 
+type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail]
+
 export interface Cursor {
   /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
   readonly key: string | number | null
 
-  has<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<boolean>
-  has<S extends string>(pointer: PointerLiteral<S> | Pointer, schema: StandardSchemaV1): Promise<boolean>
+  has(...path: Segment[]): Promise<boolean>
+  has(...args: [...Segment[], StandardSchemaV1]): Promise<boolean>
 
-  get<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<unknown>
-  get<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    schema: Sch,
-  ): Promise<InferOutput<Sch>>
+  get(...path: Segment[]): Promise<unknown>
+  get<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): Promise<InferOutput<Sch>>
 
-  count<S extends string>(pointer: PointerLiteral<S> | Pointer): Promise<number>
+  count(...path: Segment[]): Promise<number>
 
-  iter<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<unknown[]>
-  iter<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    schema: Sch,
-  ): AsyncIterable<InferOutput<Sch>[]>
-  // withKey overloads precede the non-withKey ones so TS resolves the
-  // tuple-yielding signatures first.
-  iter<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: IterOptions & { withKey: true; schema: Sch },
+  iter(...path: Segment[]): AsyncIterable<unknown[]>
+  iter<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): AsyncIterable<InferOutput<Sch>[]>
+  iter<Sch extends StandardSchemaV1>(
+    ...args: [...Segment[], IterOptions & { withIndex: true; schema: Sch }]
   ): AsyncIterable<[IterIndex, InferOutput<Sch>][]>
-  iter<S extends string>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: IterOptions & { withKey: true },
-  ): AsyncIterable<[IterIndex, unknown][]>
-  iter<S extends string, Sch extends StandardSchemaV1>(
-    pointer: PointerLiteral<S> | Pointer,
-    options: IterOptions & { schema: Sch },
+  iter<Sch extends StandardSchemaV1>(
+    ...args: [...Segment[], IterOptions & { schema: Sch }]
   ): AsyncIterable<InferOutput<Sch>[]>
-  iter<S extends string>(pointer: PointerLiteral<S> | Pointer, options: IterOptions): AsyncIterable<unknown[]>
+  iter<S extends Record<string, Segment | Path>>(
+    ...args: [...Segment[], IterOptions & { withIndex: true; select: S }]
+  ): AsyncIterable<[IterIndex, SelectMapShape<S>][]>
+  iter<S extends Record<string, Segment | Path>>(
+    ...args: [...Segment[], IterOptions & { select: S }]
+  ): AsyncIterable<SelectMapShape<S>[]>
+  iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
+  iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
 
   /** Stream child positions as cursors. */
-  walk<S extends string>(pointer: PointerLiteral<S> | Pointer): AsyncIterable<Cursor>
+  walk(...path: Segment[]): AsyncIterable<Cursor>
 
   /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
   cacheStats(): CacheStats
@@ -145,28 +139,84 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
-function normalizeIterArgs(arg?: StandardSchemaV1 | IterOptions): {
-  schema?: StandardSchemaV1
-  select?: string | Record<string, string>
-  batch?: number
-  onInvalid?: 'throw' | 'skip'
-  withKey?: boolean
-} {
-  if (!arg) return {}
-  if ('~standard' in arg) return { schema: arg as StandardSchemaV1 }
-  const options = arg as IterOptions
-  return {
-    schema: options.schema,
-    select: options.select,
-    batch: options.batch,
-    onInvalid: options.onInvalid,
-    withKey: options.withIndex,
+/** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
+ *  comfortably covers any in-memory JSON array. */
+const MAX_ARRAY_INDEX = 0xffffffff
+
+function validatePath(path: readonly unknown[]): asserts path is readonly Segment[] {
+  for (let i = 0; i < path.length; i++) {
+    const s = path[i]
+    if (typeof s === 'string') continue
+    if (typeof s === 'number' && Number.isInteger(s) && s >= 0 && s <= MAX_ARRAY_INDEX) continue
+    throw new TypeError(
+      `path segment ${i}: expected string or non-negative integer (<= ${MAX_ARRAY_INDEX}), got ${describeBadSegment(s)}`,
+    )
   }
 }
 
-function serializeSelect(select: string | Record<string, string>): string {
-  if (typeof select === 'string') return JSON.stringify({ one: select })
-  const entries = Object.entries(select)
+function describeBadSegment(s: unknown): string {
+  if (typeof s === 'number') return `${s}`
+  if (s === null) return 'null'
+  return typeof s
+}
+
+function splitArgs<TTail>(args: VariadicPathArgs<TTail>): { path: Segment[]; tail: TTail | undefined } {
+  let pathArgs: unknown[]
+  let tail: TTail | undefined
+  if (args.length === 0) {
+    pathArgs = []
+    tail = undefined
+  } else {
+    const last = args[args.length - 1]
+    if (last !== null && typeof last === 'object' && !Array.isArray(last)) {
+      pathArgs = args.slice(0, -1)
+      tail = last as TTail
+    } else {
+      pathArgs = args as unknown[]
+      tail = undefined
+    }
+  }
+  validatePath(pathArgs)
+  return { path: pathArgs as Segment[], tail }
+}
+
+function isSchema(value: unknown): value is StandardSchemaV1 {
+  return typeof value === 'object' && value !== null && '~standard' in value
+}
+
+function normalizeIterTail(tail: StandardSchemaV1 | IterOptions | undefined): {
+  schema?: StandardSchemaV1
+  select?: Segment | Path | Record<string, Segment | Path>
+  batch?: number
+  onInvalid?: 'throw' | 'skip'
+  withIndex?: boolean
+} {
+  if (!tail) return {}
+  if (isSchema(tail)) return { schema: tail }
+  return {
+    schema: tail.schema,
+    select: tail.select,
+    batch: tail.batch,
+    onInvalid: tail.onInvalid,
+    withIndex: tail.withIndex,
+  }
+}
+
+function serializeSelect(select: Segment | Path | Record<string, Segment | Path>): string {
+  if (typeof select === 'string' || typeof select === 'number') {
+    const one = [select]
+    validatePath(one)
+    return JSON.stringify({ one })
+  }
+  if (Array.isArray(select)) {
+    validatePath(select)
+    return JSON.stringify({ one: select })
+  }
+  const entries = Object.entries(select).map(([k, sub]) => {
+    const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
+    validatePath(path)
+    return [k, path] as const
+  })
   if (entries.length === 0) {
     throw new RangeError('iter: select must have at least one field')
   }
@@ -178,33 +228,37 @@ function wrap(native: NativeCursor): Cursor {
     get key() {
       return native.key
     },
-    async has(pointer: string, schema?: StandardSchemaV1): Promise<boolean> {
-      if (!schema) return native.has(pointer)
-      if (!(await native.has(pointer))) return false
-      const result = await schema['~standard'].validate(await native.get(pointer))
+    async has(...args: VariadicPathArgs<StandardSchemaV1>): Promise<boolean> {
+      const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
+      if (!schema) return native.has(path)
+      if (!(await native.has(path))) return false
+      const result = await schema['~standard'].validate(await native.get(path))
       return result.issues === undefined
     },
-    async get(pointer: string, schema?: StandardSchemaV1): Promise<unknown> {
-      const value = await native.get(pointer)
-      return schema ? runStandardSchema(schema, value, pointer) : value
+    async get(...args: VariadicPathArgs<StandardSchemaV1>): Promise<unknown> {
+      const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
+      const value = await native.get(path)
+      return schema ? runStandardSchema(schema, value, path) : value
     },
-    count(pointer: string): Promise<number> {
-      return native.count(pointer)
+    count(...path: Segment[]): Promise<number> {
+      validatePath(path)
+      return native.count(path)
     },
-    iter(pointer: string, optionsOrSchema?: StandardSchemaV1 | IterOptions): AsyncIterable<unknown[]> {
-      const { schema, select, batch, onInvalid, withKey } = normalizeIterArgs(optionsOrSchema)
+    iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): AsyncIterable<unknown[]> {
+      const { path, tail } = splitArgs<StandardSchemaV1 | IterOptions>(args)
+      const { schema, select, batch, onInvalid, withIndex } = normalizeIterTail(tail)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
         throw new RangeError(`iter: batch must be a positive integer, got ${batch}`)
       }
       const resolvedBatch = batch ?? DEFAULT_ITER_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const inner = native.iter(pointer, { selectIr, batch: resolvedBatch, withKey })
+      const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: withIndex })
       if (!schema) return inner as AsyncIterable<unknown[]>
       const policy = onInvalid ?? 'throw'
 
       // The native side has already shaped each item inside the batch:
-      // `value` when `!withKey`, `[key, value]` when `withKey`. Schema
-      // validation only ever runs against the value half; the key passes
+      // `value` when `!withIndex`, `[index, value]` when `withIndex`. Schema
+      // validation only ever runs against the value half; the index passes
       // through unchanged. With `onInvalid: 'skip'` a batch may shrink or
       // come back empty.
       return {
@@ -213,20 +267,21 @@ function wrap(native: NativeCursor): Cursor {
           for await (const b of inner) {
             const out: unknown[] = []
             for (const v of b as unknown[]) {
-              const value = withKey ? (v as [IterIndex, unknown])[1] : v
-              const result = await validateItem(schema, value, `${pointer}/${i++}`, policy)
+              const value = withIndex ? (v as [IterIndex, unknown])[1] : v
+              const result = await validateItem(schema, value, [...path, i++], policy)
               if ('skip' in result) continue
-              out.push(withKey ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
+              out.push(withIndex ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
             }
             yield out
           }
         },
       }
     },
-    walk(pointer: string) {
+    walk(...path: Segment[]) {
+      validatePath(path)
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const child of native.walk(pointer)) {
+          for await (const child of native.walk(path)) {
             yield wrap(child)
           }
         },

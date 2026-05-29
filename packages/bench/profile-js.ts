@@ -56,7 +56,7 @@ async function heapPlateauPhase(path: string): Promise<HeapSample[]> {
   const baseline = process.memoryUsage().heapUsed
   const samples: HeapSample[] = []
   let seen = 0
-  outer: for await (const batch of cursor.iter('/items', { select: '/name' })) {
+  outer: for await (const batch of cursor.iter('items', { select: ['name'] })) {
     for (let i = 0; i < batch.length; i++) {
       seen += 1
       if (seen % HEAP_SAMPLE_EVERY === 0) {
@@ -75,8 +75,8 @@ async function weakRefPhase(path: string): Promise<{ total: number; alive: numbe
   await using cursor = await open(fromFile(path))
   const refs: WeakRef<object>[] = []
   let seen = 0
-  for await (const child of cursor.walk('/items')) {
-    await child.get('/name')
+  for await (const child of cursor.walk('items')) {
+    await child.get('name')
     refs.push(new WeakRef(child))
     seen += 1
     if (seen >= WEAKREF_ITEMS) break

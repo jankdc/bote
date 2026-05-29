@@ -10,8 +10,8 @@ import { memorySource, enc } from './fixtures.ts'
 test('walk_object_yields_keys_and_values', async () => {
   const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))
   const entries: Array<{ key: string | number | null; value: unknown }> = []
-  for await (const sub of cursor.walk('')) {
-    entries.push({ key: sub.key, value: await sub.get('') })
+  for await (const sub of cursor.walk()) {
+    entries.push({ key: sub.key, value: await sub.get() })
   }
   assert.equal(entries.length, 3)
   assert.deepEqual(
@@ -31,8 +31,8 @@ test('walk_object_yields_keys_and_values', async () => {
 test('walk_array_yields_numeric_keys', async () => {
   const cursor = await open(memorySource(enc('[10,20,30]')))
   const entries: Array<{ key: string | number | null; value: unknown }> = []
-  for await (const sub of cursor.walk('')) {
-    entries.push({ key: sub.key, value: await sub.get('') })
+  for await (const sub of cursor.walk()) {
+    entries.push({ key: sub.key, value: await sub.get() })
   }
   assert.deepEqual(entries, [
     { key: 0, value: 10 },
@@ -46,12 +46,22 @@ test('walk_subcursor_key_and_get_resolve_against_anchor', async () => {
   const cursor = await open(memorySource(data))
   const keys: Array<string | number | null> = []
   const names: string[] = []
-  for await (const user of cursor.walk('/users')) {
+  for await (const user of cursor.walk('users')) {
     keys.push(user.key)
-    names.push((await user.get('/name')) as string)
+    names.push((await user.get('name')) as string)
   }
   assert.deepEqual(keys, [0, 1]) // key reflects the parent step, even when nested
   assert.deepEqual(names, ['Alice', 'Bob']) // relative get resolves against the child anchor
+})
+
+test('walk_missing_path_yields_empty', async (t) => {
+  // A missing path on `walk` produces no children, mirroring the same total
+  // / non-throwing semantics get/has/count already have.
+  const cursor = await open(memorySource(enc('{"users":[1,2]}')))
+  t.after(() => cursor.close())
+  const seen: unknown[] = []
+  for await (const sub of cursor.walk('missing')) seen.push(sub.key)
+  assert.deepEqual(seen, [])
 })
 
 test('walk_large_array_under_tight_budget', async () => {
@@ -59,8 +69,8 @@ test('walk_large_array_under_tight_budget', async () => {
   const data = enc('[' + items.join(',') + ']')
   const cursor = await open(memorySource(data, 128), { maxResidentChunks: 16 })
   const ids: number[] = []
-  for await (const item of cursor.walk('')) {
-    ids.push((await item.get('/id')) as number)
+  for await (const item of cursor.walk()) {
+    ids.push((await item.get('id')) as number)
   }
   assert.equal(ids.length, 100)
   assert.equal(ids[0], 0)

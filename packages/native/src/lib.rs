@@ -13,7 +13,7 @@ mod simd;
 mod walker;
 
 // evaluation
-mod pointer;
+mod path;
 mod resolve;
 mod select;
 

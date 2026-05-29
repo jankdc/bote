@@ -9,28 +9,27 @@
 use std::collections::HashMap;
 
 use crate::cache::ChunkRef;
-use crate::pointer::JsonPointer;
+use crate::path::Segment;
 use crate::session::{doubling_burst, Query, Session, SessionError};
 use crate::walker::{AdvanceCommas, ChunkBytes, TraverseError, Walker};
 
-/// Count the children of the container `pointer_str` resolves to, with no
-/// materialization. A missing pointer or a non-container value is `0` (total
+/// Count the children of the container `path` resolves to, with no
+/// materialization. A missing path or a non-container value is `0` (total
 /// and non-throwing, like `has`).
 pub async fn at(
   session: &Session,
-  pointer_str: &str,
+  path: &[Segment],
   anchor_start: u64,
 ) -> Result<u64, SessionError> {
-  let pointer = JsonPointer::parse(pointer_str)?;
   let mut q = Query::new(session);
   // run_locate (not run_resolve): we only need the container's start; the
   // child count comes from a per-comma scan started at the opener, not
   // from the value's end offset.
   let Some(start) = session
-    .run_locate(&pointer, anchor_start, &mut q.pinned)
+    .run_locate(path, anchor_start, &mut q.pinned)
     .await?
   else {
-    return Ok(0); // missing pointer
+    return Ok(0); // missing path
   };
   let Some(cw) = session.enter_container(start, &mut q.pinned).await? else {
     return Ok(0); // not an object or array
@@ -47,11 +46,9 @@ async fn children(
 ) -> Result<u64, SessionError> {
   let mut state = CountState::new(start);
   session
-    .drive(
-      pinned,
-      doubling_burst(),
-      |walker| count_step(walker, &mut state),
-    )
+    .drive(pinned, doubling_burst(), |walker| {
+      count_step(walker, &mut state)
+    })
     .await
 }
 

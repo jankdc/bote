@@ -113,7 +113,7 @@ async function runOnce(approach: string, file: string, idx: number): Promise<num
     const t0 = performance.now()
     const cursor = await open(fromFile(file))
     try {
-      const item = await cursor.get(`/${idx}`)
+      const item = await cursor.get(idx)
       void item
       return (performance.now() - t0) * 1e6
     } finally {

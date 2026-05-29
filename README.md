@@ -13,38 +13,64 @@ import * as z from 'zod' // or bring your own Standard Schema validator
 
 const User = z.object({
   id: z.string(),
+  name: z.string(),
   email: z.string(),
+  details: z.object({
+    lastLoggedIn: z.number()
+  })
 })
 
 type User = z.infer<typeof User>
 
 await using cursor = await open(fromFile('./your-big.json'))
 
-// if you want one value
-const user0: unknown = await cursor.get('/1234/users/0')
+// users[1000].name
+const desc0: unknown = await cursor.get('users', 1000, 'name')
+// for .get and .iter, you can supply a validator as the last argument
+const desc1: string = await cursor.get('users', 1000, 'name', User.shape.name)
 
-// for .get and .iter, you can supply a validator
-const user1: User = await cursor.get('/1234/users/1', User)
-
-for await (const batch of cursor.iter('/1234/users')) {
-  for (const user of batch) console.log(user)
+// iterate an array in batches
+for await (const batch of cursor.iter('users', User)) {
+  // batch: User[]
+  for (const user of batch) {
+    console.log(user)
+  }
 }
 
-// project a single field per child without materializing the whole thing
-for await (const batch of cursor.iter('/1234/users', { select: '/id' })) {
-  for (const id of batch) console.log({ id })
+// pick several fields into a named object to avoid resolving big items
+for await (const batch of cursor.iter('users', { 
+  select: { 
+    id: 'id', 
+    logged: ['details', 'lastLoggedIn']
+  },
+  schema: z.object({
+    id: User.shape.id,
+    logged: User.shape.details.lastLoggedIn
+  })
+})) {
+  // batch: { id: string, logged: number }[]
+  for (const userLog of batch) {
+    console.log(userLog)
+  }
 }
 
-// add `withKey: true` to get the index (or member name) alongside the value
-for await (const batch of cursor.iter('/1234/users', { select: '/id', withKey: true })) {
-  for (const [i, id] of batch) console.log({ i, id })
+// or pick a single field
+for await (const batch of cursor.iter('users', { 
+  select: 'name',
+  schema: User.shape.name
+})) { 
+  // batch: string[]
+  for (const name of batch) {
+    console.log({ name })
+  }
 }
 
-// for open-ended per-child work (conditional reads, recursive descent, nested
-// iters), `walk` still yields a subcursor positioned at each child:
-for await (const userCursor of cursor.walk('/1234/users')) {
-  if (await userCursor.has('/details')) {
-    console.log(await userCursor.get('/details'))
+// for open-ended per-child work (e.g. conditional reads, recursive descent, nested
+// iters), `walk` yields a subcursor positioned at each child:
+for await (const metaCursor of cursor.walk('meta')) {
+  if (metaCursor.key === "details") {
+    const detailsValue = await metaCursor.get()
+    console.log(detailsValue)
   }
 }
 
@@ -54,7 +80,7 @@ for await (const userCursor of cursor.walk('/1234/users')) {
 await cursor.close()
 ```
 
-given a **seekable** source (e.g. a file, an HTTP range) and a JSON pointer, it can retrieve values in a JSON quickly, without loading the whole thing in-memory.
+given a **seekable** source (e.g. a file, an HTTP range) and a path, it can retrieve values in a JSON quickly, without loading the whole thing in-memory.
 
 here's a run (Apple M1 Pro 2021, 500MB JSON array file, cold-cache, default settings):
 

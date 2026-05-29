@@ -2,11 +2,11 @@
 //!
 //! A Cursor is a handle around an [`Arc<Session>`] plus an optional anchor
 //! [`ValueLocation`]. The root Cursor returned by `open()` has no anchor -
-//! pointer resolution starts at byte 0. Sub-cursors yielded by `walk` carry
-//! an anchor and resolve pointers relative to that location.
+//! path resolution starts at byte 0. Sub-cursors yielded by `walk` carry
+//! an anchor and resolve paths relative to that location.
 //!
 //! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`] -
-//! napi async-iterators that lazily resolve their pointer on first `next()`
+//! napi async-iterators that lazily resolve their path on first `next()`
 //! and then step through children one entry at a time. Each step retries
 //! through `Pending` by fetching chunks as needed.
 
@@ -18,6 +18,7 @@ use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
 use crate::cache::ChunkRef;
+use crate::path::{self, Segment};
 use crate::resolve::{ChildEntry, Children, ContainerKind, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
@@ -96,20 +97,26 @@ impl Cursor {
 
 #[napi]
 impl Cursor {
-  #[napi]
-  pub async fn has(&self, pointer: String) -> napi::Result<bool> {
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub async fn has(&self, path: Vec<Either<String, u32>>) -> napi::Result<bool> {
     self
       .session
-      .has_at(&pointer, self.anchor_start())
+      .has_at(&path::from_napi(path), self.anchor_start())
       .await
       .map_err(map_err)
   }
 
-  #[napi(ts_return_type = "Promise<unknown>")]
-  pub async fn get(&self, pointer: String) -> napi::Result<Either<serde_json::Value, ()>> {
+  #[napi(
+    ts_args_type = "path: Array<string | number>",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn get(
+    &self,
+    path: Vec<Either<String, u32>>,
+  ) -> napi::Result<Either<serde_json::Value, ()>> {
     self
       .session
-      .get_at(&pointer, self.anchor_start())
+      .get_at(&path::from_napi(path), self.anchor_start())
       .await
       .map(|opt| match opt {
         Some(v) => Either::A(v),
@@ -118,9 +125,9 @@ impl Cursor {
       .map_err(map_err)
   }
 
-  #[napi]
-  pub async fn count(&self, pointer: String) -> napi::Result<f64> {
-    crate::count::at(&self.session, &pointer, self.anchor_start())
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
+    crate::count::at(&self.session, &path::from_napi(path), self.anchor_start())
       .await
       .map(|n| n as f64)
       .map_err(map_err)
@@ -135,8 +142,8 @@ impl Cursor {
     }
   }
 
-  #[napi]
-  pub fn iter(&self, pointer: String, options: Option<IterArgs>) -> CursorIter {
+  #[napi(ts_args_type = "path: Array<string | number>, options?: IterArgs | null")]
+  pub fn iter(&self, path: Vec<Either<String, u32>>, options: Option<IterArgs>) -> CursorIter {
     let (select_ir, batch, with_key) = match options {
       Some(o) => (
         o.select_ir,
@@ -152,7 +159,7 @@ impl Cursor {
     };
     CursorIter::new(
       self.session.clone(),
-      pointer,
+      path::from_napi(path),
       self.anchor_start(),
       select_ir,
       batch,
@@ -160,9 +167,13 @@ impl Cursor {
     )
   }
 
-  #[napi]
-  pub fn walk(&self, pointer: String) -> CursorWalk {
-    CursorWalk::new(self.session.clone(), pointer, self.anchor_start())
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub fn walk(&self, path: Vec<Either<String, u32>>) -> CursorWalk {
+    CursorWalk::new(
+      self.session.clone(),
+      path::from_napi(path),
+      self.anchor_start(),
+    )
   }
 
   #[napi]
@@ -180,11 +191,12 @@ impl Cursor {
 /// Shared iteration state. Each `next()` call locks this briefly to
 /// snapshot or update; awaits happen with the lock held (tokio Mutex).
 struct IterState {
-  pointer: String,
+  path: Vec<Segment>,
   anchor_start: u64,
   initialized: bool,
   /// Set after first `next()` finishes initialization. `None` if the
-  /// pointer resolved to a non-container (iteration yields nothing).
+  /// path didn't resolve, or resolved to a non-container (iteration
+  /// yields nothing in either case).
   walker: Option<Children>,
   /// Pin map reused across yields. At rest (between yields) it holds at
   /// most the single chunk covering the walker's `next_offset`, so the
@@ -207,14 +219,14 @@ struct IterState {
 
 impl IterState {
   fn new(
-    pointer: String,
+    path: Vec<Segment>,
     anchor_start: u64,
     select_ir: Option<String>,
     batch: usize,
     with_key: bool,
   ) -> Self {
     Self {
-      pointer,
+      path,
       anchor_start,
       initialized: false,
       walker: None,
@@ -229,16 +241,14 @@ impl IterState {
 
 async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(), SessionError> {
   // Compile the `select` projection once, on first use. A malformed projection
-  // (bad JSON or sub-pointer) surfaces here, as this first `next()`'s error.
+  // (bad JSON) surfaces here, as this first `next()`'s error.
   let select = match state.select_ir.as_deref() {
     Some(json) => Some(CompiledSelect::parse(json)?),
     None => None,
   };
   state.select = select;
 
-  let start_opt = session
-    .locate_at(&state.pointer, state.anchor_start)
-    .await?;
+  let start_opt = session.locate_at(&state.path, state.anchor_start).await?;
 
   if let Some(start) = start_opt {
     state.walker = session.enter_container(start, &mut state.pinned).await?;
@@ -276,7 +286,7 @@ pub struct CursorIter {
 impl CursorIter {
   fn new(
     session: Arc<Session>,
-    pointer: String,
+    path: Vec<Segment>,
     anchor_start: u64,
     select_ir: Option<String>,
     batch: usize,
@@ -285,7 +295,7 @@ impl CursorIter {
     Self {
       session,
       state: Arc::new(AsyncMutex::new(IterState::new(
-        pointer,
+        path,
         anchor_start,
         select_ir,
         batch,
@@ -410,12 +420,12 @@ pub struct CursorWalk {
 }
 
 impl CursorWalk {
-  fn new(session: Arc<Session>, pointer: String, anchor_start: u64) -> Self {
+  fn new(session: Arc<Session>, path: Vec<Segment>, anchor_start: u64) -> Self {
     Self {
       session,
       // walk navigates positions, so it never projects, batches, or wraps.
       state: Arc::new(AsyncMutex::new(IterState::new(
-        pointer,
+        path,
         anchor_start,
         None,
         0,
@@ -447,16 +457,11 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
           .await
           .map_err(map_err)?;
       }
-      let IterState {
-        walker, pinned, ..
-      } = &mut *guard;
+      let IterState { walker, pinned, .. } = &mut *guard;
       let Some(walker) = walker.as_mut() else {
         return Ok(None);
       };
-      let entry = session
-        .next_child(walker, pinned)
-        .await
-        .map_err(map_err)?;
+      let entry = session.next_child(walker, pinned).await.map_err(map_err)?;
       // End-of-next defensive prune: matched and exhausted paths both
       // converge here.
       session.prune_frontier_and_sync(pinned, walker.next_offset);
@@ -485,6 +490,10 @@ mod tests {
   use crate::cache::CacheOptions;
   use crate::source::{InMemorySource, Source};
   use napi::bindgen_prelude::AsyncGenerator;
+
+  fn items_path() -> Vec<Segment> {
+    vec![Segment::Member("items".into())]
+  }
 
   /// `{"items":[{"name":"i0000",...}, ...]}` sized to span many chunks so a
   /// walk pins a real frontier chunk and the cap is in force throughout.
@@ -515,7 +524,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
     // Advance a few elements so the walker holds a live frontier pin.
     for _ in 0..3 {
       assert!(w.next(None).await.unwrap().is_some());
@@ -539,7 +548,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_safe_when_child_escapes() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
     let child = w.next(None).await.unwrap().expect("first child");
 
     w.complete(None).await.unwrap();
@@ -547,7 +556,7 @@ mod tests {
     assert!(w.state.lock().await.pinned.is_empty());
     // The escaped child is still fully usable: its session outlives the walk.
     assert!(matches!(
-      child.get("/name".into()).await.unwrap(),
+      child.get(vec![Either::A("name".into())]).await.unwrap(),
       Either::A(ref v) if v == &serde_json::json!("i0000")
     ));
   }
@@ -558,7 +567,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+      let mut w = CursorWalk::new(s.clone(), items_path(), 0);
       // Partial walk, then early-terminate via complete() (the break path).
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
@@ -582,7 +591,7 @@ mod tests {
     // batch=1 so each next() yields after one child, mirroring the old
     // single-item path the rest of this test exercises (frontier pin held
     // between yields).
-    let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 1, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 1, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -601,7 +610,7 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_batch_early_break_releases() {
     let s = session(500, 256, 4);
-    let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 8, false);
     // Pull one batch, then early-terminate via complete() (the break path).
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
@@ -620,9 +629,9 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut it = CursorIter::new(
       s.clone(),
-      "/items".into(),
+      items_path(),
       0,
-      Some(r#"{"one":"/total"}"#.to_string()),
+      Some(r#"{"one":["total"]}"#.to_string()),
       64,
       false,
     );
@@ -638,7 +647,8 @@ mod tests {
   #[tokio::test]
   async fn iter_on_object_target_throws() {
     let s = session(50, 256, 4);
-    let mut it = CursorIter::new(s.clone(), "".into(), 0, None, 8, false);
+    // Empty path -> the root object.
+    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, None, 8, false);
     let err = it.next(None).await.expect_err("object target must throw");
     assert!(
       err.reason.contains("use walk()"),
@@ -660,7 +670,7 @@ mod tests {
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorIter::new(s.clone(), "/items".into(), 0, None, 8, false);
+      let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 8, false);
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       abandoned.push(it); // keep alive: no Drop, no GC

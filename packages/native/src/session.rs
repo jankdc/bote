@@ -26,7 +26,7 @@ use thiserror::Error;
 
 use crate::bitmap::BitmapStore;
 use crate::cache::{CacheError, CacheOptions, ChunkCache, ChunkRef};
-use crate::pointer::{JsonPointer, PointerParseError};
+use crate::path::Segment;
 use crate::resolve::{self, ChildEntry, Children, ResolveState, ValueLocation};
 use crate::select::SelectError;
 use crate::source::Source;
@@ -34,8 +34,6 @@ use crate::walker::{self, ChunkBytes, ChunkMiss, SkipState, TraverseError, Walke
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-  #[error(transparent)]
-  Pointer(#[from] PointerParseError),
   #[error("traversal error: {0}")]
   Traverse(#[from] TraverseError),
   #[error(transparent)]
@@ -93,29 +91,24 @@ impl Session {
 
   pub async fn locate_at(
     &self,
-    pointer_str: &str,
+    path: &[Segment],
     anchor_start: u64,
   ) -> Result<Option<u64>, SessionError> {
-    let pointer = JsonPointer::parse(pointer_str)?;
     let mut q = Query::new(self);
-    self.run_locate(&pointer, anchor_start, &mut q.pinned).await
+    self.run_locate(path, anchor_start, &mut q.pinned).await
   }
 
-  pub async fn has_at(&self, pointer_str: &str, anchor_start: u64) -> Result<bool, SessionError> {
-    Ok(self.locate_at(pointer_str, anchor_start).await?.is_some())
+  pub async fn has_at(&self, path: &[Segment], anchor_start: u64) -> Result<bool, SessionError> {
+    Ok(self.locate_at(path, anchor_start).await?.is_some())
   }
 
   pub async fn get_at(
     &self,
-    pointer_str: &str,
+    path: &[Segment],
     anchor_start: u64,
   ) -> Result<Option<serde_json::Value>, SessionError> {
-    let pointer = JsonPointer::parse(pointer_str)?;
     let mut q = Query::new(self);
-    let Some(loc) = self
-      .run_resolve(&pointer, anchor_start, &mut q.pinned)
-      .await?
-    else {
+    let Some(loc) = self.run_resolve(path, anchor_start, &mut q.pinned).await? else {
       return Ok(None);
     };
     let bytes = self.read_range(loc.start, loc.end, &mut q.pinned).await?;
@@ -214,7 +207,7 @@ impl Session {
     Ok(serde_json::from_slice(&bytes)?)
   }
 
-  /// Resolve `pointer` starting at `anchor_start`, returning only the
+  /// Resolve `path` starting at `anchor_start`, returning only the
   /// resolved value's **start offset** (no extent walk).
   ///
   /// Used by the entry points that don't need the value's bytes
@@ -223,7 +216,7 @@ impl Session {
   /// `ValueLocation` only when a caller actually needs it.
   pub(crate) async fn run_locate(
     &self,
-    pointer: &JsonPointer,
+    path: &[Segment],
     anchor_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<Option<u64>, SessionError> {
@@ -233,23 +226,21 @@ impl Session {
     // resumption - not the whole walk from the anchor.
     let mut state = ResolveState::new(anchor_start);
     self
-      .drive(
-        pinned,
-        doubling_burst(),
-        |walker| resolve::resolve_step(walker, pointer, &mut state),
-      )
+      .drive(pinned, doubling_burst(), |walker| {
+        resolve::resolve_step(walker, path, &mut state)
+      })
       .await
   }
 
-  /// Resolve `pointer` to a full `[start, end)` byte range. Equivalent to
+  /// Resolve `path` to a full `[start, end)` byte range. Equivalent to
   /// `run_locate` followed by `skip_value_at` on the start.
   pub(crate) async fn run_resolve(
     &self,
-    pointer: &JsonPointer,
+    path: &[Segment],
     anchor_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<Option<ValueLocation>, SessionError> {
-    let Some(start) = self.run_locate(pointer, anchor_start, pinned).await? else {
+    let Some(start) = self.run_locate(path, anchor_start, pinned).await? else {
       return Ok(None);
     };
     let end = self.skip_value_at(start, pinned).await?;
@@ -266,11 +257,9 @@ impl Session {
     // and long ones converge to near-single-pass once the burst caps out.
     let mut state = SkipState::start(from);
     self
-      .drive(
-        pinned,
-        doubling_burst(),
-        |walker| walker::skip_value_step(walker, &mut state),
-      )
+      .drive(pinned, doubling_burst(), |walker| {
+        walker::skip_value_step(walker, &mut state)
+      })
       .await
   }
 

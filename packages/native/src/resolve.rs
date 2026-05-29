@@ -1,11 +1,11 @@
-//! JSON Pointer evaluator.
+//! Path evaluator.
 //!
-//! Walks a parsed [`JsonPointer`] over a bitmap-driven [`Walker`], descending
-//! one reference token at a time into objects (by key) and arrays (by
-//! index). Returns the byte range covering the resolved value or `None`,
-//! when any token along the path doesn't address an existing member.
+//! Walks a [`&[Segment]`] over a bitmap-driven [`Walker`], descending one
+//! segment at a time into objects (by member name) and arrays (by index).
+//! Returns the byte range covering the resolved value or `None`, when any
+//! segment along the path doesn't address an existing member.
 
-use crate::pointer::{token_as_array_index, JsonPointer};
+use crate::path::Segment;
 use crate::walker::{AdvanceCommas, ChunkBytes, TraverseError, Walker};
 
 /// Byte range `[start, end)` covering a JSON value in the source document.
@@ -20,15 +20,15 @@ pub struct ValueLocation {
 /// faulted in - see [`resolve_step`].
 #[derive(Debug, Clone)]
 pub struct ResolveState {
-  /// 0-based index of the pointer token we're currently processing.
-  /// Reaches `pointer.tokens().len()` once all tokens are resolved.
-  token_idx: usize,
-  /// Byte offset where the current token's value starts. Before descending
+  /// 0-based index of the segment we're currently processing. Reaches
+  /// `path.len()` once all segments are resolved.
+  segment_idx: usize,
+  /// Byte offset where the current segment's value starts. Before descending
   /// this holds the offset of `{` or `[`; after descending into a member
   /// it points at the member value's first byte.
   start: u64,
-  /// Per-token scan state. `None` before descending into a container or
-  /// after a token has been fully resolved.
+  /// Per-segment scan state. `None` before descending into a container or
+  /// after a segment has been fully resolved.
   loop_state: Option<LoopState>,
 }
 
@@ -54,7 +54,7 @@ struct LoopState {
 impl ResolveState {
   pub fn new(start: u64) -> Self {
     Self {
-      token_idx: 0,
+      segment_idx: 0,
       start,
       loop_state: None,
     }
@@ -64,13 +64,12 @@ impl ResolveState {
 /// Drive the resolver forward against the current `state`.
 pub fn resolve_step<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
-  pointer: &JsonPointer,
+  path: &[Segment],
   state: &mut ResolveState,
 ) -> Result<Option<u64>, TraverseError> {
-  let tokens = pointer.tokens();
-  while state.token_idx < tokens.len() {
+  while state.segment_idx < path.len() {
     if state.loop_state.is_none() {
-      // First entry into this token - figure out the container kind. Commit
+      // First entry into this segment - figure out the container kind. Commit
       // `state.start` to the skipped-whitespace position before the byte
       // fetch so a `ChunkMiss` from `byte_at` doesn't re-skip on retry.
       let s = walker.skip_whitespace(state.start)?;
@@ -88,16 +87,20 @@ pub fn resolve_step<P: ChunkBytes + ?Sized>(
         depth: 0,
       });
     }
-    let token = &tokens[state.token_idx];
+    let segment = &path[state.segment_idx];
     let ls = state.loop_state.as_mut().expect("set just above");
-    let descend = match ls.kind {
-      ContainerKind::Object => step_object(walker, token, ls)?,
-      ContainerKind::Array => step_array(walker, token, ls)?,
+    let descend = match (ls.kind, segment) {
+      (ContainerKind::Object, Segment::Member(name)) => step_object(walker, name, ls)?,
+      (ContainerKind::Array, Segment::Element(idx)) => step_array(walker, *idx, ls)?,
+      // Type mismatch (member-name into array, index into object) is a miss,
+      // not an error - mirrors the old RFC 6901 behavior where `/0` against
+      // an object simply resolved to nothing.
+      _ => return Ok(None),
     };
     match descend {
       Some(value_start) => {
         state.start = value_start;
-        state.token_idx += 1;
+        state.segment_idx += 1;
         state.loop_state = None;
       }
       None => return Ok(None),
@@ -131,8 +134,8 @@ fn step_object<P: ChunkBytes + ?Sized>(
 
     // Fast path: JSON escapes (`\n`, `\"`, `\uXXXX`, ...) only ever *shrink*
     // a string's byte count, so if the raw byte span between the quotes is
-    // shorter than the pointer target, no decoding can make them equal -
-    // skip the `read_range` allocation entirely. When lengths could match,
+    // shorter than the target name, no decoding can make them equal - skip
+    // the `read_range` allocation entirely. When lengths could match,
     // delegate the byte-compare-or-escape-decode to the shared helper.
     let raw_len = (key_close - offset).saturating_sub(1) as usize;
     let target_bytes = target.as_bytes();
@@ -183,13 +186,9 @@ fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
 /// after each fully successful iteration.
 fn step_array<P: ChunkBytes + ?Sized>(
   walker: &mut Walker<P>,
-  target: &str,
+  target_index: usize,
   state: &mut LoopState,
 ) -> Result<Option<u64>, TraverseError> {
-  let Some(target_index) = token_as_array_index(target) else {
-    return Ok(None);
-  };
-
   // Fast path: jump to the target element by counting depth-0 commas in
   // the comma bitmap, skipping per-element skip_value calls.
   while state.index < target_index {

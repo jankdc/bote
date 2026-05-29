@@ -78,10 +78,14 @@ function mk(c: Omit<Cell, 'id'>): Cell {
 // micro-times scale with depth, so deep cells get fewer iters than shallow.
 function iterCount(scale: number, ap: AccessPattern): number {
   switch (ap) {
-    case 'shallow': return 1000;
-    case 'mid': return 100;
-    case 'deep': return scale >= 100_000 ? 5 : scale >= 10_000 ? 50 : 100;
-    default: return 1;
+    case 'shallow':
+      return 1000
+    case 'mid':
+      return 100
+    case 'deep':
+      return scale >= 100_000 ? 5 : scale >= 10_000 ? 50 : 100
+    default:
+      return 1
   }
 }
 
