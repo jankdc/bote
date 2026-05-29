@@ -18,6 +18,7 @@
 import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
+import { DEFAULT_ITER_BATCH } from '@botejs/core'
 import { heapProfilePeakBytes, heapProfileStart, heapProfileStop, open, type Cursor } from '@botejs/native'
 
 import { arg } from './cli.ts'
@@ -27,11 +28,13 @@ import { fmtBytes } from './format.ts'
 const DEFAULT_SYNTH_ITEMS = 7_000_000 // ≈ 385 MB at padWidth 7
 const PAD_WIDTH = 7
 
-async function walkAll(cursor: Cursor): Promise<number> {
+async function iterAll(cursor: Cursor): Promise<number> {
   let count = 0
-  for await (const child of cursor.walk('/items')) {
-    await child.get('/name')
-    count += 1
+  for await (const batch of cursor.iter(['items'], {
+    selectIr: JSON.stringify({ one: ['name'] }),
+    batch: DEFAULT_ITER_BATCH,
+  })) {
+    count += batch.length
   }
   return count
 }
@@ -47,10 +50,10 @@ async function profile(path: string, docBytes: number, outPath: string): Promise
     heapProfileStart(outPath)
     try {
       const cursor = open(source) // no options → default maxResidentChunks (512)
-      const seen = await walkAll(cursor)
+      const seen = await iterAll(cursor)
       // Read peak before stopping; stop tears the profiler down.
       peakBytes = heapProfilePeakBytes()
-      console.log(`Walked ${seen.toLocaleString()} items.`)
+      console.log(`Iterated ${seen.toLocaleString()} items.`)
     } finally {
       heapProfileStop()
     }

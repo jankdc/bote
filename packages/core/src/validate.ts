@@ -2,24 +2,65 @@ import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 export type { StandardSchemaV1 }
 
+export type Segment = string | number
+export type Path = readonly Segment[]
+
+export function formatPath(path: Path): string {
+  if (path.length === 0) return '(root)'
+  let out = ''
+  for (let i = 0; i < path.length; i++) {
+    const seg = path[i]
+    if (typeof seg === 'number') {
+      out += `[${seg}]`
+      continue
+    }
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg)) {
+      out += i === 0 ? seg : `.${seg}`
+    } else {
+      out += `[${JSON.stringify(seg)}]`
+    }
+  }
+  return out
+}
+
 export class ValidationError extends Error {
   readonly issues: readonly StandardSchemaV1.Issue[]
-  readonly pointer: string
+  readonly path: Path
 
-  constructor(issues: readonly StandardSchemaV1.Issue[], pointer: string) {
-    super(`bote: schema validation failed at ${pointer || '/'}: ${issues[0]?.message ?? 'unknown'}`)
+  constructor(issues: readonly StandardSchemaV1.Issue[], path: Path) {
+    super(`bote: schema validation failed at ${formatPath(path)}: ${issues[0]?.message ?? 'unknown'}`)
     this.name = 'ValidationError'
     this.issues = issues
-    this.pointer = pointer
+    this.path = path
   }
 }
 
 export async function runStandardSchema<O>(
   schema: StandardSchemaV1<unknown, O>,
   value: unknown,
-  pointer: string,
+  path: Path,
 ): Promise<O> {
   const result = await schema['~standard'].validate(value)
-  if (result.issues) throw new ValidationError(result.issues, pointer)
+  if (result.issues) throw new ValidationError(result.issues, path)
   return result.value
+}
+
+/**
+ * Validate one item for a stream fold. On failure: `'throw'` raises a
+ * `ValidationError`; `'skip'` returns `{ skip: true }` so the caller can drop
+ * the item (turning the schema into a filter). On success, returns the typed
+ * value.
+ */
+export async function validateItem<O>(
+  schema: StandardSchemaV1<unknown, O>,
+  value: unknown,
+  path: Path,
+  onInvalid: 'throw' | 'skip',
+): Promise<{ skip: true } | { value: O }> {
+  const result = await schema['~standard'].validate(value)
+  if (result.issues) {
+    if (onInvalid === 'skip') return { skip: true }
+    throw new ValidationError(result.issues, path)
+  }
+  return { value: result.value }
 }

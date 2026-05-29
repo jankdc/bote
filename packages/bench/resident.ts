@@ -2,7 +2,7 @@
 //
 // bote's promise is that the native memory held for source data stays at or
 // below a fixed ceiling (~ maxResidentChunks x chunkBytes), regardless of
-// document size. We walk array-of-objects docs of increasing size under a
+// document size. We iterate array-of-objects docs of increasing size under a
 // tight cap, sample peak resident (chunk + bitmap) bytes via the native
 // `cacheStats()` API, and assert that peak (a) stays under the cache's own
 // derived ceiling and (b) stays ~flat as the doc grows.
@@ -10,6 +10,7 @@
 //   yarn workspace @botejs/bench profile:resident
 //   yarn workspace @botejs/bench profile:resident --items 250000,1000000,2000000
 
+import { DEFAULT_ITER_BATCH } from '@botejs/core'
 import { open, type Cursor } from '@botejs/native'
 
 import { arg } from './cli.ts'
@@ -36,7 +37,7 @@ interface Reading {
   ceiling: number
 }
 
-async function walkSampling(cursor: Cursor, items: number): Promise<Reading> {
+async function iterSampling(cursor: Cursor, items: number): Promise<Reading> {
   let peakResident = 0
   let peakBitmap = 0
   let peakTotal = 0
@@ -53,13 +54,17 @@ async function walkSampling(cursor: Cursor, items: number): Promise<Reading> {
   }
 
   let seen = 0
-  for await (const child of cursor.walk('/items')) {
-    await child.get('/name')
-    seen += 1
-    if (seen % SAMPLE_EVERY === 0) sample()
+  for await (const batch of cursor.iter(['items'], {
+    selectIr: JSON.stringify({ one: ['name'] }),
+    batch: DEFAULT_ITER_BATCH,
+  })) {
+    for (let i = 0; i < batch.length; i++) {
+      seen += 1
+      if (seen % SAMPLE_EVERY === 0) sample()
+    }
   }
   sample()
-  if (seen !== items) throw new Error(`walked ${seen} of ${items} items`)
+  if (seen !== items) throw new Error(`iterated ${seen} of ${items} items`)
   return { items, docBytes: 0, peakResident, peakBitmap, peakTotal, peakChunks, ceiling }
 }
 
@@ -68,7 +73,7 @@ async function measure(items: number): Promise<Reading> {
     const source = await fileSource(path, CHUNK_BYTES)
     try {
       const cursor = open(source, { maxResidentChunks: MAX_RESIDENT_CHUNKS })
-      const r = await walkSampling(cursor, items)
+      const r = await iterSampling(cursor, items)
       r.docBytes = buf.byteLength
       return r
     } finally {
@@ -86,7 +91,7 @@ console.log(`Bounded-resident check: cap ${MAX_RESIDENT_CHUNKS} chunks x ${fmtBy
 
 const readings: Reading[] = []
 for (const items of sizes) {
-  console.log(`  walking ${items.toLocaleString()} items…`)
+  console.log(`  iterating ${items.toLocaleString()} items…`)
   readings.push(await measure(items))
 }
 

@@ -12,13 +12,11 @@ export interface SourceReader {
   /** Preferred read granularity in bytes. Must be a non-zero multiple of 64. */
   readonly chunkBytes?: number
   /**
-   * Fill `buf` with up to `buf.byteLength` bytes starting at `offset` and
-   * resolve with the number of bytes written. The implementation must not
-   * retain a reference to `buf` or read from it after the returned promise
-   * resolves: `buf` is a view over native-owned memory whose lifetime ends
-   * once the promise settles.
+   * Read up to `length` bytes starting at `offset` and resolve with the
+   * bytes read. The returned `Uint8Array`'s `.byteLength` is the actual
+   * count, which must be `<= length`.
    */
-  read(offset: number, buf: Uint8Array): Promise<number>
+  read(offset: number, length: number): Promise<Uint8Array>
   /** Release resources held by the reader. Driven once by the `open()` lifecycle. */
   close?(): Promise<void> | void
 }
@@ -61,12 +59,9 @@ export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptio
       Promise.resolve({
         size: view.byteLength,
         chunkBytes,
-        read: async (offset, dst) => {
-          const end = Math.min(offset + dst.byteLength, view.byteLength)
-          const n = Math.max(0, end - offset)
-          if (n > 0) dst.set(view.subarray(offset, end))
-          return n
-        },
+        // Subarray, not slice: we share the underlying buffer (zero-copy)
+        // and rely on bote's promise that it copies before resolving.
+        read: (offset, length) => Promise.resolve(view.subarray(offset, Math.min(offset + length, view.byteLength))),
       }),
   }
 }
@@ -81,9 +76,15 @@ export function fromFile(path: string, options?: FactoryOptions): Source {
       return {
         size: stat.size,
         chunkBytes,
-        read: async (offset, dst) => {
-          const { bytesRead } = await handle.read(dst, 0, dst.byteLength, offset)
-          return bytesRead
+        read: async (offset, length) => {
+          const buf = Buffer.allocUnsafe(length)
+          let filled = 0
+          while (filled < length) {
+            const { bytesRead } = await handle.read(buf, filled, length - filled, offset + filled)
+            if (bytesRead === 0) break
+            filled += bytesRead
+          }
+          return buf.subarray(0, filled)
         },
         close: async () => {
           if (closed) return
@@ -128,17 +129,15 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Source {
       return {
         size,
         chunkBytes,
-        read: async (offset, dst) => {
+        read: async (offset, length) => {
           // HTTP ranges are inclusive on both ends.
-          const end = Math.min(offset + dst.byteLength, size) - 1
+          const end = Math.min(offset + length, size) - 1
           const headers = new Headers(init?.headers)
           headers.set('Range', `bytes=${offset}-${end}`)
           headers.set('Accept-Encoding', 'identity')
           const res = await fetch(url, { ...init, headers, method: 'GET', signal: controller.signal })
           if (res.status === 206) {
-            const body = new Uint8Array(await res.arrayBuffer())
-            dst.set(body)
-            return body.byteLength
+            return new Uint8Array(await res.arrayBuffer())
           }
           // A 200 means the server ignored our Range request and returned the full
           // body. We throw here since the point of using ranges is to not have to

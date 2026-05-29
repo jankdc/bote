@@ -8,10 +8,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { DEFAULT_ITER_BATCH } from '@botejs/core'
 import { open, type Cursor } from '@botejs/native'
 
 import type { Cell, Reference, Result, Timing } from './cells.ts'
-import { buildFixture, fileSource, memorySource, type DocFixture, type Source } from './fixtures.ts'
+import { buildFixture, fileSource, memorySource, type DocFixture, type Path, type Source } from './fixtures.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -42,38 +43,44 @@ async function makeSource(cell: Cell, buf: Uint8Array): Promise<SourceHandle> {
 }
 
 // Returns items consumed (1 for get/has, iterated count for walk/iter).
-// `walk-get-name` is a walk that also fetches `/name` on every child -
+// `walk-get-name` is a walk that also fetches `name` on every child -
 // closer to a realistic streaming-traversal workload.
-async function invokeOnce(cursor: Cursor, cell: Cell, pointer: string): Promise<number> {
+//
+// The native binding takes paths as a single `Array<string|number>` arg, not
+// variadic; the variadic surface lives one layer up in `@botejs/core`. The
+// bench measures the native layer directly, so we pass the array as-is.
+async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<number> {
+  const p = path as (string | number)[]
   switch (cell.op) {
     case 'get':
-      await cursor.get(pointer)
+      await cursor.get(p)
       return 1
     case 'has':
-      await cursor.has(pointer)
+      await cursor.has(p)
       return 1
     case 'walk': {
       let n = 0
       if (cell.accessPattern === 'walk-get-name') {
-        for await (const child of cursor.walk(pointer)) {
-          await child.get('/name')
+        for await (const child of cursor.walk(p)) {
+          await child.get(['name'])
           n += 1
         }
       } else if (cell.accessPattern === 'walk-first') {
         // Stop after the first child: this times time-to-first-child, not a
         // full traversal.
-        for await (const _child of cursor.walk(pointer)) {
+        for await (const _child of cursor.walk(p)) {
           n = 1
           break
         }
       } else {
-        for await (const _child of cursor.walk(pointer)) n += 1
+        for await (const _child of cursor.walk(p)) n += 1
       }
       return n
     }
     case 'iter': {
+      // `.iter` always yields batches; count items, not yields.
       let n = 0
-      for await (const _value of cursor.iter(pointer)) n += 1
+      for await (const batch of cursor.iter(p, { batch: DEFAULT_ITER_BATCH })) n += batch.length
       return n
     }
   }
@@ -91,8 +98,8 @@ function percentile(sorted: number[], q: number): number {
 
 async function measureCell(cell: Cell): Promise<Result> {
   const fixture: DocFixture = buildFixture(cell.docShape, cell.docSize, cell.padWidth)
-  const pointer = fixture.pointers[cell.accessPattern]
-  if (pointer === null) {
+  const path = fixture.paths[cell.accessPattern]
+  if (path === null) {
     throw new Error(`cell ${cell.id}: shape ${cell.docShape} does not support access pattern ${cell.accessPattern}`)
   }
   const { source, cleanup } = await makeSource(cell, fixture.buf)
@@ -103,19 +110,19 @@ async function measureCell(cell: Cell): Promise<Result> {
     let itemsPerInvocation = 0
     const warmupDeadline = process.hrtime.bigint() + 50_000_000n // 50 ms
     do {
-      itemsPerInvocation = await invokeOnce(cursor, cell, pointer)
+      itemsPerInvocation = await invokeOnce(cursor, cell, path)
     } while (process.hrtime.bigint() < warmupDeadline)
 
     const batchMeans: number[] = []
     for (let s = 0; s < cell.samples; s++) {
       const t0 = process.hrtime.bigint()
-      for (let i = 0; i < cell.iterations; i++) await invokeOnce(cursor, cell, pointer)
+      for (let i = 0; i < cell.iterations; i++) await invokeOnce(cursor, cell, path)
       const t1 = process.hrtime.bigint()
       batchMeans.push(Number(t1 - t0) / cell.iterations)
     }
 
     const timing = summarizeTiming(batchMeans, cell, itemsPerInvocation)
-    const reference = measureParseReference(fixture.buf, cell, pointer, timing.min_ns)
+    const reference = measureParseReference(fixture.buf, cell, path, timing.min_ns)
     return { cell, timing, reference }
   } finally {
     await cleanup()
@@ -143,17 +150,15 @@ function summarizeTiming(batchMeans: number[], cell: Cell, itemsPerInvocation: n
   }
 }
 
-// Walk a parsed JS value by JSON pointer (RFC 6901). The empty pointer ``
-// resolves to the root, which `walk`/`iter` cells on a wide-flat doc rely
-// on. Used inside the JSON.parse reference so the comparison runs the same
-// logical lookup as the bote op.
-function evalPointer(obj: unknown, pointer: string): unknown {
-  const parts = pointer.split('/').slice(1)
+// Walk a parsed JS value by typed path segments. An empty path resolves to
+// the root, which `walk`/`iter` cells on a wide-flat doc rely on. Used
+// inside the JSON.parse reference so the comparison runs the same logical
+// lookup as the bote op.
+function evalPath(obj: unknown, path: Path): unknown {
   let cur: unknown = obj
-  for (const part of parts) {
-    const key = part.replace(/~1/g, '/').replace(/~0/g, '~')
-    if (Array.isArray(cur)) cur = cur[Number.parseInt(key, 10)]
-    else if (cur && typeof cur === 'object') cur = (cur as Record<string, unknown>)[key]
+  for (const seg of path) {
+    if (Array.isArray(cur) && typeof seg === 'number') cur = cur[seg]
+    else if (cur && typeof cur === 'object' && typeof seg === 'string') cur = (cur as Record<string, unknown>)[seg]
     else return undefined
   }
   return cur
@@ -162,8 +167,8 @@ function evalPointer(obj: unknown, pointer: string): unknown {
 // The op-equivalent work to do against a parsed JS value: the same logical
 // lookup or traversal the bote op performs. Returns a count derived from
 // the actual work so V8 can't elide it.
-function referenceWork(parsed: unknown, cell: Cell, pointer: string): number {
-  const target = evalPointer(parsed, pointer)
+function referenceWork(parsed: unknown, cell: Cell, path: Path): number {
+  const target = evalPath(parsed, path)
   if (cell.op === 'get' || cell.op === 'has') return target === undefined ? 0 : 1
   // walk / iter: traverse the resolved container's children.
   if (target === null || typeof target !== 'object') return 0
@@ -189,11 +194,11 @@ function referenceWork(parsed: unknown, cell: Cell, pointer: string): number {
 // time it, pick the smallest iter count that puts each reference batch in
 // the ~200 ms window, capped at `cell.iters`. Report the min (matching
 // bote's min_ns) so the ratio compares like for like.
-function measureParseReference(buf: Uint8Array, cell: Cell, pointer: string, boteMinNs: number): Reference {
+function measureParseReference(buf: Uint8Array, cell: Cell, path: Path, boteMinNs: number): Reference {
   const decoder = new TextDecoder()
   let sink = 0
   const parseOnce = (): void => {
-    sink += referenceWork(JSON.parse(decoder.decode(buf)), cell, pointer)
+    sink += referenceWork(JSON.parse(decoder.decode(buf)), cell, path)
   }
   const warmupT0 = process.hrtime.bigint()
   parseOnce()

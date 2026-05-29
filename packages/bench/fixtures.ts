@@ -1,6 +1,7 @@
 // Doc builders, napi-shape Source adapters, temp-doc lifecycle, and the
 // shape/pattern table used by the matrix worker.
 
+import type { Path, Segment } from '@botejs/core'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,9 +11,11 @@ export interface Source {
   /** Preferred read granularity (non-zero multiple of 64). Defaults to
    *  64 KiB inside the native binding when omitted. */
   chunkBytes?: number
-  /** Fill `args.buf` starting at `args.offset` and resolve with bytesRead.
-   *  `args.buf` is native-owned and must not be retained past the promise. */
-  read(args: { offset: number; buf: Uint8Array }): Promise<number>
+  /** Read up to `args.length` bytes at `args.offset` and resolve with a
+   *  `Uint8Array` of bytes read. The returned `.byteLength` is the actual
+   *  count, shorter only at end-of-source. The buffer is JS-owned; bote
+   *  copies what it needs before the promise settles. */
+  read(args: { offset: number; length: number }): Promise<Uint8Array>
   /** Release resources owned by the source (e.g. an open file handle).
    *  Call after the consuming cursor is no longer in use. */
   close?(): Promise<void>
@@ -22,12 +25,7 @@ export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
   return {
     size: data.length,
     chunkBytes,
-    read: ({ offset, buf }) => {
-      const end = Math.min(offset + buf.byteLength, data.length)
-      const n = Math.max(0, end - offset)
-      if (n > 0) buf.set(data.subarray(offset, end))
-      return Promise.resolve(n)
-    },
+    read: ({ offset, length }) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
   }
 }
 
@@ -38,9 +36,10 @@ export async function fileSource(path: string, chunkBytes?: number): Promise<Sou
   return {
     size: stat.size,
     chunkBytes,
-    read: async ({ offset, buf }) => {
-      const { bytesRead } = await handle.read(buf, 0, buf.byteLength, offset)
-      return bytesRead
+    read: async ({ offset, length }) => {
+      const buf = Buffer.allocUnsafe(length)
+      const { bytesRead } = await handle.read(buf, 0, length, offset)
+      return buf.subarray(0, bytesRead)
     },
     close: () => handle.close(),
   }
@@ -76,12 +75,7 @@ export async function withTempDoc<T>(
   }
 }
 
-export interface Pattern {
-  name: string
-  pointer: string
-  /** Iterations to median; tune so total measurement fits a few seconds. */
-  iters: number
-}
+export type { Path, Segment } from '@botejs/core'
 
 export type DocShape = 'array-of-objects' | 'deep-nested' | 'wide-flat'
 export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name' | 'walk-first'
@@ -89,23 +83,23 @@ export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all
 export interface DocFixture {
   shape: DocShape
   buf: Uint8Array
-  /** Pointer per access pattern; `null` means the shape doesn't support
+  /** Path per access pattern; `null` means the shape doesn't support
    *  that pattern (e.g. `walk-all` on a deep-nested doc). */
-  pointers: Record<FixturePattern, string | null>
+  paths: Record<FixturePattern, Path | null>
 }
 
 function buildArrayOfObjects(items: number, padWidth: number): DocFixture {
   return {
     shape: 'array-of-objects',
     buf: buildArrayDoc(items, padWidth),
-    pointers: {
-      shallow: '/items/0/name',
-      mid: `/items/${Math.floor(items / 2)}/name`,
-      deep: `/items/${items - 1}/name`,
-      'walk-all': '/items',
-      'iter-all': '/items',
-      'walk-get-name': '/items',
-      'walk-first': '/items',
+    paths: {
+      shallow: ['items', 0, 'name'],
+      mid: ['items', Math.floor(items / 2), 'name'],
+      deep: ['items', items - 1, 'name'],
+      'walk-all': ['items'],
+      'iter-all': ['items'],
+      'walk-get-name': ['items'],
+      'walk-first': ['items'],
     },
   }
 }
@@ -119,14 +113,19 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
   for (let i = depth - 1; i >= 0; i--) {
     body = `"a":{${body}},"name":"leaf-${String(i).padStart(padWidth, '0')}"`
   }
-  const ptr = (d: number): string => '/a'.repeat(d) + '/name'
+  const path = (d: number): Path => {
+    const out: Segment[] = []
+    for (let i = 0; i < d; i++) out.push('a')
+    out.push('name')
+    return out
+  }
   return {
     shape: 'deep-nested',
     buf: new TextEncoder().encode(`{${body}}`),
-    pointers: {
-      shallow: ptr(0),
-      mid: ptr(Math.floor(depth / 2)),
-      deep: ptr(depth),
+    paths: {
+      shallow: path(0),
+      mid: path(Math.floor(depth / 2)),
+      deep: path(depth),
       'walk-all': null,
       'iter-all': null,
       'walk-get-name': null,
@@ -136,7 +135,9 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
 }
 
 // `{"k_000000":"v_000000",...}` - wide fanout off the root, no nesting.
-// Children are leaf strings, so `walk-get-name` doesn't apply.
+// Children are leaf strings, so `walk-get-name` doesn't apply. `iter-all`
+// doesn't apply either: iter is array-only, and the root here is an object
+// (use walk-all for the keyed-traversal throughput cell).
 function buildWideFlat(keys: number, padWidth: number): DocFixture {
   const parts: string[] = ['{']
   for (let i = 0; i < keys; i++) {
@@ -145,18 +146,18 @@ function buildWideFlat(keys: number, padWidth: number): DocFixture {
     parts.push(`"k_${k}":"v_${k}"`)
   }
   parts.push('}')
-  const key = (i: number): string => `/k_${String(i).padStart(padWidth, '0')}`
+  const key = (i: number): Path => [`k_${String(i).padStart(padWidth, '0')}`]
   return {
     shape: 'wide-flat',
     buf: new TextEncoder().encode(parts.join('')),
-    pointers: {
+    paths: {
       shallow: key(0),
       mid: key(Math.floor(keys / 2)),
       deep: key(keys - 1),
-      'walk-all': '',
-      'iter-all': '',
+      'walk-all': [],
+      'iter-all': null,
       'walk-get-name': null,
-      'walk-first': '',
+      'walk-first': [],
     },
   }
 }

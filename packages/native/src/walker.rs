@@ -271,35 +271,21 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
   /// value's first byte, whitespace already consumed). Returns the offset
   /// of the byte immediately after the value.
   pub fn skip_value(&mut self, from: u64) -> Result<u64, TraverseError> {
-    let byte = self
-      .byte_at(from)?
-      .ok_or(TraverseError::UnexpectedEof(from))?;
-    match byte {
-      b'"' => {
-        let close = self
-          .next_string_close(from + 1)?
-          .ok_or(TraverseError::UnexpectedEof(from))?;
-        Ok(close + 1)
-      }
-      b'{' => self.skip_container(from, Structural::LBrace, Structural::RBrace),
-      b'[' => self.skip_container(from, Structural::LBracket, Structural::RBracket),
-      _ => Ok(self.skip_primitive(from)?),
-    }
+    let mut state = SkipState::start(from);
+    skip_value_step(self, &mut state)
   }
 
-  /// Skip past a `{...}` or `[...]` value by tracking the open/close balance
-  /// over the corresponding structural bitmaps. `from` must point at the
-  /// opening brace/bracket.
-  pub fn skip_container(
+  pub fn skip_container_step(
     &mut self,
-    from: u64,
-    open: Structural,
-    close: Structural,
+    state: &mut ContainerSkipState,
   ) -> Result<u64, TraverseError> {
-    let mut depth: u32 = 1;
-    let mut offset = from + 1;
-    while offset < self.source_size {
-      let co = self.chunk_offset_for(offset);
+    let open = state.open;
+    let close = state.close;
+    while state.offset < self.source_size {
+      let co = self.chunk_offset_for(state.offset);
+      // ensure() / fetch() may return ChunkMiss; `state` is already at the
+      // chunk-boundary commit point from the previous iteration, so the
+      // `?` propagates without losing progress.
       self.ensure(co)?;
       let data = self.fetch(co)?;
       self.store.ensure_structural(co, data, open);
@@ -309,7 +295,7 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
       let opens = bm.structural(open).expect("ensured");
       let closes = bm.structural(close).expect("ensured");
 
-      let local = (offset - co) as usize;
+      let local = (state.offset - co) as usize;
       let from_word = local / WINDOW;
       let from_bit = local % WINDOW;
 
@@ -325,8 +311,8 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
         // Net-popcount fast path: if the word's closes can't exhaust the
         // current depth even when stacked first, depth cannot hit zero in
         // this word and we can bulk-update without walking individual bits.
-        if c < depth {
-          depth = depth + opens_w.count_ones() - c;
+        if c < state.depth {
+          state.depth = state.depth + opens_w.count_ones() - c;
           continue;
         }
         let mut bits = opens_w | closes_w;
@@ -335,19 +321,22 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
           let bit = 1u64 << bit_idx;
           let abs = co + (w * WINDOW + bit_idx as usize) as u64;
           if opens_w & bit != 0 {
-            depth += 1;
+            state.depth += 1;
           } else {
-            depth = depth.checked_sub(1).ok_or(TraverseError::Malformed(abs))?;
-            if depth == 0 {
+            state.depth = state
+              .depth
+              .checked_sub(1)
+              .ok_or(TraverseError::Malformed(abs))?;
+            if state.depth == 0 {
               return Ok(abs + 1);
             }
           }
           bits &= bits - 1;
         }
       }
-      offset = co + self.chunk_size;
+      state.offset = co + self.chunk_size;
     }
-    Err(TraverseError::UnexpectedEof(offset))
+    Err(TraverseError::UnexpectedEof(state.offset))
   }
 
   /// Advance past `needed` depth-0 commas of the array currently being
@@ -495,6 +484,109 @@ impl<'a, P: ChunkBytes + ?Sized> Walker<'a, P> {
   }
 }
 
+/// Resumable state for [`skip_value_step`]. Persisted across `ChunkMiss`
+/// retries by [`crate::session::Session::drive`] so a long skip survives
+/// chunk faults without restarting from the value's first byte.
+///
+/// Lifecycle: created via [`SkipState::start`]; the first `skip_value_step`
+/// call peeks the value's opening byte to commit a [`SkipKind`]; subsequent
+/// calls (after `ChunkMiss` resumption) re-enter the kind-specific step
+/// with `(offset, depth)` already at the last committed boundary.
+#[derive(Debug, Clone)]
+pub struct SkipState {
+  kind: SkipKind,
+}
+
+#[derive(Debug, Clone)]
+enum SkipKind {
+  /// First-call state: still need to read the opening byte at `from` to
+  /// decide which kind we're skipping.
+  Pending { from: u64 },
+  /// Skipping a `"..."` string: `interior` is one past the opening quote.
+  /// Non-resumable in detail (a chunk fault re-runs `next_string_close`
+  /// from `interior`), but bounded by string length.
+  String { interior: u64 },
+  /// Skipping a JSON primitive (number, `true`, `false`, `null`).
+  /// Non-resumable in detail; bounded by primitive length.
+  Primitive { offset: u64 },
+  /// Skipping a `{...}` or `[...]` container. Resumable: `state` is the
+  /// container scan state committed to the last chunk boundary.
+  Container(ContainerSkipState),
+}
+
+/// Resumable state for skipping a JSON container, used by both
+/// [`Walker::skip_container_step`] (per chunk) and [`SkipState`] (per
+/// value). Mirrors the `(offset, depth)` shape of
+/// [`ResolveState::ArrayLoopState`](crate::resolve::ResolveState) and
+/// `CountState`.
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerSkipState {
+  /// Next byte to scan. Committed to a chunk boundary before any
+  /// `ChunkMiss` propagates, so resumption picks up here.
+  pub offset: u64,
+  /// Nesting depth at `offset`, relative to the container being skipped.
+  pub depth: u32,
+  pub open: Structural,
+  pub close: Structural,
+}
+
+impl SkipState {
+  /// Start a skip at `from` (which must point at the value's first byte,
+  /// whitespace already consumed).
+  pub fn start(from: u64) -> Self {
+    Self {
+      kind: SkipKind::Pending { from },
+    }
+  }
+}
+
+/// Drive a [`SkipState`] forward against the current chunks. Returns the
+/// offset of the byte immediately after the value, or propagates
+/// `ChunkMiss` (via `?`) with `state` committed so the next call resumes.
+///
+/// Wrap in [`Session::drive`](crate::session::Session::drive) (see
+/// [`Session::skip_value_at`](crate::session::Session::skip_value_at))
+/// for the async fault-and-retry plumbing.
+pub fn skip_value_step<P: ChunkBytes + ?Sized>(
+  walker: &mut Walker<P>,
+  state: &mut SkipState,
+) -> Result<u64, TraverseError> {
+  // First entry per value: read the opener and commit a concrete kind so
+  // any subsequent ChunkMiss can resume without re-classifying.
+  if let SkipKind::Pending { from } = state.kind {
+    let byte = walker
+      .byte_at(from)?
+      .ok_or(TraverseError::UnexpectedEof(from))?;
+    state.kind = match byte {
+      b'"' => SkipKind::String { interior: from + 1 },
+      b'{' => SkipKind::Container(ContainerSkipState {
+        offset: from + 1,
+        depth: 1,
+        open: Structural::LBrace,
+        close: Structural::RBrace,
+      }),
+      b'[' => SkipKind::Container(ContainerSkipState {
+        offset: from + 1,
+        depth: 1,
+        open: Structural::LBracket,
+        close: Structural::RBracket,
+      }),
+      _ => SkipKind::Primitive { offset: from },
+    };
+  }
+  match &mut state.kind {
+    SkipKind::Pending { .. } => unreachable!("committed above"),
+    SkipKind::String { interior } => {
+      let close = walker
+        .next_string_close(*interior)?
+        .ok_or(TraverseError::UnexpectedEof(*interior))?;
+      Ok(close + 1)
+    }
+    SkipKind::Primitive { offset } => Ok(walker.skip_primitive(*offset)?),
+    SkipKind::Container(c) => walker.skip_container_step(c),
+  }
+}
+
 /// Outcome of [`Walker::advance_top_level_commas`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvanceCommas {
@@ -535,24 +627,17 @@ fn scan_first_zero_in(
   chunk_offset: u64,
   cap: u64,
 ) -> Option<u64> {
-  let head = !in_string[from_word] & word_mask_from(from_bit);
-  if head != 0 {
-    let bit = head.trailing_zeros() as usize;
-    let abs = chunk_offset + (from_word * WINDOW + bit) as u64;
-    if abs < cap {
-      return Some(abs);
-    }
-    return None;
-  }
-  for (w, &word) in in_string.iter().enumerate().skip(from_word + 1) {
-    let m = !word;
+  for (w, &word) in in_string.iter().enumerate().skip(from_word) {
+    let mask = if w == from_word {
+      word_mask_from(from_bit)
+    } else {
+      !0u64
+    };
+    let m = !word & mask;
     if m != 0 {
       let bit = m.trailing_zeros() as usize;
       let abs = chunk_offset + (w * WINDOW + bit) as u64;
-      if abs < cap {
-        return Some(abs);
-      }
-      return None;
+      return (abs < cap).then_some(abs);
     }
   }
   None
@@ -699,5 +784,122 @@ mod tests {
     assert_eq!(word_mask_from(63), 1u64 << 63);
     assert_eq!(word_mask_from(64), 0);
     assert_eq!(word_mask_from(100), 0);
+  }
+
+  #[test]
+  fn skip_value_step_resumes_after_chunk_miss() {
+    // A flat `[...]` whose interior is 3 chunks long, so the closing `]`
+    // lives in chunk 3. We load only chunk 0 initially and verify that
+    // ChunkMiss commits state to chunk 1's boundary, then load chunk 1
+    // and confirm we don't re-scan chunk 0.
+    let chunk_size = 64usize;
+    let mut source = Vec::with_capacity(chunk_size * 4);
+    source.push(b'[');
+    source.resize(chunk_size * 3 + 1, b' '); // pad with whitespace through chunk 2
+    source.push(b']'); // closer in chunk 3 at offset 193
+    let close_at = source.len() - 1;
+    assert_eq!(close_at, chunk_size * 3 + 1);
+
+    // Provider initially holds chunks 0 only. We add more between calls.
+    let mut provider = MemoryProvider {
+      chunks: HashMap::new(),
+    };
+    let load = |provider: &mut MemoryProvider, source: &[u8], co: usize| {
+      let end = (co + chunk_size).min(source.len());
+      provider.chunks.insert(co as u64, source[co..end].to_vec());
+    };
+    load(&mut provider, &source, 0);
+
+    let mut store = BitmapStore::new();
+    let mut state = SkipState::start(0);
+
+    // First call: makes progress through chunk 0, then faults on chunk 64.
+    let err = {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      skip_value_step(&mut w, &mut state).unwrap_err()
+    };
+    assert_eq!(err, TraverseError::Pending(ChunkMiss(64)));
+    // State must be committed to chunk 0's boundary (offset 64) - any value
+    // lower would mean a retry re-scans bytes already inspected.
+    match &state.kind {
+      SkipKind::Container(c) => assert!(
+        c.offset >= 64,
+        "expected commit at chunk boundary 64, got offset={} depth={}",
+        c.offset,
+        c.depth
+      ),
+      _ => panic!("expected Container kind after opener seen"),
+    }
+
+    // Load chunk 1 and resume; should fault on chunk 128 next.
+    load(&mut provider, &source, 64);
+    let err = {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      skip_value_step(&mut w, &mut state).unwrap_err()
+    };
+    assert_eq!(err, TraverseError::Pending(ChunkMiss(128)));
+
+    // Load chunks 2 and 3; final call should complete at the `]` past it.
+    load(&mut provider, &source, 128);
+    load(&mut provider, &source, 192);
+    let end = {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      skip_value_step(&mut w, &mut state).unwrap()
+    };
+    assert_eq!(end, close_at as u64 + 1);
+  }
+
+  #[test]
+  fn ensure_back_walk_stops_at_nearest_cached_chunk() {
+    // `ensure(co)` walks back to the earliest chunk lacking bitmaps and builds
+    // forward, threading carries. After bitmaps for some prefix are present,
+    // a later ensure must NOT re-walk past the cached frontier - that's the
+    // no-quadratic-rebuild property under steady-state eviction.
+    let chunk_size: usize = 64;
+    let source: Vec<u8> = vec![b'x'; chunk_size * 10];
+    let provider = chunked(&source, chunk_size);
+    let mut store = BitmapStore::new();
+
+    // First call seeds chunks 0..=5 (back-walk reaches all the way to chunk 0
+    // because the store is empty).
+    {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      w.ensure(5 * chunk_size as u64).unwrap();
+    }
+    for i in 0..=5u64 {
+      assert!(
+        store.get(i * chunk_size as u64).is_some(),
+        "chunk {i} bitmaps should be built after ensure(5)",
+      );
+    }
+    for i in 6..10u64 {
+      assert!(
+        store.get(i * chunk_size as u64).is_none(),
+        "chunk {i} must not be built yet",
+      );
+    }
+
+    // Second call: ensure(7). Back-walk hits cached chunk 5 immediately and
+    // builds only 6 and 7. Chunks 8 and 9 must stay unbuilt.
+    {
+      let mut w = walker(&provider, &mut store, &source, chunk_size as u64);
+      w.ensure(7 * chunk_size as u64).unwrap();
+    }
+    assert!(
+      store.get(6 * chunk_size as u64).is_some(),
+      "chunk 6 should be built forward from cached chunk 5",
+    );
+    assert!(
+      store.get(7 * chunk_size as u64).is_some(),
+      "chunk 7 should be built (the target)",
+    );
+    assert!(
+      store.get(8 * chunk_size as u64).is_none(),
+      "chunk 8 must not be built (past target)",
+    );
+    assert!(
+      store.get(9 * chunk_size as u64).is_none(),
+      "chunk 9 must not be built (past target)",
+    );
   }
 }

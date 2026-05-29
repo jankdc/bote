@@ -2,11 +2,11 @@
 //!
 //! A Cursor is a handle around an [`Arc<Session>`] plus an optional anchor
 //! [`ValueLocation`]. The root Cursor returned by `open()` has no anchor -
-//! pointer resolution starts at byte 0. Sub-cursors yielded by `walk` carry
-//! an anchor and resolve pointers relative to that location.
+//! path resolution starts at byte 0. Sub-cursors yielded by `walk` carry
+//! an anchor and resolve paths relative to that location.
 //!
 //! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`] -
-//! napi async-iterators that lazily resolve their pointer on first `next()`
+//! napi async-iterators that lazily resolve their path on first `next()`
 //! and then step through children one entry at a time. Each step retries
 //! through `Pending` by fetching chunks as needed.
 
@@ -18,7 +18,9 @@ use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
 use crate::cache::ChunkRef;
-use crate::resolve::{ChildEntry, Children, ValueLocation};
+use crate::path::{self, Segment};
+use crate::resolve::{ChildEntry, Children, ContainerKind, ValueLocation};
+use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
 fn map_err(e: SessionError) -> NapiError {
@@ -36,6 +38,19 @@ pub struct CacheStats {
   pub bitmap_bytes: f64,
   pub resident_chunks: f64,
   pub ceiling_bytes: f64,
+}
+
+/// Options for `iter`. A `#[napi(object)]` so the facade can grow it
+/// without changing the method's arity.
+#[napi(object)]
+pub struct IterArgs {
+  /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
+  pub select_ir: Option<String>,
+  /// Batch size: each yield is an array of up to this many items.
+  pub batch: f64,
+  /// Yield `[key, value]` tuples instead of bare values. The key is a string
+  /// for object members and a number for array elements.
+  pub with_key: Option<bool>,
 }
 
 #[napi]
@@ -77,21 +92,39 @@ impl Cursor {
 
 #[napi]
 impl Cursor {
-  #[napi]
-  pub async fn has(&self, pointer: String) -> napi::Result<bool> {
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub async fn has(&self, path: Vec<Either<String, u32>>) -> napi::Result<bool> {
     self
       .session
-      .has_at(&pointer, self.anchor_start())
+      .has_at(&path::from_napi(path), self.anchor_start())
       .await
       .map_err(map_err)
   }
 
-  #[napi(ts_return_type = "Promise<unknown>")]
-  pub async fn get(&self, pointer: String) -> napi::Result<serde_json::Value> {
+  #[napi(
+    ts_args_type = "path: Array<string | number>",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn get(
+    &self,
+    path: Vec<Either<String, u32>>,
+  ) -> napi::Result<Either<serde_json::Value, ()>> {
     self
       .session
-      .get_at(&pointer, self.anchor_start())
+      .get_at(&path::from_napi(path), self.anchor_start())
       .await
+      .map(|opt| match opt {
+        Some(v) => Either::A(v),
+        None => Either::B(()),
+      })
+      .map_err(map_err)
+  }
+
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
+    crate::count::at(&self.session, &path::from_napi(path), self.anchor_start())
+      .await
+      .map(|n| n as f64)
       .map_err(map_err)
   }
 
@@ -104,14 +137,25 @@ impl Cursor {
     }
   }
 
-  #[napi]
-  pub fn iter(&self, pointer: String) -> CursorIter {
-    CursorIter::new(self.session.clone(), pointer, self.anchor_start())
+  #[napi(ts_args_type = "path: Array<string | number>, options: IterArgs")]
+  pub fn iter(&self, path: Vec<Either<String, u32>>, options: IterArgs) -> CursorIter {
+    CursorIter::new(
+      self.session.clone(),
+      path::from_napi(path),
+      self.anchor_start(),
+      options.select_ir,
+      (options.batch as usize).max(1),
+      options.with_key.unwrap_or(false),
+    )
   }
 
-  #[napi]
-  pub fn walk(&self, pointer: String) -> CursorWalk {
-    CursorWalk::new(self.session.clone(), pointer, self.anchor_start())
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub fn walk(&self, path: Vec<Either<String, u32>>) -> CursorWalk {
+    CursorWalk::new(
+      self.session.clone(),
+      path::from_napi(path),
+      self.anchor_start(),
+    )
   }
 
   #[napi]
@@ -126,14 +170,17 @@ impl Cursor {
   }
 }
 
-/// Shared iteration state. Each `next()` call locks this briefly to
-/// snapshot or update; awaits happen with the lock held (tokio Mutex).
-struct IterState {
-  pointer: String,
+/// State shared by `iter` and `walk`: the lazily-resolved container walker
+/// plus the pin map carried across yields. Each `next()` call locks this
+/// briefly to snapshot or update; awaits happen with the lock held (tokio
+/// Mutex).
+struct StreamCore {
+  path: Vec<Segment>,
   anchor_start: u64,
   initialized: bool,
   /// Set after first `next()` finishes initialization. `None` if the
-  /// pointer resolved to a non-container (iteration yields nothing).
+  /// path didn't resolve, or resolved to a non-container (iteration
+  /// yields nothing in either case).
   walker: Option<Children>,
   /// Pin map reused across yields. At rest (between yields) it holds at
   /// most the single chunk covering the walker's `next_offset`, so the
@@ -145,10 +192,10 @@ struct IterState {
   pinned: HashMap<u64, ChunkRef>,
 }
 
-impl IterState {
-  fn new(pointer: String, anchor_start: u64) -> Self {
+impl StreamCore {
+  fn new(path: Vec<Segment>, anchor_start: u64) -> Self {
     Self {
-      pointer,
+      path,
       anchor_start,
       initialized: false,
       walker: None,
@@ -157,47 +204,63 @@ impl IterState {
   }
 }
 
-async fn initialize_walker(session: &Session, state: &mut IterState) -> Result<(), SessionError> {
-  let loc_opt = session
-    .resolve_at(&state.pointer, state.anchor_start)
-    .await?;
-  if let Some(loc) = loc_opt {
-    state.walker = session.enter_container(loc, &mut state.pinned).await?;
-    // Hand off to the per-yield pruning loop: keep just the chunk at
-    // the upcoming `next_offset` so the first yield's read is hot.
-    if let Some(w) = &state.walker {
-      prune_pins(session, &mut state.pinned, w.next_offset);
-    } else {
-      state.pinned.clear();
+/// `iter`-only state: the shared [`StreamCore`] plus projection, batching, and
+/// key-wrapping. `walk` navigates positions and uses [`StreamCore`] directly,
+/// so none of these fields leak into it.
+struct IterState {
+  core: StreamCore,
+  /// Serialized projection IR, parsed lazily into `select` on first `next()`.
+  select_ir: Option<String>,
+  /// Compiled `select` projection. `None` yields the whole child.
+  select: Option<CompiledSelect>,
+  /// Batch size: each yield is an array of up to `batch` items.
+  batch: usize,
+  /// Wrap each yielded value in a `[key, value]` array.
+  with_key: bool,
+}
+
+impl IterState {
+  fn new(
+    path: Vec<Segment>,
+    anchor_start: u64,
+    select_ir: Option<String>,
+    batch: usize,
+    with_key: bool,
+  ) -> Self {
+    Self {
+      core: StreamCore::new(path, anchor_start),
+      select_ir,
+      select: None,
+      batch,
+      with_key,
     }
-    session.sync_bitmap_evictions();
   }
-  state.initialized = true;
+}
+
+/// Resolve the path and open its container walker, pruning to the frontier so
+/// the first yield's read is hot. Shared by `iter` and `walk`; `select`
+/// compilation (iter-only) happens in the caller before this runs.
+async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
+  if let Some(start) = session.locate_at(&core.path, core.anchor_start).await? {
+    core.walker = session.enter_container(start, &mut core.pinned).await?;
+    // Hand off to the per-yield pruning loop: keep just the chunk at the
+    // upcoming `next_offset` so the first yield's read is hot.
+    if let Some(w) = &core.walker {
+      session.prune_frontier_and_sync(&mut core.pinned, w.next_offset);
+    } else {
+      core.pinned.clear();
+      session.sync_bitmap_evictions();
+    }
+  }
+  core.initialized = true;
   Ok(())
 }
 
-/// Release all pins held by an iterator on early termination.
-async fn release_on_complete<Y>(
-  session: Arc<Session>,
-  state: Arc<AsyncMutex<IterState>>,
-) -> napi::Result<Option<Y>> {
-  let mut guard = state.lock().await;
-  guard.pinned.clear();
-  guard.walker = None;
+/// Release all pins held by an iterator on early termination (`complete`).
+fn release_core(session: &Session, core: &mut StreamCore) {
+  core.pinned.clear();
+  core.walker = None;
   session.sync_bitmap_evictions();
-  Ok(None)
-}
-
-/// Drop every pin except the one covering `next_offset`. This bounds the
-/// resident-pin count to 1 between yields so the cache's own eviction
-/// loop is free to maintain `maxResidentChunks`.
-fn prune_pins(session: &Session, pinned: &mut HashMap<u64, ChunkRef>, next_offset: u64) {
-  if next_offset >= session.source_size {
-    pinned.clear();
-    return;
-  }
-  let keep = (next_offset / session.chunk_size) * session.chunk_size;
-  pinned.retain(|&off, _| off == keep);
 }
 
 #[napi(async_iterator)]
@@ -207,11 +270,33 @@ pub struct CursorIter {
 }
 
 impl CursorIter {
-  fn new(session: Arc<Session>, pointer: String, anchor_start: u64) -> Self {
+  fn new(
+    session: Arc<Session>,
+    path: Vec<Segment>,
+    anchor_start: u64,
+    select_ir: Option<String>,
+    batch: usize,
+    with_key: bool,
+  ) -> Self {
     Self {
       session,
-      state: Arc::new(AsyncMutex::new(IterState::new(pointer, anchor_start))),
+      state: Arc::new(AsyncMutex::new(IterState::new(
+        path,
+        anchor_start,
+        select_ir,
+        batch,
+        with_key,
+      ))),
     }
+  }
+}
+
+/// Render a `ChildEntry`'s key as a JSON value for tuple yields. Member keys
+/// become strings; element indices become numbers.
+fn child_key_json(child: &ChildEntry) -> serde_json::Value {
+  match child {
+    ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
+    ChildEntry::Element { index, .. } => serde_json::Value::Number((*index as u64).into()),
   }
 }
 
@@ -229,27 +314,82 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
     let state = self.state.clone();
     async move {
       let mut guard = state.lock().await;
-      if !guard.initialized {
-        initialize_walker(&session, &mut guard)
+      if !guard.core.initialized {
+        guard.select = match guard.select_ir.as_deref() {
+          Some(json) => Some(CompiledSelect::parse(json).map_err(|e| map_err(e.into()))?),
+          None => None,
+        };
+        locate_and_enter(&session, &mut guard.core)
           .await
           .map_err(map_err)?;
+        if let Some(w) = guard.core.walker.as_ref() {
+          if w.kind == ContainerKind::Object {
+            release_core(&session, &mut guard.core);
+            return Err(NapiError::from_reason(
+              "iter target is an object; use walk() to iterate object members".to_string(),
+            ));
+          }
+        }
       }
-      let IterState { walker, pinned, .. } = &mut *guard;
+      let IterState {
+        core,
+        select,
+        batch,
+        with_key,
+        ..
+      } = &mut *guard;
+      let select = select.as_ref();
+      let batch = *batch;
+      let with_key = *with_key;
+      let StreamCore { walker, pinned, .. } = core;
       let Some(walker) = walker.as_mut() else {
         return Ok(None);
       };
-      let result = async {
-        let entry = session.next_child(walker, pinned).await?;
-        match entry {
-          None => Ok(None),
-          Some(child) => Ok(Some(session.materialize(child.location(), pinned).await?)),
+      // Items are materialized eagerly and accumulated here, so the buffer
+      // (not chunk pins) is the in-flight batch; pins are pruned after each
+      // item. The buffer lives in this `next()` frame, so early termination
+      // via `complete` needs no special handling.
+      let result: Result<Option<serde_json::Value>, SessionError> = async {
+        let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
+        loop {
+          let Some(child) = session.next_child(walker, pinned).await? else {
+            // Exhausted: flush a final partial batch, otherwise end.
+            if buf.is_empty() {
+              return Ok(None);
+            }
+            return Ok(Some(serde_json::Value::Array(buf)));
+          };
+          // Capture the key before its bytes get released by materialization.
+          let key = if with_key {
+            Some(child_key_json(&child))
+          } else {
+            None
+          };
+          // Materialize / project the child while its pins are still hot.
+          let value = match select {
+            Some(sel) => {
+              crate::eval::project(&session, sel, child.location().start, pinned).await?
+            }
+            None => session.materialize(child.location(), pinned).await?,
+          };
+          // The value is owned now; release the chunks that backed it.
+          session.prune_frontier_and_sync(pinned, walker.next_offset);
+          let item = match key {
+            Some(k) => serde_json::Value::Array(vec![k, value]),
+            None => value,
+          };
+          buf.push(item);
+          if buf.len() >= batch {
+            return Ok(Some(serde_json::Value::Array(buf)));
+          }
         }
       }
-      .await
-      .map_err(map_err);
-      prune_pins(&session, pinned, walker.next_offset);
-      session.sync_bitmap_evictions();
-      result
+      .await;
+      // End-of-next defensive prune: any error path through the inner block
+      // also lands here so abandoned iterators don't retain pins past the
+      // frontier.
+      session.prune_frontier_and_sync(pinned, walker.next_offset);
+      result.map_err(map_err)
     }
   }
 
@@ -257,21 +397,28 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
     &mut self,
     _value: Option<Self::Return>,
   ) -> impl std::future::Future<Output = napi::Result<Option<Self::Yield>>> + Send + 'static {
-    release_on_complete(self.session.clone(), self.state.clone())
+    let session = self.session.clone();
+    let state = self.state.clone();
+    async move {
+      release_core(&session, &mut state.lock().await.core);
+      Ok(None)
+    }
   }
 }
 
 #[napi(async_iterator)]
 pub struct CursorWalk {
   session: Arc<Session>,
-  state: Arc<AsyncMutex<IterState>>,
+  state: Arc<AsyncMutex<StreamCore>>,
 }
 
 impl CursorWalk {
-  fn new(session: Arc<Session>, pointer: String, anchor_start: u64) -> Self {
+  fn new(session: Arc<Session>, path: Vec<Segment>, anchor_start: u64) -> Self {
     Self {
       session,
-      state: Arc::new(AsyncMutex::new(IterState::new(pointer, anchor_start))),
+      // walk navigates positions, so it never projects, batches, or wraps -
+      // it uses the shared StreamCore directly.
+      state: Arc::new(AsyncMutex::new(StreamCore::new(path, anchor_start))),
     }
   }
 }
@@ -294,18 +441,18 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
     async move {
       let mut guard = state.lock().await;
       if !guard.initialized {
-        initialize_walker(&session, &mut guard)
+        locate_and_enter(&session, &mut guard)
           .await
           .map_err(map_err)?;
       }
-      let IterState { walker, pinned, .. } = &mut *guard;
+      let StreamCore { walker, pinned, .. } = &mut *guard;
       let Some(walker) = walker.as_mut() else {
         return Ok(None);
       };
-      let result = session.next_child(walker, pinned).await.map_err(map_err);
-      prune_pins(&session, pinned, walker.next_offset);
-      session.sync_bitmap_evictions();
-      let entry = result?;
+      let entry = session.next_child(walker, pinned).await.map_err(map_err)?;
+      // End-of-next defensive prune: matched and exhausted paths both
+      // converge here.
+      session.prune_frontier_and_sync(pinned, walker.next_offset);
       let Some(child) = entry else {
         return Ok(None);
       };
@@ -321,7 +468,13 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
     &mut self,
     _value: Option<Self::Return>,
   ) -> impl std::future::Future<Output = napi::Result<Option<Self::Yield>>> + Send + 'static {
-    release_on_complete(self.session.clone(), self.state.clone())
+    let session = self.session.clone();
+    let state = self.state.clone();
+    async move {
+      let mut guard = state.lock().await;
+      release_core(&session, &mut guard);
+      Ok(None)
+    }
   }
 }
 
@@ -331,6 +484,10 @@ mod tests {
   use crate::cache::CacheOptions;
   use crate::source::{InMemorySource, Source};
   use napi::bindgen_prelude::AsyncGenerator;
+
+  fn items_path() -> Vec<Segment> {
+    vec![Segment::Member("items".into())]
+  }
 
   /// `{"items":[{"name":"i0000",...}, ...]}` sized to span many chunks so a
   /// walk pins a real frontier chunk and the cap is in force throughout.
@@ -359,9 +516,9 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn walk_complete_releases_pins() {
+  async fn pins_walk_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
     // Advance a few elements so the walker holds a live frontier pin.
     for _ in 0..3 {
       assert!(w.next(None).await.unwrap().is_some());
@@ -383,28 +540,28 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn walk_complete_safe_when_child_cursor_escapes() {
+  async fn pins_walk_safe_when_child_escapes() {
     let s = session(500, 256, 4);
-    let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
     let child = w.next(None).await.unwrap().expect("first child");
 
     w.complete(None).await.unwrap();
 
     assert!(w.state.lock().await.pinned.is_empty());
     // The escaped child is still fully usable: its session outlives the walk.
-    assert_eq!(
-      child.get("/name".into()).await.unwrap(),
-      serde_json::json!("i0000")
-    );
+    assert!(matches!(
+      child.get(vec![Either::A("name".into())]).await.unwrap(),
+      Either::A(ref v) if v == &serde_json::json!("i0000")
+    ));
   }
 
   #[tokio::test]
-  async fn walk_abandoned_stay_under_cap_without_gc() {
+  async fn pins_walk_abandoned_stay_under_cap() {
     let s = session(2000, 256, 4);
     let ceiling = s.cache.derived_ceiling_bytes();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut w = CursorWalk::new(s.clone(), "/items".into(), 0);
+      let mut w = CursorWalk::new(s.clone(), items_path(), 0);
       // Partial walk, then early-terminate via complete() (the break path).
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
@@ -423,21 +580,104 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn iter_complete_releases_pins() {
+  async fn pins_iter_released_on_complete() {
     let s = session(500, 256, 4);
-    let mut it = CursorIter::new(s.clone(), "/items".into(), 0);
+    // batch=1 so each next() yields after one child, mirroring the old
+    // single-item path the rest of this test exercises (frontier pin held
+    // between yields).
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 1, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
-    assert!(!it.state.lock().await.pinned.is_empty());
+    assert!(!it.state.lock().await.core.pinned.is_empty());
 
     it.complete(None).await.unwrap();
 
     {
       let guard = it.state.lock().await;
-      assert!(guard.pinned.is_empty());
-      assert!(guard.walker.is_none());
+      assert!(guard.core.pinned.is_empty());
+      assert!(guard.core.walker.is_none());
     }
     assert!(it.next(None).await.unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn pins_iter_batch_early_break_releases() {
+    let s = session(500, 256, 4);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 8, false);
+    // Pull one batch, then early-terminate via complete() (the break path).
+    assert!(it.next(None).await.unwrap().is_some());
+    it.complete(None).await.unwrap();
+    let guard = it.state.lock().await;
+    assert!(
+      guard.core.pinned.is_empty(),
+      "complete() must clear pins after a batch"
+    );
+    assert!(guard.core.walker.is_none());
+  }
+
+  #[tokio::test]
+  async fn pins_iter_batch_peak_bounded() {
+    // Batching a large array under a tight cap stays under the cache ceiling.
+    let s = session(2000, 256, 4);
+    let ceiling = s.cache.derived_ceiling_bytes();
+    let mut it = CursorIter::new(
+      s.clone(),
+      items_path(),
+      0,
+      Some(r#"{"one":["total"]}"#.to_string()),
+      64,
+      false,
+    );
+    while it.next(None).await.unwrap().is_some() {
+      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
+      assert!(
+        total <= ceiling,
+        "resident {total} exceeded ceiling {ceiling} while batching"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn iter_on_object_target_throws() {
+    let s = session(50, 256, 4);
+    // Empty path -> the root object.
+    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, None, 8, false);
+    let err = it.next(None).await.expect_err("object target must throw");
+    assert!(
+      err.reason.contains("use walk()"),
+      "error should steer the caller to walk(), got: {}",
+      err.reason
+    );
+    let guard = it.state.lock().await;
+    assert!(guard.core.pinned.is_empty(), "gate must release pins");
+    assert!(guard.core.walker.is_none(), "gate must drop the walker");
+  }
+
+  #[tokio::test]
+  async fn pins_iter_batch_abandoned_stay_under_cap() {
+    // Mirror of `pins_walk_abandoned_stay_under_cap` for batched iter: an
+    // iterator that pulls one batch, completes, and is kept alive without
+    // dropping must not retain pins. 64 of them in a row must not push
+    // `resident + bitmap` past the cache ceiling.
+    let s = session(2000, 256, 4);
+    let ceiling = s.cache.derived_ceiling_bytes();
+    let mut abandoned = Vec::new();
+    for _ in 0..64 {
+      let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 8, false);
+      assert!(it.next(None).await.unwrap().is_some());
+      it.complete(None).await.unwrap();
+      abandoned.push(it); // keep alive: no Drop, no GC
+
+      let total = s.cache.resident_bytes() + s.cache.bitmap_bytes();
+      assert!(
+        total <= ceiling,
+        "resident {} + bitmap {} exceeded ceiling {} with {} abandoned iter iterators",
+        s.cache.resident_bytes(),
+        s.cache.bitmap_bytes(),
+        ceiling,
+        abandoned.len(),
+      );
+    }
   }
 }

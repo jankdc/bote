@@ -26,23 +26,22 @@ use thiserror::Error;
 
 use crate::bitmap::BitmapStore;
 use crate::cache::{CacheError, CacheOptions, ChunkCache, ChunkRef};
-use crate::pointer::{JsonPointer, PointerParseError};
+use crate::path::Segment;
 use crate::resolve::{self, ChildEntry, Children, ResolveState, ValueLocation};
+use crate::select::SelectError;
 use crate::source::Source;
-use crate::walker::{ChunkBytes, ChunkMiss, TraverseError, Walker};
+use crate::walker::{self, ChunkBytes, ChunkMiss, SkipState, TraverseError, Walker};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-  #[error(transparent)]
-  Pointer(#[from] PointerParseError),
   #[error("traversal error: {0}")]
   Traverse(#[from] TraverseError),
   #[error(transparent)]
   Cache(#[from] CacheError),
   #[error("failed to parse JSON value: {0}")]
   Json(#[from] serde_json::Error),
-  #[error("pointer did not resolve to a value")]
-  NotFound,
+  #[error(transparent)]
+  Select(#[from] SelectError),
 }
 
 pub struct Session {
@@ -58,7 +57,21 @@ pub struct Session {
 /// (1, 2, 4, 8, ..., capped here) - short queries pay no over-fetch cost,
 /// long queries converge to a near-single-pass traversal because the burst
 /// quickly reaches the cap and the remaining chunks load in one or two hits.
-const MAX_BURST: u64 = 256;
+pub(crate) const MAX_BURST: u64 = 256;
+
+/// Adaptive doubling burst schedule used by every resolver that doesn't know
+/// the value's extent up front (`run_locate`, `skip_value_at`, `count::children`).
+/// Each call yields the current burst (in chunks) and doubles it for the next
+/// call, capped at [`MAX_BURST`]. The returned closure is move-bound and
+/// stateful; use one per `Session::drive` invocation.
+pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
+  let mut n = 1u64;
+  move |_off| {
+    let cur = n;
+    n = n.saturating_mul(2).min(MAX_BURST);
+    cur
+  }
+}
 
 impl Session {
   pub fn new(source: Arc<dyn Source>, options: CacheOptions) -> Result<Arc<Self>, SessionError> {
@@ -76,42 +89,36 @@ impl Session {
     }))
   }
 
-  pub async fn resolve_at(
+  pub async fn locate_at(
     &self,
-    pointer_str: &str,
+    path: &[Segment],
     anchor_start: u64,
-  ) -> Result<Option<ValueLocation>, SessionError> {
-    let pointer = JsonPointer::parse(pointer_str)?;
-    let mut pinned: HashMap<u64, ChunkRef> = HashMap::new();
-    let result = self.run_resolve(&pointer, anchor_start, &mut pinned).await;
-    drop(pinned);
-    self.sync_bitmap_evictions();
-    result
+  ) -> Result<Option<u64>, SessionError> {
+    let mut q = Query::new(self);
+    self.run_locate(path, anchor_start, &mut q.pinned).await
   }
 
-  pub async fn has_at(&self, pointer_str: &str, anchor_start: u64) -> Result<bool, SessionError> {
-    Ok(self.resolve_at(pointer_str, anchor_start).await?.is_some())
+  pub async fn has_at(&self, path: &[Segment], anchor_start: u64) -> Result<bool, SessionError> {
+    let mut q = Query::new(self);
+    Ok(
+      self
+        .run_resolve(path, anchor_start, &mut q.pinned)
+        .await?
+        .is_some(),
+    )
   }
 
   pub async fn get_at(
     &self,
-    pointer_str: &str,
+    path: &[Segment],
     anchor_start: u64,
-  ) -> Result<serde_json::Value, SessionError> {
-    let pointer = JsonPointer::parse(pointer_str)?;
-    let mut pinned: HashMap<u64, ChunkRef> = HashMap::new();
-    let result = async {
-      let loc = self
-        .run_resolve(&pointer, anchor_start, &mut pinned)
-        .await?
-        .ok_or(SessionError::NotFound)?;
-      let bytes = self.read_range(loc.start, loc.end, &mut pinned).await?;
-      Ok::<_, SessionError>(serde_json::from_slice(&bytes)?)
-    }
-    .await;
-    drop(pinned);
-    self.sync_bitmap_evictions();
-    result
+  ) -> Result<Option<serde_json::Value>, SessionError> {
+    let mut q = Query::new(self);
+    let Some(loc) = self.run_resolve(path, anchor_start, &mut q.pinned).await? else {
+      return Ok(None);
+    };
+    let bytes = self.read_range(loc.start, loc.end, &mut q.pinned).await?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
   }
 
   /// Drop bitmaps for chunks the cache has evicted since the last drain.
@@ -120,7 +127,7 @@ impl Session {
   /// ~90 MB (one set per chunk x 8 bitmap kinds x ~8 KB).
   ///
   /// Called from every place that releases per-query pins
-  /// (`get_at` / `resolve_at` end-of-query, iter/walk end-of-yield)
+  /// (`get_at` / `locate_at` end-of-query, iter/walk end-of-yield)
   /// so the bitmap store stays in lockstep with the chunk cache.
   pub(crate) fn sync_bitmap_evictions(&self) {
     let evicted = self.cache.drain_evicted();
@@ -133,18 +140,50 @@ impl Session {
     }
   }
 
-  /// Open a child iterator over the container at `value_loc`. Returns
-  /// `Ok(None)` if the value isn't an object or array.
+  /// Drop every pin except the one covering `next_offset`. Bounds the
+  /// resident-pin count to 1 between iterator yields so the cache's own
+  /// eviction loop is free to maintain `maxResidentChunks`. When
+  /// `next_offset >= source_size` (iteration walked off the end) clears
+  /// everything.
+  pub(crate) fn prune_pins(&self, pinned: &mut HashMap<u64, ChunkRef>, next_offset: u64) {
+    if next_offset >= self.source_size {
+      pinned.clear();
+      return;
+    }
+    let keep = (next_offset / self.chunk_size) * self.chunk_size;
+    pinned.retain(|&off, _| off == keep);
+  }
+
+  /// Frontier-prune followed by a bitmap drain. The order is load-bearing:
+  /// pin releases populate the cache's eviction queue (`unpin` ->
+  /// `evict_to_caps`), then [`sync_bitmap_evictions`](Self::sync_bitmap_evictions)
+  /// reads that queue and applies it to the bitmap store. Doing it the
+  /// other way around drains an empty queue and the bitmaps for chunks
+  /// about to be evicted persist until the next sync - the leak path
+  /// the `bitmap_evict_drains_only_after_unpin` test guards against.
+  ///
+  /// Use at every iterator step where the walker has advanced.
+  pub(crate) fn prune_frontier_and_sync(
+    &self,
+    pinned: &mut HashMap<u64, ChunkRef>,
+    next_offset: u64,
+  ) {
+    self.prune_pins(pinned, next_offset);
+    self.sync_bitmap_evictions();
+  }
+
+  /// Open a child iterator over the container starting at `value_start`.
+  /// Returns `Ok(None)` if the value isn't an object or array.
   pub async fn enter_container(
     &self,
-    value_loc: ValueLocation,
+    value_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<Option<Children>, SessionError> {
     self
       .drive(
         pinned,
         |_| 1,
-        |walker| resolve::enter_container(walker, value_loc),
+        |walker| resolve::enter_container(walker, value_start),
       )
       .await
   }
@@ -174,32 +213,63 @@ impl Session {
     Ok(serde_json::from_slice(&bytes)?)
   }
 
-  async fn run_resolve(
+  /// Resolve `path` starting at `anchor_start`, returning only the
+  /// resolved value's **start offset** (no extent walk).
+  ///
+  /// Used by the entry points that don't need the value's bytes
+  /// (`locate_at`, container-walking iterators, `count`). Pairs with
+  /// [`Session::skip_value_at`] in `run_resolve` to build the full
+  /// `ValueLocation` only when a caller actually needs it.
+  pub(crate) async fn run_locate(
     &self,
-    pointer: &JsonPointer,
+    path: &[Segment],
     anchor_start: u64,
     pinned: &mut HashMap<u64, ChunkRef>,
-  ) -> Result<Option<ValueLocation>, SessionError> {
+  ) -> Result<Option<u64>, SessionError> {
     // ResolveState persists across `ChunkMiss` retries. The inner
     // `resolve_step` updates state only at iteration boundaries, so a
     // chunk fault during a long array walk redoes at most one element on
     // resumption - not the whole walk from the anchor.
     let mut state = ResolveState::new(anchor_start);
-    let mut burst = 1u64;
     self
-      .drive(
-        pinned,
-        |_| {
-          let n = burst;
-          burst = burst.saturating_mul(2).min(MAX_BURST);
-          n
-        },
-        |walker| resolve::resolve_step(walker, pointer, &mut state),
-      )
+      .drive(pinned, doubling_burst(), |walker| {
+        resolve::resolve_step(walker, path, &mut state)
+      })
       .await
   }
 
-  async fn read_range(
+  /// Resolve `path` to a full `[start, end)` byte range. Equivalent to
+  /// `run_locate` followed by `skip_value_at` on the start.
+  pub(crate) async fn run_resolve(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    pinned: &mut HashMap<u64, ChunkRef>,
+  ) -> Result<Option<ValueLocation>, SessionError> {
+    let Some(start) = self.run_locate(path, anchor_start, pinned).await? else {
+      return Ok(None);
+    };
+    let end = self.skip_value_at(start, pinned).await?;
+    Ok(Some(ValueLocation { start, end }))
+  }
+
+  pub(crate) async fn skip_value_at(
+    &self,
+    from: u64,
+    pinned: &mut HashMap<u64, ChunkRef>,
+  ) -> Result<u64, SessionError> {
+    // Adaptive burst: the value's extent is unknown. The `doubling_burst`
+    // schedule (1, 2, 4, ..., MAX_BURST) means short values pay no over-fetch
+    // and long ones converge to near-single-pass once the burst caps out.
+    let mut state = SkipState::start(from);
+    self
+      .drive(pinned, doubling_burst(), |walker| {
+        walker::skip_value_step(walker, &mut state)
+      })
+      .await
+  }
+
+  pub(crate) async fn read_range(
     &self,
     from: u64,
     to: u64,
@@ -221,7 +291,7 @@ impl Session {
   /// chunks, run a sync `step`, and on `ChunkMiss(off)` fetch a burst of
   /// chunks (sized by `burst_for`) and retry. Releases the bitmap-store
   /// lock before any `.await` so it never crosses an await point.
-  async fn drive<T, S, B>(
+  pub(crate) async fn drive<T, S, B>(
     &self,
     pinned: &mut HashMap<u64, ChunkRef>,
     mut burst_for: B,
@@ -309,108 +379,132 @@ impl ChunkBytes for PinnedChunks<'_> {
   }
 }
 
+/// RAII scope for a one-shot query (`locate_at` / `get_at` / `count_at`):
+/// owns the pinned-chunk map and, on drop, releases its pins and drains
+/// bitmap evictions so both native pools return under cap - including on the
+/// early-`?` and early-`return` paths. Encodes "pins released and bitmaps
+/// synced at end of query" in one place.
+///
+/// The iterators in `cursor.rs` deliberately don't use this: they keep a
+/// long-lived pin map across yields and prune the frontier explicitly.
+pub(crate) struct Query<'a> {
+  session: &'a Session,
+  pub(crate) pinned: HashMap<u64, ChunkRef>,
+}
+
+impl<'a> Query<'a> {
+  pub(crate) fn new(session: &'a Session) -> Self {
+    Self {
+      session,
+      pinned: HashMap::new(),
+    }
+  }
+}
+
+impl Drop for Query<'_> {
+  fn drop(&mut self) {
+    // Clearing drops the ChunkRefs (unpin -> eviction), then we drain the
+    // bitmaps the eviction freed - same order as the chunk engine elsewhere.
+    self.pinned.clear();
+    self.session.sync_bitmap_evictions();
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::bitmap::ChunkBitmaps;
+  use crate::cache::CacheOptions;
+  use crate::simd::ScanCarry;
   use crate::source::InMemorySource;
 
-  fn in_memory_session(data: Vec<u8>, chunk_size: usize, max_chunks: u32) -> Arc<Session> {
-    let source: Arc<dyn Source> = Arc::new(InMemorySource::new(data));
-    Session::new(
-      source,
+  #[test]
+  fn burst_doubling_schedule_caps_at_max_burst() {
+    // The MAX_BURST policy doc (see above) lives in one comment but is
+    // enforced by convention in three drivers (`run_locate`, `skip_value_at`,
+    // `count::children`). Centralising the schedule in `doubling_burst` makes
+    // it directly testable: yields are 1, 2, 4, 8, ..., MAX_BURST, MAX_BURST.
+    let mut b = doubling_burst();
+    let mut expected = 1u64;
+    // The schedule reaches MAX_BURST in log2(MAX_BURST) + 1 = 9 iterations
+    // (1, 2, 4, 8, 16, 32, 64, 128, 256). Iterate well past that to confirm
+    // the cap is sticky.
+    for _ in 0..16 {
+      assert_eq!(b(0), expected, "expected {expected} at this step");
+      expected = expected.saturating_mul(2).min(MAX_BURST);
+    }
+    // Sticky cap: further calls keep yielding MAX_BURST.
+    assert_eq!(b(0), MAX_BURST);
+    assert_eq!(b(0), MAX_BURST);
+  }
+
+  #[tokio::test]
+  async fn bitmap_evict_drains_only_after_unpin() {
+    // The bitmap-bytes accounting depends on a specific ordering: when a query
+    // ends, pins release FIRST (unpin -> evict_to_caps queues offsets in
+    // `evicted_since_drain`), THEN `sync_bitmap_evictions` drains the queue
+    // into the bitmap store. Calling sync the other way around - before any
+    // pin releases - is a no-op, and the bitmaps for chunks that are about to
+    // be evicted persist until the next sync, breaking the bounded-bitmap
+    // contract under churn. This test pins below the cap, syncs (must be a
+    // no-op), unpins, syncs again (must reclaim).
+    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![b' '; 256]));
+    let session = Session::new(
+      src,
       CacheOptions {
-        chunk_size,
-        max_resident_chunks: max_chunks,
+        chunk_size: 64,
+        max_resident_chunks: 1,
       },
     )
-    .unwrap()
-  }
+    .unwrap();
 
-  #[tokio::test]
-  async fn get_simple_value() {
-    let s = in_memory_session(br#"{"a":1,"b":2}"#.to_vec(), 64, 16);
-    assert_eq!(s.get_at("/a", 0).await.unwrap(), serde_json::json!(1));
-    assert_eq!(s.get_at("/b", 0).await.unwrap(), serde_json::json!(2));
-  }
+    // Pin chunks 0 and 64. Cap is 1; eviction can't fire while both are pinned
+    // (evict_to_caps finds no unpinned victim).
+    let pin0 = session.cache.fetch(0).await.unwrap();
+    let pin64 = session.cache.fetch(64).await.unwrap();
 
-  #[tokio::test]
-  async fn get_nested_value() {
-    let s = in_memory_session(br#"{"u":{"n":"Alice"}}"#.to_vec(), 64, 16);
-    assert_eq!(
-      s.get_at("/u/n", 0).await.unwrap(),
-      serde_json::json!("Alice")
-    );
-  }
-
-  #[tokio::test]
-  async fn get_missing_returns_not_found() {
-    let s = in_memory_session(br#"{"a":1}"#.to_vec(), 64, 16);
-    assert!(matches!(
-      s.get_at("/missing", 0).await,
-      Err(SessionError::NotFound)
-    ));
-  }
-
-  #[tokio::test]
-  async fn has_distinguishes_present_and_missing() {
-    let s = in_memory_session(br#"{"a":1}"#.to_vec(), 64, 16);
-    assert!(s.has_at("/a", 0).await.unwrap());
-    assert!(!s.has_at("/b", 0).await.unwrap());
-  }
-
-  #[tokio::test]
-  async fn get_across_chunks() {
-    // Document spans many 64-byte chunks; chunk-driven bitmap chain must
-    // resolve through them all.
-    let mut doc = String::from("{\"skip\":[");
-    for i in 0..100 {
-      if i > 0 {
-        doc.push(',');
-      }
-      doc.push_str(&i.to_string());
+    // Build bitmaps for both, chaining carries.
+    {
+      let mut store = session.bitmaps.lock().unwrap();
+      let bm0 = ChunkBitmaps::build_basic(&pin0.data, ScanCarry::default());
+      let entry_after_0 = bm0.exit_carry();
+      store.insert(0, bm0);
+      let bm64 = ChunkBitmaps::build_basic(&pin64.data, entry_after_0);
+      store.insert(64, bm64);
     }
-    doc.push_str("],\"target\":\"found\"}");
-    let s = in_memory_session(doc.into_bytes(), 64, 256);
-    assert_eq!(
-      s.get_at("/target", 0).await.unwrap(),
-      serde_json::json!("found")
-    );
-    assert_eq!(
-      s.get_at("/skip/50", 0).await.unwrap(),
-      serde_json::json!(50)
-    );
-  }
+    let bytes_with_both = session.cache.bitmap_bytes();
+    assert!(bytes_with_both > 0, "bitmaps must contribute bytes");
 
-  #[tokio::test]
-  async fn get_succeeds_when_document_exceeds_cap() {
-    // ~30 KiB document; cap = 16 slots x 256 bytes = ~4 KiB worth of
-    // chunks. A single query may temporarily pin more than the cap (chunks
-    // in flight are pinned and can't be evicted), but it must still
-    // succeed AND return to cap compliance once pins are released -
-    // eviction runs on both fetch and unpin.
-    let mut doc = String::from("{");
-    for i in 0..2000 {
-      if i > 0 {
-        doc.push(',');
-      }
-      doc.push_str(&format!("\"k{i:04}\":{i}"));
-    }
-    doc.push('}');
-    let s = in_memory_session(doc.into_bytes(), 256, 16);
+    // Sync before any pin release: cache's eviction queue is empty, drain is
+    // a no-op.
+    session.sync_bitmap_evictions();
     assert_eq!(
-      s.get_at("/k1500", 0).await.unwrap(),
-      serde_json::json!(1500)
+      session.cache.bitmap_bytes(),
+      bytes_with_both,
+      "sync before pin release must be a no-op",
     );
+
+    // Release pin 0. unpin -> evict_to_caps sees 1 unpinned chunk + 1 pinned >
+    // cap=1, evicts the unpinned one, pushes its offset onto evicted_since_drain.
+    drop(pin0);
+
+    // The cache has dropped chunk 0's bytes; the bitmap store still has its
+    // bitmaps - exactly the leak window that a wrong drain ordering would
+    // make permanent.
+    assert_eq!(
+      session.cache.bitmap_bytes(),
+      bytes_with_both,
+      "before sync, bitmap bytes for the evicted chunk are not yet reclaimed",
+    );
+
+    // Sync now. Drain pulls chunk 0 off the queue and drops its bitmaps.
+    session.sync_bitmap_evictions();
     assert!(
-      s.cache.resident_chunks() <= 16,
-      "resident chunks {} exceeded cap after query completed",
-      s.cache.resident_chunks()
+      session.cache.bitmap_bytes() < bytes_with_both,
+      "sync after unpin must reclaim evicted chunk's bitmap bytes (was {bytes_with_both}, now {})",
+      session.cache.bitmap_bytes(),
     );
-  }
 
-  #[tokio::test]
-  async fn get_root_pointer_returns_whole_document() {
-    let s = in_memory_session(br#"[1,2,3]"#.to_vec(), 64, 16);
-    assert_eq!(s.get_at("", 0).await.unwrap(), serde_json::json!([1, 2, 3]));
+    drop(pin64);
   }
 }
