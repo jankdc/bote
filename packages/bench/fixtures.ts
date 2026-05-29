@@ -1,7 +1,7 @@
 // Doc builders, napi-shape Source adapters, temp-doc lifecycle, and the
 // shape/pattern table used by the matrix worker.
 
-import { Path, Segment } from '@botejs/core'
+import type { Path, Segment } from '@botejs/core'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
