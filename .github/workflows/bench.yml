@@ -35,8 +35,8 @@ jobs:
           toolchain: nightly-2026-04-15
       - name: Install dependencies
         run: yarn install
-      - name: Build native (release)
-        run: yarn workspace @botejs/native build
+      - name: Build
+        run: yarn build
       - name: Run common cells
         run: yarn workspace @botejs/bench bench:matrix --common --out "$GITHUB_WORKSPACE/matrix.jsonl"
       - name: Render report
