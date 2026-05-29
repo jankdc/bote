@@ -65,12 +65,7 @@ export declare function heapProfileStop(): void
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /**
-   * Batch size: each yield is an array of up to this many items. Required, so
-   * the caller owns the default - the `@botejs/core` facade resolves its
-   * public `DEFAULT_ITER_BATCH`, and direct native consumers pass their own -
-   * keeping a single source of truth. Floored at 1 to guarantee progress.
-   */
+  /** Batch size: each yield is an array of up to this many items. */
   batch: number
   /**
    * Yield `[key, value]` tuples instead of bare values. The key is a string
