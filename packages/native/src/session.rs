@@ -344,19 +344,8 @@ impl Session {
     pinned: &mut HashMap<u64, ChunkRef>,
   ) -> Result<(), CacheError> {
     pinned.retain(|&off, _| off >= start);
-    let burst_end = start
-      .saturating_add(n.saturating_mul(self.chunk_size))
-      .min(self.source_size);
-    let mut cur = start;
-    while cur < burst_end {
-      if let std::collections::hash_map::Entry::Vacant(slot) = pinned.entry(cur) {
-        let chunk = self.cache.fetch(cur).await?;
-        slot.insert(chunk);
-      }
-      cur = match cur.checked_add(self.chunk_size) {
-        Some(v) => v,
-        None => break,
-      };
+    for chunk in self.cache.fetch(start, n).await? {
+      pinned.entry(chunk.offset).or_insert(chunk);
     }
 
     // Pruning above released pins and the fetches may have triggered
@@ -460,8 +449,20 @@ mod tests {
 
     // Pin chunks 0 and 64. Cap is 1; eviction can't fire while both are pinned
     // (evict_to_caps finds no unpinned victim).
-    let pin0 = session.cache.fetch(0).await.unwrap();
-    let pin64 = session.cache.fetch(64).await.unwrap();
+    let pin0 = session
+      .cache
+      .fetch(0, 1)
+      .await
+      .unwrap()
+      .pop()
+      .unwrap();
+    let pin64 = session
+      .cache
+      .fetch(64, 1)
+      .await
+      .unwrap()
+      .pop()
+      .unwrap();
 
     // Build bitmaps for both, chaining carries.
     {

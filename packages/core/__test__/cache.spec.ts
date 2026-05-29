@@ -51,8 +51,15 @@ test('cache_reads_are_chunk_aligned', async () => {
   assert.equal(await cursor.get(100), 1)
   for (const r of reads) {
     assert.equal(r.offset % 64, 0, `unaligned offset ${r.offset}`)
-    assert.equal(r.length, 64, `unexpected length ${r.length}`)
+    assert.ok(r.length > 0, `non-positive length ${r.length}`)
+    const end = r.offset + r.length
+    assert.ok(end % 64 === 0 || end >= data.length, `read ${r.offset}+${r.length} neither whole-chunk nor at EOF`)
   }
+  // The burst path must actually coalesce: at least one read spans >1 chunk.
+  assert.ok(
+    reads.some((r) => r.length > 64),
+    `expected at least one coalesced multi-chunk read, got ${JSON.stringify(reads)}`,
+  )
 })
 
 test('cache_large_doc_under_tight_slot_cap', async () => {

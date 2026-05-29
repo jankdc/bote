@@ -20,6 +20,13 @@ const MIN_CHUNK_SIZE: usize = 64;
 /// well-behaved workloads.
 const CEILING_FACTOR: usize = 2;
 
+/// Upper bound on a single coalesced `source.read` issued by
+/// [`ChunkCache::fetch`]. A burst larger than this is split into
+/// multiple reads so the transient read buffer stays bounded (independent of
+/// the doubling burst's chunk count) while still collapsing many per-chunk
+/// reads into a handful.
+const MAX_COALESCED_READ_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub struct CacheOptions {
   pub chunk_size: usize,
@@ -126,43 +133,98 @@ impl ChunkCache {
     self.bitmap_bytes.clone()
   }
 
-  /// Fetch the chunk starting at `chunk_offset` (which must be chunk-aligned).
-  /// On a hit, marks the chunk as most-recently-used and pins it. On a miss,
-  /// reads from the underlying source while no lock is held, then inserts
-  /// and pins; evicts older unpinned chunks if the new resident size exceeds
-  /// the budget.
-  pub async fn fetch(self: &Arc<Self>, chunk_offset: u64) -> Result<ChunkRef, CacheError> {
+  /// Fetch the `n` consecutive chunks starting at `chunk_offset` (aligned),
+  /// reading runs of not-yet-resident chunks in single coalesced `source.read`
+  /// calls instead of one read per chunk. Already-resident chunks are pinned
+  /// without a read; each read is split back into per-chunk entries (copied
+  /// into independent `Bytes` so each chunk evicts on its own). Returns a
+  /// pinned `ChunkRef` for every chunk in
+  /// `[chunk_offset, chunk_offset + n*chunk_size)` (clamped to end-of-source),
+  /// in ascending offset order.
+  pub async fn fetch(
+    self: &Arc<Self>,
+    chunk_offset: u64,
+    n: u64,
+  ) -> Result<Vec<ChunkRef>, CacheError> {
     debug_assert!(chunk_offset.is_multiple_of(self.chunk_size as u64));
+    let cs = self.chunk_size as u64;
+    let span_end = chunk_offset
+      .saturating_add(n.saturating_mul(cs))
+      .min(self.source.size());
+    // Coalesce at most a byte-cap's worth of chunks per read, and never more
+    // than the cache is sized to hold - so a single read's transient buffer
+    // stays bounded by the resident budget on tight caps.
+    let max_chunks_per_read = (MAX_COALESCED_READ_BYTES / self.chunk_size)
+      .max(1)
+      .min(self.max_resident_chunks as usize) as u64;
 
-    {
-      let mut inner = self.inner.lock().unwrap();
-      if let Some(data) = touch_and_pin(&mut inner, chunk_offset) {
-        return Ok(ChunkRef::new(self.clone(), chunk_offset, data));
+    // One ref per chunk in the (clamped) span; size the Vec up front.
+    let span_chunks = span_end.saturating_sub(chunk_offset).div_ceil(cs) as usize;
+    let mut refs = Vec::with_capacity(span_chunks);
+    let mut cur = chunk_offset;
+    while cur < span_end {
+      // Already resident: pin and continue without a read.
+      {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(data) = touch_and_pin(&mut inner, cur) {
+          refs.push(ChunkRef::new(self.clone(), cur, data));
+          cur += cs;
+          continue;
+        }
       }
+      // `cur` is absent. Extend a run of absent chunks - bounded by the
+      // per-read byte cap and the burst span - so we read them in one call.
+      let run_start = cur;
+      let run_cap = run_start
+        .saturating_add(max_chunks_per_read.saturating_mul(cs))
+        .min(span_end);
+      // Scan the run's extent under one lock (cheap key lookups, no read held
+      // across it) rather than re-locking per chunk; a resident chunk splits
+      // the run, so we read only up to it.
+      let mut run_end = (run_start + cs).min(span_end);
+      {
+        let inner = self.inner.lock().unwrap();
+        while run_end < run_cap && !inner.chunks.contains_key(&run_end) {
+          run_end = (run_end + cs).min(run_cap); // never overshoot the cap/EOF
+        }
+      }
+      // One coalesced read for the whole absent run, no lock held.
+      let buf = self
+        .source
+        .read(run_start, (run_end - run_start) as usize)
+        .await?;
+      let mut off = run_start;
+      while off < run_end {
+        let rel = (off - run_start) as usize;
+        if rel >= buf.len() {
+          break; // defensive: a short read before EOF violates the contract
+        }
+        let end = (rel + self.chunk_size).min(buf.len());
+        let piece = Bytes::copy_from_slice(&buf[rel..end]);
+        let mut inner = self.inner.lock().unwrap();
+        // A concurrent task may have populated this chunk while we read.
+        if let Some(data) = touch_and_pin(&mut inner, off) {
+          refs.push(ChunkRef::new(self.clone(), off, data));
+        } else {
+          inner.tick += 1;
+          let tick = inner.tick;
+          inner.resident_bytes += piece.len();
+          inner.chunks.insert(
+            off,
+            Chunk {
+              data: piece.clone(),
+              last_access: tick,
+              pins: 1,
+            },
+          );
+          self.evict_to_caps(&mut inner);
+          refs.push(ChunkRef::new(self.clone(), off, piece));
+        }
+        off += cs;
+      }
+      cur = run_end;
     }
-
-    let data = self.source.read(chunk_offset, self.chunk_size).await?;
-
-    let mut inner = self.inner.lock().unwrap();
-    // Another task may have populated the same chunk while we were reading;
-    // prefer the existing entry and let our just-read copy drop.
-    if let Some(existing) = touch_and_pin(&mut inner, chunk_offset) {
-      return Ok(ChunkRef::new(self.clone(), chunk_offset, existing));
-    }
-
-    inner.tick += 1;
-    let tick = inner.tick;
-    inner.resident_bytes += data.len();
-    inner.chunks.insert(
-      chunk_offset,
-      Chunk {
-        data: data.clone(),
-        last_access: tick,
-        pins: 1,
-      },
-    );
-    self.evict_to_caps(&mut inner);
-    Ok(ChunkRef::new(self.clone(), chunk_offset, data))
+    Ok(refs)
   }
 
   /// Take the offsets of chunks evicted since the last drain. The session
@@ -324,30 +386,31 @@ mod tests {
   async fn fetch_loads_chunk_from_source() {
     let cache = make_cache(1024, 4, 64);
     assert!(!cache.is_resident(0));
-    let chunk = cache.fetch(0).await.unwrap();
-    assert_eq!(chunk.data.len(), 64);
-    assert_eq!(chunk.data[0], 0);
-    assert_eq!(chunk.data[63], 63);
+    let chunks = cache.fetch(0, 1).await.unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].data.len(), 64);
+    assert_eq!(chunks[0].data[0], 0);
+    assert_eq!(chunks[0].data[63], 63);
     assert!(cache.is_resident(0));
   }
 
   #[tokio::test]
-  async fn fetch_hit_is_cached() {
+  async fn fetch_hit_skips_reload() {
     let cache = make_cache(1024, 4, 64);
-    let _a = cache.fetch(64).await.unwrap();
+    let _a = cache.fetch(64, 1).await.unwrap();
     let resident_after_first = cache.resident_bytes();
-    let _b = cache.fetch(64).await.unwrap(); // hit
+    let _b = cache.fetch(64, 1).await.unwrap(); // hit: no second read
     assert_eq!(cache.resident_bytes(), resident_after_first);
   }
 
   #[tokio::test]
   async fn evict_respects_slot_cap_when_unpinned() {
-    // 4 chunks of 64 bytes each, cap = 2 slots.
+    // 4 chunks of 64 bytes each, cap = 2 slots; each fetched and released in
+    // turn so eviction runs between accesses.
     let cache = make_cache(1024, 2, 64);
-    drop(cache.fetch(0).await.unwrap());
-    drop(cache.fetch(64).await.unwrap());
-    drop(cache.fetch(128).await.unwrap());
-    drop(cache.fetch(192).await.unwrap());
+    for off in [0u64, 64, 128, 192] {
+      drop(cache.fetch(off, 1).await.unwrap());
+    }
     assert!(cache.resident_chunks() <= 2);
     // The most-recently-fetched chunks should still be resident; chunk 0
     // should have been evicted first.
@@ -358,10 +421,11 @@ mod tests {
   #[tokio::test]
   async fn evict_skips_pinned_chunks() {
     let cache = make_cache(1024, 2, 64);
-    let _pinned = cache.fetch(0).await.unwrap(); // held
-    drop(cache.fetch(64).await.unwrap());
-    drop(cache.fetch(128).await.unwrap());
-    drop(cache.fetch(192).await.unwrap());
+    // Hold the returned Vec to keep chunk 0 pinned across the later fetches.
+    let _pinned = cache.fetch(0, 1).await.unwrap();
+    for off in [64u64, 128, 192] {
+      drop(cache.fetch(off, 1).await.unwrap());
+    }
     // chunk 0 must still be resident because we hold a pin.
     assert!(cache.is_resident(0));
     // Cap is soft when all-but-one chunk is pinned; verify at least one
@@ -372,22 +436,22 @@ mod tests {
   #[tokio::test]
   async fn evict_after_pin_dropped() {
     let cache = make_cache(1024, 2, 64);
-    let pinned = cache.fetch(0).await.unwrap();
-    drop(cache.fetch(64).await.unwrap());
+    let pinned = cache.fetch(0, 1).await.unwrap();
+    drop(cache.fetch(64, 1).await.unwrap());
     drop(pinned);
-    drop(cache.fetch(128).await.unwrap());
-    drop(cache.fetch(192).await.unwrap());
+    drop(cache.fetch(128, 1).await.unwrap());
+    drop(cache.fetch(192, 1).await.unwrap());
     assert!(!cache.is_resident(0));
   }
 
   #[tokio::test]
   async fn evict_lru_drops_oldest() {
     let cache = make_cache(1024, 2, 64); // capacity 2
-    drop(cache.fetch(0).await.unwrap());
-    drop(cache.fetch(64).await.unwrap());
+    drop(cache.fetch(0, 1).await.unwrap());
+    drop(cache.fetch(64, 1).await.unwrap());
     // Touch chunk 0 so chunk 64 becomes oldest.
-    drop(cache.fetch(0).await.unwrap());
-    drop(cache.fetch(128).await.unwrap());
+    drop(cache.fetch(0, 1).await.unwrap());
+    drop(cache.fetch(128, 1).await.unwrap());
     assert!(cache.is_resident(0));
     assert!(!cache.is_resident(64));
     assert!(cache.is_resident(128));
@@ -396,14 +460,14 @@ mod tests {
   #[tokio::test]
   async fn evict_holds_slot_cap_under_full_scan() {
     // 100 MiB source, 16-slot cap, 64 KiB chunks. Linearly scan the whole
-    // document and assert resident chunk count never exceeds the cap.
+    // document one chunk at a time and assert resident count never exceeds cap.
     const SIZE: usize = 100 * 1024 * 1024;
     const MAX_CHUNKS: u32 = 16;
     const CHUNK: usize = 64 * 1024;
     let cache = make_cache(SIZE, MAX_CHUNKS, CHUNK);
     let mut offset = 0u64;
     while (offset as usize) < SIZE {
-      drop(cache.fetch(offset).await.unwrap());
+      drop(cache.fetch(offset, 1).await.unwrap());
       assert!(
         cache.resident_chunks() <= MAX_CHUNKS as usize,
         "slot cap breached at offset {offset}: resident {}, max {MAX_CHUNKS}",
@@ -418,10 +482,9 @@ mod tests {
     // Fill the cache to the slot cap, then simulate bitmap growth pushing
     // past the derived ceiling. Cache must evict to bring totals back.
     let cache = make_cache(1024, 4, 64);
-    drop(cache.fetch(0).await.unwrap());
-    drop(cache.fetch(64).await.unwrap());
-    drop(cache.fetch(128).await.unwrap());
-    drop(cache.fetch(192).await.unwrap());
+    for off in [0u64, 64, 128, 192] {
+      drop(cache.fetch(off, 1).await.unwrap());
+    }
     assert_eq!(cache.resident_chunks(), 4);
 
     // Derived ceiling = 4 slots x 64 bytes x 2 = 512 bytes.
@@ -436,5 +499,112 @@ mod tests {
       cache.resident_bytes(),
       cache.derived_ceiling_bytes(),
     );
+  }
+
+  /// Wraps an [`InMemorySource`] and counts its `read` calls so coalescing is
+  /// directly observable.
+  struct CountingSource {
+    inner: InMemorySource,
+    reads: Arc<AtomicUsize>,
+  }
+
+  #[async_trait::async_trait]
+  impl Source for CountingSource {
+    fn size(&self) -> u64 {
+      self.inner.size()
+    }
+    async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+      self.reads.fetch_add(1, Ordering::Relaxed);
+      self.inner.read(offset, length).await
+    }
+  }
+
+  fn counting_cache(
+    size: usize,
+    chunk: usize,
+    max_chunks: u32,
+  ) -> (Arc<ChunkCache>, Arc<AtomicUsize>) {
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: Arc<dyn Source> = Arc::new(CountingSource {
+      inner: InMemorySource::new(data),
+      reads: reads.clone(),
+    });
+    let cache = ChunkCache::new(
+      source,
+      CacheOptions {
+        chunk_size: chunk,
+        max_resident_chunks: max_chunks,
+      },
+    )
+    .unwrap();
+    (cache, reads)
+  }
+
+  #[tokio::test]
+  async fn fetch_coalesces_absent_run_into_one_read() {
+    // 8 chunks of 64 B. The coalescing cap (1 MiB) dwarfs the 512 B span, so a
+    // cold fetch(0, 8) is a single source.read, not eight.
+    let (cache, reads) = counting_cache(512, 64, 16);
+    let refs = cache.fetch(0, 8).await.unwrap();
+    assert_eq!(refs.len(), 8, "one ref per chunk in the span");
+    assert_eq!(
+      reads.load(Ordering::Relaxed),
+      1,
+      "8 contiguous absent chunks must coalesce into one read",
+    );
+    // Each ref carries the correct chunk-aligned bytes.
+    for (i, r) in refs.iter().enumerate() {
+      assert_eq!(r.offset, (i * 64) as u64);
+      assert_eq!(
+        &r.data[..],
+        &(0..512).map(|b| (b % 251) as u8).collect::<Vec<_>>()[i * 64..i * 64 + 64]
+      );
+    }
+    assert_eq!(cache.resident_chunks(), 8);
+  }
+
+  #[tokio::test]
+  async fn fetch_does_not_reread_resident_chunks() {
+    // Warm chunk 2 (offset 128) alone, then span [0, 8): the resident chunk
+    // splits the run into [0,128) and [192,512) - two reads, chunk 2 reused.
+    let (cache, reads) = counting_cache(512, 64, 16);
+    drop(cache.fetch(128, 1).await.unwrap());
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+
+    let refs = cache.fetch(0, 8).await.unwrap();
+    assert_eq!(refs.len(), 8);
+    assert_eq!(
+      reads.load(Ordering::Relaxed),
+      3,
+      "1 warmup + 2 coalesced runs flanking the resident chunk",
+    );
+  }
+
+  #[tokio::test]
+  async fn fetch_caps_reads_to_resident_budget() {
+    // The per-read chunk count is clamped to `max_resident_chunks` so a single
+    // coalesced read never exceeds what the cache is sized to hold. With a
+    // 4-slot cap (and a byte cap far above 4 chunks), a 12-chunk span reads in
+    // runs of at most 4 => 3 reads.
+    let (cache, reads) = counting_cache(64 * 12, 64, 4);
+    let refs = cache.fetch(0, 12).await.unwrap();
+    assert_eq!(refs.len(), 12);
+    assert_eq!(
+      reads.load(Ordering::Relaxed),
+      3,
+      "12 chunks at 4 chunks/read (clamped to the 4-slot budget) => 3 reads",
+    );
+  }
+
+  #[tokio::test]
+  async fn fetch_clamps_to_source_end() {
+    // 5 chunks' worth of data; ask for 8. The span clamps to EOF, the last
+    // chunk is the partial tail (not a full chunk_size).
+    let (cache, _reads) = counting_cache(64 * 4 + 20, 64, 16);
+    let refs = cache.fetch(0, 8).await.unwrap();
+    assert_eq!(refs.len(), 5, "4 full chunks + 1 partial tail");
+    assert_eq!(refs.last().unwrap().offset, 256);
+    assert_eq!(refs.last().unwrap().data.len(), 20, "tail chunk is partial");
   }
 }
