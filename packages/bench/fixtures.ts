@@ -1,6 +1,7 @@
 // Doc builders, napi-shape Source adapters, temp-doc lifecycle, and the
 // shape/pattern table used by the matrix worker.
 
+import { Path, Segment } from '@botejs/core'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -74,8 +75,7 @@ export async function withTempDoc<T>(
   }
 }
 
-export type Segment = string | number
-export type Path = readonly Segment[]
+export type { Path, Segment } from '@botejs/core'
 
 export type DocShape = 'array-of-objects' | 'deep-nested' | 'wide-flat'
 export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name' | 'walk-first'

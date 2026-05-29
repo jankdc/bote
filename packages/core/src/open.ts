@@ -184,22 +184,10 @@ function isSchema(value: unknown): value is StandardSchemaV1 {
   return typeof value === 'object' && value !== null && '~standard' in value
 }
 
-function normalizeIterTail(tail: StandardSchemaV1 | IterOptions | undefined): {
-  schema?: StandardSchemaV1
-  select?: Segment | Path | Record<string, Segment | Path>
-  batch?: number
-  onInvalid?: 'throw' | 'skip'
-  withIndex?: boolean
-} {
+function normalizeIterTail(tail: StandardSchemaV1 | IterOptions | undefined): IterOptions {
   if (!tail) return {}
   if (isSchema(tail)) return { schema: tail }
-  return {
-    schema: tail.schema,
-    select: tail.select,
-    batch: tail.batch,
-    onInvalid: tail.onInvalid,
-    withIndex: tail.withIndex,
-  }
+  return tail
 }
 
 function serializeSelect(select: Segment | Path | Record<string, Segment | Path>): string {

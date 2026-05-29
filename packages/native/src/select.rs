@@ -9,34 +9,12 @@ use serde::Deserialize;
 
 use crate::path::Segment;
 
-/// Wire form, externally tagged so `{"one": [...]}` / `{"map": [...]}` decode
-/// directly. Lowercase to match the JSON the facade emits.
+/// Compiled projection. Externally tagged so the facade's `{"one": [...]}` /
+/// `{"map": [...]}` JSON decodes straight into it; each sub-path's segments
+/// decode via [`Segment`]'s untagged `Deserialize`. Lowercase to match the
+/// JSON the facade emits.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum SelectIr {
-  One(Vec<WireSegment>),
-  Map(Vec<(String, Vec<WireSegment>)>),
-}
-
-/// Wire segment: untagged so a JSON `string` decodes to `Member` and a
-/// JSON `number` decodes to `Element`.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum WireSegment {
-  Member(String),
-  Element(u64),
-}
-
-impl From<WireSegment> for Segment {
-  fn from(w: WireSegment) -> Self {
-    match w {
-      WireSegment::Member(s) => Segment::Member(s),
-      WireSegment::Element(n) => Segment::Element(n as usize),
-    }
-  }
-}
-
-/// Compiled projection: sub-paths typed once.
 pub enum CompiledSelect {
   /// A single sub-path - yield the bare sub-value.
   One(Vec<Segment>),
@@ -53,15 +31,6 @@ pub enum SelectError {
 
 impl CompiledSelect {
   pub fn parse(json: &str) -> Result<Self, SelectError> {
-    let ir: SelectIr = serde_json::from_str(json).map_err(|e| SelectError::Json(e.to_string()))?;
-    Ok(match ir {
-      SelectIr::One(p) => CompiledSelect::One(p.into_iter().map(Into::into).collect()),
-      SelectIr::Map(fields) => CompiledSelect::Map(
-        fields
-          .into_iter()
-          .map(|(k, p)| (k, p.into_iter().map(Into::into).collect()))
-          .collect(),
-      ),
-    })
+    serde_json::from_str(json).map_err(|e| SelectError::Json(e.to_string()))
   }
 }
