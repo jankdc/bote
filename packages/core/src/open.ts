@@ -5,7 +5,7 @@ import { runStandardSchema, validateItem, type Path, type Segment, type Standard
 
 export interface SessionOptions {
   /**
-   * Bytes of source chunk data to keep resident — must be a non-zero multiple
+   * Bytes of source chunk data to keep resident. Must be a non-zero multiple
    * of the source's `chunkBytes` (one chunk per slot). Total native memory,
    * including bitmap overhead, is bounded at roughly 2× this. The cache evicts
    * to stay under it regardless of document size.
@@ -15,16 +15,6 @@ export interface SessionOptions {
   maxResidentBytes?: number
 }
 
-/** Target resident chunk-data budget when the caller doesn't pass one. Rounded
- *  down to a whole chunk so the value handed to the native layer is always a
- *  valid multiple of the chunk size. ~32 MiB ≙ 512 × 64 KiB historically. */
-const DEFAULT_RESIDENT_TARGET_BYTES = 32 * 1024 * 1024
-
-/** Read granularity used when a source advertises no `chunkBytes`. The native
- *  layer requires a concrete chunk size, so this facade is the single source of
- *  truth for the fallback (fits two CPU-L1 windows, amortizes one FS readahead). */
-const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
-
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
 type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
@@ -32,26 +22,24 @@ type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
 /** Zero-based index of an array element. */
 export type IterIndex = number
 
-/** Default batch size for `.iter()`. Each yield is an array of up to this many
- *  items; the final batch may be smaller. Sized to amortize the per-yield
- *  FFI/promise overhead across enough items that compute, not protocol, sets
- *  the cost. Override via `IterOptions.batch`. */
+export const DEFAULT_RESIDENT_TARGET_BYTES = 32 * 1024 * 1024
+export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
+
+/** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
+ *  comfortably covers any in-memory JSON array. */
+const MAX_ARRAY_INDEX = 0xffffffff
 
 export interface IterOptions {
   select?: Segment | Path | Record<string, Segment | Path>
-  /** Override the default batch size of {@link DEFAULT_ITER_BATCH}. Must be a
-   *  positive integer. Larger amortizes FFI overhead further at the cost of
-   *  per-yield latency and transient JS-heap residency. */
+  /** How many items are yielded per batch. Higher is faster, but takes more memory to materialise those items. */
   batch?: number
   /** Validate each yielded item against this schema (after `select`). */
   schema?: StandardSchemaV1
-  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them, turning the schema into a filter. */
+  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
   onInvalid?: 'throw' | 'skip'
   /** Yield `[index, value]` tuples instead of bare values, where `index` is
-   *  the zero-based position of the element in the source array. Useful when
-   *  a `schema` with `onInvalid: 'skip'` has dropped items and the caller
-   *  needs the original index. */
+   *  the zero-based position of the element in the source array. */
   withIndex?: boolean
 }
 
@@ -85,19 +73,10 @@ export interface Cursor {
   ): AsyncIterable<SelectMapShape<S>[]>
   iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
-
-  /** Stream child positions as cursors. */
   walk(...path: Segment[]): AsyncIterable<Cursor>
-
-  /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
   cacheStats(): CacheStats
 }
 
-/**
- * The cursor returned by `open()`. Owns the underlying `Source` and exposes
- * both an explicit `close()` and `Symbol.asyncDispose` so callers can choose
- * between manual cleanup and `await using` scoping.
- */
 export interface RootCursor extends Cursor, AsyncDisposable {
   /** Close the underlying source. Idempotent. */
   close(): Promise<void>
@@ -105,12 +84,6 @@ export interface RootCursor extends Cursor, AsyncDisposable {
 
 /**
  * Open a cursor over a seekable source.
- *
- * Calls `source.open()` to acquire a reader, then constructs the native cursor
- * over it. The reader's `read(offset, buf)` is invoked with chunk-aligned
- * `offset` and a `buf` whose `byteLength` equals the configured chunk size;
- * the reader fills `buf` and resolves with `bytesRead`. `buf` is a view over
- * native-owned memory and **MUST** not be retained past the returned promise.
  *
  * The returned `RootCursor` owns the reader: `close()` (or `await using`)
  * drives the reader's own `close()` exactly once.
@@ -121,23 +94,11 @@ export async function open(source: Source, options?: SessionOptions): Promise<Ro
     throw new RangeError(`maxResidentBytes must be a positive integer, got ${mrb}`)
   }
   const reader = await source.open()
-  // Only run the multiple check against a valid positive-integer chunkBytes.
-  // When it's absent (custom sources) or itself invalid (0, fractional), the
-  // native layer is authoritative — it reports the real chunkBytes fault
-  // rather than us throwing a misleading `mrb % 0 === NaN` rejection.
-  // Resolve the chunk size once, filling in the default for sources that don't
-  // advertise one — native requires a concrete value. An invalid advertised
-  // value (0, fractional) is passed through unchanged so native reports the real
-  // chunkBytes fault rather than us masking it with the fallback.
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
   if (mrb !== undefined && Number.isInteger(chunkBytes) && chunkBytes > 0 && mrb % chunkBytes !== 0) {
     await closeReader(reader)
     throw new RangeError(`maxResidentBytes (${mrb}) must be a multiple of the source's chunkBytes (${chunkBytes})`)
   }
-  // The native API always requires a budget, so resolve the default here. Round
-  // the target down to a whole chunk against the resolved chunk size so the
-  // result is a valid multiple. When chunkBytes is itself invalid the divisor is
-  // a placeholder; native rejects the bad chunkBytes before the budget matters.
   const chunkForDefault = Number.isInteger(chunkBytes) && chunkBytes > 0 ? chunkBytes : DEFAULT_SOURCE_CHUNK_BYTES
   const maxResidentBytes = mrb ?? Math.max(1, Math.floor(DEFAULT_RESIDENT_TARGET_BYTES / chunkForDefault)) * chunkForDefault
   let native: NativeCursor
@@ -171,10 +132,6 @@ export async function open(source: Source, options?: SessionOptions): Promise<Ro
 async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
-
-/** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
- *  comfortably covers any in-memory JSON array. */
-const MAX_ARRAY_INDEX = 0xffffffff
 
 function validatePath(path: readonly unknown[]): asserts path is readonly Segment[] {
   for (let i = 0; i < path.length; i++) {
