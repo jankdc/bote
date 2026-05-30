@@ -38,14 +38,12 @@ pub struct CacheOptions {
 
 #[derive(Debug, Error)]
 pub enum CacheError {
-  #[error("chunk size must be a non-zero multiple of {MIN_CHUNK_SIZE}, got {0}")]
-  InvalidChunkSize(usize),
-  #[error(
-    "max_resident_bytes must be a non-zero multiple of chunk_size {chunk_size}, got {budget}"
-  )]
-  InvalidMaxResidentBytes { budget: usize, chunk_size: usize },
   #[error(transparent)]
   Source(#[from] SourceError),
+  #[error("chunk size must be a non-zero multiple of {MIN_CHUNK_SIZE}, got {0}")]
+  InvalidChunkSize(usize),
+  #[error("max_resident_bytes must be a non-zero multiple of chunk_size {chunk_size}, got {budget}")]
+  InvalidMaxResidentBytes { budget: usize, chunk_size: usize },
 }
 
 pub struct ChunkCache {
@@ -53,8 +51,6 @@ pub struct ChunkCache {
   chunk_size: usize,
   max_resident_chunks: u32,
   derived_ceiling_bytes: usize,
-  /// Shared with the session's `BitmapStore` so the eviction loop can read
-  /// bitmap memory without re-entering the bitmap store's lock.
   bitmap_bytes: Arc<AtomicUsize>,
   inner: Mutex<CacheInner>,
 }
@@ -92,8 +88,7 @@ impl ChunkCache {
     if options.chunk_size == 0 || !options.chunk_size.is_multiple_of(MIN_CHUNK_SIZE) {
       return Err(CacheError::InvalidChunkSize(options.chunk_size));
     }
-    // A non-zero multiple of chunk_size maps to a whole number of slots (>= 1),
-    // so this one rule also guarantees room for a single pinned frontier chunk.
+
     if options.max_resident_bytes == 0
       || !options
         .max_resident_bytes
@@ -104,11 +99,14 @@ impl ChunkCache {
         chunk_size: options.chunk_size,
       });
     }
+
     // A whole number of slots (>= 1) by the multiple-of-chunk_size rule above.
     let max_resident_chunks = (options.max_resident_bytes / options.chunk_size) as u32;
+
     // Total RSS ceiling = resident chunk bytes + bitmap headroom. Identical to
     // the old `chunks * chunk_size * CEILING_FACTOR`, so eviction is unchanged.
     let derived_ceiling_bytes = options.max_resident_bytes.saturating_mul(CEILING_FACTOR);
+
     Ok(Arc::new(Self {
       source,
       chunk_size: options.chunk_size,
@@ -163,10 +161,12 @@ impl ChunkCache {
     n: u64,
   ) -> Result<Vec<ChunkRef>, CacheError> {
     debug_assert!(chunk_offset.is_multiple_of(self.chunk_size as u64));
+
     let cs = self.chunk_size as u64;
     let span_end = chunk_offset
       .saturating_add(n.saturating_mul(cs))
       .min(self.source.size());
+
     // Coalesce at most a byte-cap's worth of chunks per read, and never more
     // than the cache is sized to hold - so a single read's transient buffer
     // stays bounded by the resident budget on tight caps.
@@ -194,6 +194,7 @@ impl ChunkCache {
       let run_cap = run_start
         .saturating_add(max_chunks_per_read.saturating_mul(cs))
         .min(span_end);
+
       // Scan the run's extent under one lock (cheap key lookups, no read held
       // across it) rather than re-locking per chunk; a resident chunk splits
       // the run, so we read only up to it.
@@ -204,6 +205,7 @@ impl ChunkCache {
           run_end = (run_end + cs).min(run_cap); // never overshoot the cap/EOF
         }
       }
+
       // One coalesced read for the whole absent run, no lock held.
       let buf = self
         .source
