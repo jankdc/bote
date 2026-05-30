@@ -5,24 +5,6 @@ export type { StandardSchemaV1 }
 export type Segment = string | number
 export type Path = readonly Segment[]
 
-export function formatPath(path: Path): string {
-  if (path.length === 0) return '(root)'
-  let out = ''
-  for (let i = 0; i < path.length; i++) {
-    const seg = path[i]
-    if (typeof seg === 'number') {
-      out += `[${seg}]`
-      continue
-    }
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg)) {
-      out += i === 0 ? seg : `.${seg}`
-    } else {
-      out += `[${JSON.stringify(seg)}]`
-    }
-  }
-  return out
-}
-
 export class ValidationError extends Error {
   readonly issues: readonly StandardSchemaV1.Issue[]
   readonly path: Path
@@ -45,12 +27,6 @@ export async function runStandardSchema<O>(
   return result.value
 }
 
-/**
- * Validate one item for a stream fold. On failure: `'throw'` raises a
- * `ValidationError`; `'skip'` returns `{ skip: true }` so the caller can drop
- * the item (turning the schema into a filter). On success, returns the typed
- * value.
- */
 export async function validateItem<O>(
   schema: StandardSchemaV1<unknown, O>,
   value: unknown,
@@ -63,4 +39,22 @@ export async function validateItem<O>(
     throw new ValidationError(result.issues, path)
   }
   return { value: result.value }
+}
+
+export function formatPath(path: Path): string {
+  if (path.length === 0) return '(root)'
+  let out = ''
+  for (let i = 0; i < path.length; i++) {
+    const seg = path[i]
+    if (typeof seg === 'number') {
+      out += `[${seg}]`
+      continue
+    }
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(seg)) {
+      out += i === 0 ? seg : `.${seg}`
+    } else {
+      out += `[${JSON.stringify(seg)}]`
+    }
+  }
+  return out
 }
