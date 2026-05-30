@@ -7,6 +7,10 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
 export type { CacheStats } from '@botejs/native'
 
 export {
+  type IterOptions
+} from './args.ts'
+
+export {
   ValidationError,
   formatPath,
   type Path,
@@ -20,7 +24,6 @@ export {
   type Cursor,
   type RootCursor,
   type IterIndex as IterKey,
-  type IterOptions,
   type SessionOptions,
 } from './open.ts'
 

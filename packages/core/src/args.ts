@@ -1,0 +1,74 @@
+import { validatePath } from './path.ts'
+import type { Path, Segment, StandardSchemaV1 } from './validate.ts'
+
+export interface IterOptions {
+  select?: Segment | Path | Record<string, Segment | Path>
+  /** How many items are yielded per batch. Higher is faster, but takes more memory to materialise those items. */
+  batch?: number
+  /** Validate each yielded item against this schema (after `select`). */
+  schema?: StandardSchemaV1
+  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
+  onInvalid?: 'throw' | 'skip'
+  /** Yield `[index, value]` tuples instead of bare values, where `index` is
+   *  the zero-based position of the element in the source array. */
+  withIndex?: boolean
+}
+
+export type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail]
+
+export function splitArgs<TTail>(args: VariadicPathArgs<TTail>): { path: Segment[]; tail: TTail | undefined } {
+  let pathArgs: unknown[]
+  let tail: TTail | undefined
+  if (args.length === 0) {
+    pathArgs = []
+    tail = undefined
+  } else {
+    const last = args[args.length - 1]
+    if (last !== null && typeof last === 'object' && !Array.isArray(last)) {
+      pathArgs = args.slice(0, -1)
+      tail = last as TTail
+    } else {
+      pathArgs = args as unknown[]
+      tail = undefined
+    }
+  }
+  validatePath(pathArgs)
+  return { path: pathArgs as Segment[], tail }
+}
+
+export function isSchema(value: unknown): value is StandardSchemaV1 {
+  return typeof value === 'object' && value !== null && '~standard' in value
+}
+
+export function normalizeIterTail(tail: StandardSchemaV1 | IterOptions | undefined): IterOptions {
+  if (!tail) return {}
+  if (isSchema(tail)) return { schema: tail }
+  return tail
+}
+
+export function serializeSelect(select: Segment | Path | Record<string, Segment | Path>): string {
+  if (typeof select === 'string' || typeof select === 'number') {
+    const one = [select]
+    validatePath(one)
+    return JSON.stringify({ one })
+  }
+  if (Array.isArray(select)) {
+    validatePath(select)
+    if (select.length === 0) {
+      throw new RangeError('iter: select sub-path must have at least one segment')
+    }
+    return JSON.stringify({ one: select })
+  }
+  const entries = Object.entries(select).map(([k, sub]) => {
+    const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
+    validatePath(path)
+    if (path.length === 0) {
+      throw new RangeError(`iter: select field ${JSON.stringify(k)} sub-path must have at least one segment`)
+    }
+    return [k, path] as const
+  })
+  if (entries.length === 0) {
+    throw new RangeError('iter: select must have at least one field')
+  }
+  return JSON.stringify({ map: entries })
+}
