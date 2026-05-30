@@ -18,7 +18,7 @@ export interface Cell {
   docShape: DocShape
   docSize: number
   iterations: number
-  maxResidentChunks: number
+  maxResidentBytes: number
   op: Operation
   padWidth: number
   samples: number
@@ -70,7 +70,7 @@ export interface Result {
 function mk(c: Omit<Cell, 'id'>): Cell {
   const id =
     `${c.op}.${c.accessPattern}.${c.docShape}.${c.source}` +
-    `.n${c.docSize}.cap${c.maxResidentChunks}.cs${c.chunkBytes}`
+    `.n${c.docSize}.cap${c.maxResidentBytes}.cs${c.chunkBytes}`
   return { ...c, id }
 }
 
@@ -108,7 +108,7 @@ export function defaultCells(): Cell[] {
               source: 'memory',
               docShape: 'array-of-objects',
               docSize,
-              maxResidentChunks: cap,
+              maxResidentBytes: cap * CHUNK_SIZE,
               accessPattern: ap,
               samples: 8,
               iterations: iterCount(docSize, ap),
@@ -130,7 +130,7 @@ export function defaultCells(): Cell[] {
             source: 'memory',
             docShape: 'array-of-objects',
             docSize,
-            maxResidentChunks: cap,
+            maxResidentBytes: cap * CHUNK_SIZE,
             accessPattern: ap,
             samples: 5,
             iterations: 1,
@@ -151,7 +151,7 @@ export function defaultCells(): Cell[] {
           source: 'file',
           docShape: 'array-of-objects',
           docSize: 100_000,
-          maxResidentChunks: cap,
+          maxResidentBytes: cap * CHUNK_SIZE,
           accessPattern: ap,
           samples: 8,
           iterations: iterCount(100_000, ap),
@@ -165,7 +165,7 @@ export function defaultCells(): Cell[] {
         source: 'file',
         docShape: 'array-of-objects',
         docSize: 100_000,
-        maxResidentChunks: cap,
+        maxResidentBytes: cap * CHUNK_SIZE,
         accessPattern: 'walk-get-name',
         samples: 3,
         iterations: 1,
@@ -187,7 +187,7 @@ export function defaultCells(): Cell[] {
         source: 'file',
         docShape: 'array-of-objects',
         docSize: 500_000,
-        maxResidentChunks: cap,
+        maxResidentBytes: cap * CHUNK_SIZE,
         accessPattern: 'walk-first',
         samples: 8,
         iterations: 1,
@@ -206,7 +206,7 @@ export function defaultCells(): Cell[] {
           source: 'memory',
           docShape: 'deep-nested',
           docSize: 500,
-          maxResidentChunks: cap,
+          maxResidentBytes: cap * CHUNK_SIZE,
           accessPattern: ap,
           samples: 8,
           iterations: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
@@ -226,7 +226,7 @@ export function defaultCells(): Cell[] {
           source: 'memory',
           docShape: 'wide-flat',
           docSize: 100_000,
-          maxResidentChunks: cap,
+          maxResidentBytes: cap * CHUNK_SIZE,
           accessPattern: ap,
           samples: 8,
           iterations: iterCount(100_000, ap),
@@ -240,7 +240,7 @@ export function defaultCells(): Cell[] {
         source: 'memory',
         docShape: 'wide-flat',
         docSize: 100_000,
-        maxResidentChunks: cap,
+        maxResidentBytes: cap * CHUNK_SIZE,
         accessPattern: 'walk-all',
         samples: 3,
         iterations: 1,
@@ -259,7 +259,7 @@ export function commonCells(): Cell[] {
     source: 'memory' as SourceKind,
     docShape: 'array-of-objects' as DocShape,
     docSize: 100_000,
-    maxResidentChunks: 256,
+    maxResidentBytes: 256 * CHUNK_SIZE,
   }
   const cells: Cell[] = []
   for (const [op, ap] of [
