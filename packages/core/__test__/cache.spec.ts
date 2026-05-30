@@ -8,7 +8,7 @@ import { memorySource, enc, bigObject } from './fixtures.ts'
 // stats across derived cursors, and correctness under a tight slot cap.
 
 test('cache_stats_reports_bounded_occupancy', async (t) => {
-  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentChunks: 16 })
+  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
   t.after(() => cursor.close())
 
   assert.equal(await cursor.get('k1500'), 1500)
@@ -65,8 +65,26 @@ test('cache_reads_are_chunk_aligned', async () => {
 test('cache_large_doc_under_tight_slot_cap', async () => {
   // 30 KB object with 2000 keys; cap = 16 slots, chunk = 256 bytes.
   // The query must succeed under heavy fetching and eviction.
-  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentChunks: 16 })
+  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
   assert.equal(await cursor.get('k1500'), 1500)
   assert.equal(await cursor.get('k0042'), 42)
   assert.equal(await cursor.has('k9999'), false)
+})
+
+test('cache_ceiling_is_twice_the_resident_byte_budget', async (t) => {
+  // maxResidentBytes is the resident chunk-data budget; the enforced RSS
+  // ceiling adds bitmap headroom (a 2x factor).
+  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
+  t.after(() => cursor.close())
+  assert.equal(cursor.cacheStats().ceilingBytes, 16 * 256 * 2)
+})
+
+test('cache_rejects_budget_not_a_multiple_of_chunk_bytes', async () => {
+  // chunkBytes = 256; 300 is not a whole number of chunks.
+  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: 300 }), /multiple/)
+})
+
+test('cache_rejects_non_positive_budget', async () => {
+  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: 0 }), RangeError)
+  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: -256 }), RangeError)
 })

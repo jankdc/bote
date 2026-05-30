@@ -20,11 +20,6 @@ pub enum SourceError {
   Io(String),
 }
 
-/// Default chunk size when a `Source` doesn't advertise one. Matches the
-/// historical hard-coded value; chosen to fit two windows of typical CPU
-/// L1 and amortize one filesystem readahead.
-pub const DEFAULT_SOURCE_CHUNK_BYTES: usize = 64 * 1024;
-
 #[async_trait]
 pub trait Source: Send + Sync {
   /// Total length of the underlying byte stream.

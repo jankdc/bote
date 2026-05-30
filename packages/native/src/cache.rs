@@ -11,8 +11,9 @@ use crate::source::{Source, SourceError};
 
 const MIN_CHUNK_SIZE: usize = 64;
 
-/// Multiplier applied to `max_resident_chunks x chunk_size` to derive the
-/// total-bytes ceiling. The factor of 2 covers worst-case bitmap growth:
+/// Multiplier applied to `max_resident_bytes` (the resident chunk-data budget)
+/// to derive the total-bytes ceiling. The factor of 2 covers worst-case bitmap
+/// growth:
 /// one `in_string` bitmap (~chunk/8 bytes) plus up to five structural
 /// bitmaps (each ~chunk/8 bytes) =~ chunk x 3/4, comfortably below 1x
 /// chunk per slot of bitmap overhead. The 2x total leaves room for
@@ -30,15 +31,19 @@ const MAX_COALESCED_READ_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct CacheOptions {
   pub chunk_size: usize,
-  pub max_resident_chunks: u32,
+  /// Bytes of source chunk data to keep resident. Must be a non-zero multiple
+  /// of `chunk_size`; maps to exactly `max_resident_bytes / chunk_size` slots.
+  pub max_resident_bytes: usize,
 }
 
 #[derive(Debug, Error)]
 pub enum CacheError {
   #[error("chunk size must be a non-zero multiple of {MIN_CHUNK_SIZE}, got {0}")]
   InvalidChunkSize(usize),
-  #[error("max_resident_chunks must be non-zero")]
-  ZeroMaxResidentChunks,
+  #[error(
+    "max_resident_bytes must be a non-zero multiple of chunk_size {chunk_size}, got {budget}"
+  )]
+  InvalidMaxResidentBytes { budget: usize, chunk_size: usize },
   #[error(transparent)]
   Source(#[from] SourceError),
 }
@@ -87,16 +92,27 @@ impl ChunkCache {
     if options.chunk_size == 0 || !options.chunk_size.is_multiple_of(MIN_CHUNK_SIZE) {
       return Err(CacheError::InvalidChunkSize(options.chunk_size));
     }
-    if options.max_resident_chunks == 0 {
-      return Err(CacheError::ZeroMaxResidentChunks);
+    // A non-zero multiple of chunk_size maps to a whole number of slots (>= 1),
+    // so this one rule also guarantees room for a single pinned frontier chunk.
+    if options.max_resident_bytes == 0
+      || !options
+        .max_resident_bytes
+        .is_multiple_of(options.chunk_size)
+    {
+      return Err(CacheError::InvalidMaxResidentBytes {
+        budget: options.max_resident_bytes,
+        chunk_size: options.chunk_size,
+      });
     }
-    let derived_ceiling_bytes = (options.max_resident_chunks as usize)
-      .saturating_mul(options.chunk_size)
-      .saturating_mul(CEILING_FACTOR);
+    // A whole number of slots (>= 1) by the multiple-of-chunk_size rule above.
+    let max_resident_chunks = (options.max_resident_bytes / options.chunk_size) as u32;
+    // Total RSS ceiling = resident chunk bytes + bitmap headroom. Identical to
+    // the old `chunks * chunk_size * CEILING_FACTOR`, so eviction is unchanged.
+    let derived_ceiling_bytes = options.max_resident_bytes.saturating_mul(CEILING_FACTOR);
     Ok(Arc::new(Self {
       source,
       chunk_size: options.chunk_size,
-      max_resident_chunks: options.max_resident_chunks,
+      max_resident_chunks,
       derived_ceiling_bytes,
       bitmap_bytes: Arc::new(AtomicUsize::new(0)),
       inner: Mutex::new(CacheInner {
@@ -339,7 +355,7 @@ mod tests {
       source,
       CacheOptions {
         chunk_size: chunk,
-        max_resident_chunks: max_chunks,
+        max_resident_bytes: max_chunks as usize * chunk,
       },
     )
     .unwrap()
@@ -352,7 +368,7 @@ mod tests {
       src.clone(),
       CacheOptions {
         chunk_size: 63,
-        max_resident_chunks: 4,
+        max_resident_bytes: 256,
       },
     )
     .unwrap_err();
@@ -361,7 +377,7 @@ mod tests {
       src,
       CacheOptions {
         chunk_size: 0,
-        max_resident_chunks: 4,
+        max_resident_bytes: 256,
       },
     )
     .unwrap_err();
@@ -369,17 +385,44 @@ mod tests {
   }
 
   #[test]
-  fn config_rejects_zero_slot_cap() {
+  fn config_rejects_zero_budget() {
     let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
     let err = ChunkCache::new(
       src,
       CacheOptions {
         chunk_size: 64,
-        max_resident_chunks: 0,
+        max_resident_bytes: 0,
       },
     )
     .unwrap_err();
-    assert!(matches!(err, CacheError::ZeroMaxResidentChunks));
+    assert!(matches!(
+      err,
+      CacheError::InvalidMaxResidentBytes {
+        budget: 0,
+        chunk_size: 64
+      }
+    ));
+  }
+
+  #[test]
+  fn config_rejects_budget_not_multiple_of_chunk_size() {
+    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
+    // 200 is not a multiple of the 64-byte chunk size.
+    let err = ChunkCache::new(
+      src,
+      CacheOptions {
+        chunk_size: 64,
+        max_resident_bytes: 200,
+      },
+    )
+    .unwrap_err();
+    assert!(matches!(
+      err,
+      CacheError::InvalidMaxResidentBytes {
+        budget: 200,
+        chunk_size: 64
+      }
+    ));
   }
 
   #[tokio::test]
@@ -534,7 +577,7 @@ mod tests {
       source,
       CacheOptions {
         chunk_size: chunk,
-        max_resident_chunks: max_chunks,
+        max_resident_bytes: max_chunks as usize * chunk,
       },
     )
     .unwrap();

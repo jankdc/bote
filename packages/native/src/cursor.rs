@@ -509,7 +509,7 @@ mod tests {
       source,
       CacheOptions {
         chunk_size,
-        max_resident_chunks: max_chunks,
+        max_resident_bytes: max_chunks as usize * chunk_size,
       },
     )
     .unwrap()

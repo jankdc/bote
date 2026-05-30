@@ -32,10 +32,12 @@ export declare class CursorWalk {
 
 export interface BoteOptions {
   /**
-   * Maximum number of source chunks held resident at once. Each slot
-   * accounts for one chunk's bytes plus its bitmaps. Defaults to 512.
+   * Bytes of source chunk data to keep resident. Must be a non-zero multiple
+   * of the source's `chunkBytes` (one chunk per slot). Total native memory,
+   * including bitmap overhead, is bounded at roughly 2x this. Required: the
+   * `@botejs/core` facade resolves the public default before calling in.
    */
-  maxResidentChunks?: number
+  maxResidentBytes: number
 }
 
 /**
@@ -82,9 +84,11 @@ export interface IterArgs {
  *   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
  *                                    JS resolves with a `Uint8Array` of bytes read
  *                                    (its `.byteLength` is the actual count, `<= length`)
- *   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
+ *   - `chunkBytes: number`           read granularity in bytes (whole, multiple of 64).
+ *                                    Required: the `@botejs/core` facade resolves the
+ *                                    per-source default before calling in.
  */
-export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options?: BoteOptions | undefined | null): Cursor
+export declare function open(source: { size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options: BoteOptions): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

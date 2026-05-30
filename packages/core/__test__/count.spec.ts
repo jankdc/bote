@@ -42,7 +42,7 @@ test('count_large_array_under_eviction', async (t) => {
   // fetched and evicted repeatedly; the tally must stay correct. (The resident
   // budget invariant itself is asserted in cache.spec.ts.)
   const items = Array.from({ length: 5000 }, (_, i) => `{"id":${i}}`)
-  const cursor = await open(memorySource(enc('[' + items.join(',') + ']'), 256), { maxResidentChunks: 16 })
+  const cursor = await open(memorySource(enc('[' + items.join(',') + ']'), 256), { maxResidentBytes: 16 * 256 })
   t.after(() => cursor.close())
   assert.equal(await cursor.count(), 5000)
 })

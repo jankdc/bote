@@ -30,7 +30,7 @@ test('source_from_file_reads_from_disk', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'bote-'))
   const path = join(dir, 'doc.json')
   writeFileSync(path, DOC)
-  const cursor = await open(fromFile(path, { chunkBytes: 64 }), { maxResidentChunks: 16 })
+  const cursor = await open(fromFile(path, { chunkBytes: 64 }), { maxResidentBytes: 16 * 64 })
   t.after(() => cursor.close())
   assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
   const names: string[] = []
@@ -56,6 +56,30 @@ test('source_open_is_deferred_until_open_call', async () => {
   const cursor = await open(source)
   assert.equal(opened, 1)
   await cursor.close()
+})
+
+test('source_rejects_fractional_chunk_bytes', async () => {
+  // A fractional chunkBytes once truncated to 0 and divided-by-zero when
+  // deriving the default budget; it must now be a clean validation error.
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0.5 })), /chunkBytes must be a whole positive/)
+})
+
+test('source_rejects_zero_chunk_bytes', async () => {
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a whole positive/)
+})
+
+test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 100 })), /multiple of 64/)
+})
+
+test('source_invalid_chunk_bytes_reports_chunk_fault_not_misleading_multiple_error', async () => {
+  // With a budget set AND chunkBytes invalid (0), the multiple check must not
+  // throw a misleading `mrb % 0 === NaN` rejection; the real chunkBytes fault
+  // should surface instead.
+  await assert.rejects(
+    () => open(fromBuffer(enc(DOC), { chunkBytes: 0 }), { maxResidentBytes: 65536 }),
+    /chunkBytes must be a whole positive/,
+  )
 })
 
 test('lifecycle_close_drives_reader_close_exactly_once', async () => {

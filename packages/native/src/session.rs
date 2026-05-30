@@ -142,7 +142,7 @@ impl Session {
 
   /// Drop every pin except the one covering `next_offset`. Bounds the
   /// resident-pin count to 1 between iterator yields so the cache's own
-  /// eviction loop is free to maintain `maxResidentChunks`. When
+  /// eviction loop is free to maintain its resident-chunk slot cap. When
   /// `next_offset >= source_size` (iteration walked off the end) clears
   /// everything.
   pub(crate) fn prune_pins(&self, pinned: &mut HashMap<u64, ChunkRef>, next_offset: u64) {
@@ -442,27 +442,15 @@ mod tests {
       src,
       CacheOptions {
         chunk_size: 64,
-        max_resident_chunks: 1,
+        max_resident_bytes: 64,
       },
     )
     .unwrap();
 
     // Pin chunks 0 and 64. Cap is 1; eviction can't fire while both are pinned
     // (evict_to_caps finds no unpinned victim).
-    let pin0 = session
-      .cache
-      .fetch(0, 1)
-      .await
-      .unwrap()
-      .pop()
-      .unwrap();
-    let pin64 = session
-      .cache
-      .fetch(64, 1)
-      .await
-      .unwrap()
-      .pop()
-      .unwrap();
+    let pin0 = session.cache.fetch(0, 1).await.unwrap().pop().unwrap();
+    let pin64 = session.cache.fetch(64, 1).await.unwrap().pop().unwrap();
 
     // Build bitmaps for both, chaining carries.
     {

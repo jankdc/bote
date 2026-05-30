@@ -67,7 +67,7 @@ test('walk_missing_path_yields_empty', async (t) => {
 test('walk_large_array_under_tight_budget', async () => {
   const items = Array.from({ length: 100 }, (_, i) => `{"id":${i},"name":"item-${i}"}`)
   const data = enc('[' + items.join(',') + ']')
-  const cursor = await open(memorySource(data, 128), { maxResidentChunks: 16 })
+  const cursor = await open(memorySource(data, 128), { maxResidentBytes: 16 * 128 })
   const ids: number[] = []
   for await (const item of cursor.walk()) {
     ids.push((await item.get('id')) as number)

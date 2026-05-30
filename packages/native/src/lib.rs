@@ -34,9 +34,7 @@ use napi_derive::napi;
 use crate::cache::CacheOptions;
 use crate::cursor::Cursor;
 use crate::session::Session;
-use crate::source::{JsSource, ReadArgs, DEFAULT_SOURCE_CHUNK_BYTES};
-
-const DEFAULT_MAX_RESIDENT_CHUNKS: u32 = 512;
+use crate::source::{JsSource, ReadArgs};
 
 #[cfg(feature = "heap-profile")]
 #[global_allocator]
@@ -47,9 +45,11 @@ static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::ne
 
 #[napi(object)]
 pub struct BoteOptions {
-  /// Maximum number of source chunks held resident at once. Each slot
-  /// accounts for one chunk's bytes plus its bitmaps. Defaults to 512.
-  pub max_resident_chunks: Option<f64>,
+  /// Bytes of source chunk data to keep resident. Must be a non-zero multiple
+  /// of the source's `chunkBytes` (one chunk per slot). Total native memory,
+  /// including bitmap overhead, is bounded at roughly 2x this. Required: the
+  /// `@botejs/core` facade resolves the public default before calling in.
+  pub max_resident_bytes: f64,
 }
 
 /// Build a [`Cursor`] from a JS source object.
@@ -59,14 +59,16 @@ pub struct BoteOptions {
 ///   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
 ///                                    JS resolves with a `Uint8Array` of bytes read
 ///                                    (its `.byteLength` is the actual count, `<= length`)
-///   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
+///   - `chunkBytes: number`           read granularity in bytes (whole, multiple of 64).
+///                                    Required: the `@botejs/core` facade resolves the
+///                                    per-source default before calling in.
 #[napi]
 pub fn open(
   #[napi(
-    ts_arg_type = "{ size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
+    ts_arg_type = "{ size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
   )]
   source: Object<'_>,
-  options: Option<BoteOptions>,
+  options: BoteOptions,
 ) -> napi::Result<Cursor> {
   let size = source.get_named_property::<f64>("size")?;
   if !size.is_finite() || size < 0.0 {
@@ -77,23 +79,40 @@ pub fn open(
   let read_fn: Function<ReadArgs, Promise<Uint8Array>> = source.get_named_property("read")?;
   let ts_read_fn = read_fn.build_threadsafe_function().weak::<true>().build()?;
 
+  // chunkBytes is required and must be a whole positive number; reject anything
+  // else outright rather than truncating (e.g. `0.5 as usize == 0`). The non-zero
+  // multiple-of-64 rule is enforced by `ChunkCache::new`. The core facade fills
+  // in the per-source default before calling, so there is no default here.
   let chunk_size = match source.get_named_property::<Option<f64>>("chunkBytes") {
-    Ok(Some(n)) if n.is_finite() && n > 0.0 => n as usize,
-    _ => DEFAULT_SOURCE_CHUNK_BYTES,
+    Ok(Some(n)) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
+      n as usize
+    }
+    Ok(Some(n)) => {
+      return Err(napi::Error::from_reason(format!(
+        "chunkBytes must be a whole positive number of bytes, got {n}"
+      )));
+    }
+    _ => {
+      return Err(napi::Error::from_reason(
+        "source.chunkBytes is required: a whole positive number of bytes".to_string(),
+      ));
+    }
   };
 
-  let max_resident_chunks = options
-    .as_ref()
-    .and_then(|o| o.max_resident_chunks)
-    .filter(|n| n.is_finite() && *n >= 1.0)
-    .map(|n| n as u32)
-    .unwrap_or(DEFAULT_MAX_RESIDENT_CHUNKS);
+  // Always required; the caller (the core facade) resolves any public default.
+  let n = options.max_resident_bytes;
+  if !(n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64) {
+    return Err(napi::Error::from_reason(format!(
+      "maxResidentBytes must be a whole positive number of bytes, got {n}"
+    )));
+  }
+  let max_resident_bytes = n as usize;
 
   let session = Session::new(
     Arc::new(JsSource::new(ts_read_fn, size as u64)),
     CacheOptions {
       chunk_size,
-      max_resident_chunks,
+      max_resident_bytes,
     },
   )
   .map_err(|e| napi::Error::from_reason(e.to_string()))?;

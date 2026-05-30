@@ -1,7 +1,7 @@
 // Heap profile of a full ingest of a large JSON doc.
 //
 // Requires `@botejs/native` built with `--features heap-profile`. Opens
-// the source with default chunk size and default `maxResidentChunks`,
+// the source with default chunk size and default `maxResidentBytes`,
 // then walks the whole doc to force every chunk through the cache +
 // bitmap store. Writes a heap-profile file to CWD (override with
 // `--out <path>`). The profile file format is whatever the native
@@ -41,15 +41,18 @@ async function iterAll(cursor: Cursor): Promise<number> {
 
 async function profile(path: string, docBytes: number, outPath: string): Promise<void> {
   console.log(`Doc: ${path}  (${fmtBytes(docBytes)})`)
-  console.log(`Defaults: chunkBytes = 64 KiB, maxResidentChunks = 512`)
+  console.log(`Defaults: chunkBytes = 64 KiB, maxResidentBytes ≈ 32 MiB`)
   console.log(`Dumping heap profile to: ${outPath}`)
 
-  const source = await fileSource(path) // no chunkBytes → native default (64 KiB)
+  const CHUNK_BYTES = 64 * 1024
+  const source = await fileSource(path, CHUNK_BYTES)
   let peakBytes = 0
   try {
     heapProfileStart(outPath)
     try {
-      const cursor = open(source) // no options → default maxResidentChunks (512)
+      // Native `open` requires explicit chunkBytes + budget (the core facade's
+      // resolution doesn't apply to direct-native callers); 512 chunks ≈ 32 MiB.
+      const cursor = open(source, { maxResidentBytes: 512 * CHUNK_BYTES })
       const seen = await iterAll(cursor)
       // Read peak before stopping; stop tears the profiler down.
       peakBytes = heapProfilePeakBytes()

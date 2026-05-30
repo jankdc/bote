@@ -1,7 +1,7 @@
 // Bounded-resident-memory check
 //
 // bote's promise is that the native memory held for source data stays at or
-// below a fixed ceiling (~ maxResidentChunks x chunkBytes), regardless of
+// below a fixed ceiling (~ maxResidentBytes x 2, for bitmap overhead), regardless of
 // document size. We iterate array-of-objects docs of increasing size under a
 // tight cap, sample peak resident (chunk + bitmap) bytes via the native
 // `cacheStats()` API, and assert that peak (a) stays under the cache's own
@@ -72,7 +72,7 @@ async function measure(items: number): Promise<Reading> {
   return withTempDoc(items, PAD_WIDTH, async (path, buf) => {
     const source = await fileSource(path, CHUNK_BYTES)
     try {
-      const cursor = open(source, { maxResidentChunks: MAX_RESIDENT_CHUNKS })
+      const cursor = open(source, { maxResidentBytes: MAX_RESIDENT_CHUNKS * CHUNK_BYTES })
       const r = await iterSampling(cursor, items)
       r.docBytes = buf.byteLength
       return r

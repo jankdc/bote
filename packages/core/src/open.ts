@@ -5,15 +5,25 @@ import { runStandardSchema, validateItem, type Path, type Segment, type Standard
 
 export interface SessionOptions {
   /**
-   * Maximum number of source chunks held resident at once. Each slot
-   * accounts for one chunk's bytes plus its bitmaps; the cache also
-   * enforces a derived byte ceiling at roughly `maxResidentChunks x
-   * source.chunkBytes x 2` to bound total native memory.
+   * Bytes of source chunk data to keep resident — must be a non-zero multiple
+   * of the source's `chunkBytes` (one chunk per slot). Total native memory,
+   * including bitmap overhead, is bounded at roughly 2× this. The cache evicts
+   * to stay under it regardless of document size.
    *
-   * Defaults to 512 chunks.
+   * Defaults to ~32 MiB (rounded down to a whole chunk).
    */
-  maxResidentChunks?: number
+  maxResidentBytes?: number
 }
+
+/** Target resident chunk-data budget when the caller doesn't pass one. Rounded
+ *  down to a whole chunk so the value handed to the native layer is always a
+ *  valid multiple of the chunk size. ~32 MiB ≙ 512 × 64 KiB historically. */
+const DEFAULT_RESIDENT_TARGET_BYTES = 32 * 1024 * 1024
+
+/** Read granularity used when a source advertises no `chunkBytes`. The native
+ *  layer requires a concrete chunk size, so this facade is the single source of
+ *  truth for the fallback (fits two CPU-L1 windows, amortizes one FS readahead). */
+const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
@@ -106,17 +116,40 @@ export interface RootCursor extends Cursor, AsyncDisposable {
  * drives the reader's own `close()` exactly once.
  */
 export async function open(source: Source, options?: SessionOptions): Promise<RootCursor> {
+  const mrb = options?.maxResidentBytes
+  if (mrb !== undefined && (!Number.isInteger(mrb) || mrb <= 0)) {
+    throw new RangeError(`maxResidentBytes must be a positive integer, got ${mrb}`)
+  }
   const reader = await source.open()
+  // Only run the multiple check against a valid positive-integer chunkBytes.
+  // When it's absent (custom sources) or itself invalid (0, fractional), the
+  // native layer is authoritative — it reports the real chunkBytes fault
+  // rather than us throwing a misleading `mrb % 0 === NaN` rejection.
+  // Resolve the chunk size once, filling in the default for sources that don't
+  // advertise one — native requires a concrete value. An invalid advertised
+  // value (0, fractional) is passed through unchanged so native reports the real
+  // chunkBytes fault rather than us masking it with the fallback.
+  const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
+  if (mrb !== undefined && Number.isInteger(chunkBytes) && chunkBytes > 0 && mrb % chunkBytes !== 0) {
+    await closeReader(reader)
+    throw new RangeError(`maxResidentBytes (${mrb}) must be a multiple of the source's chunkBytes (${chunkBytes})`)
+  }
+  // The native API always requires a budget, so resolve the default here. Round
+  // the target down to a whole chunk against the resolved chunk size so the
+  // result is a valid multiple. When chunkBytes is itself invalid the divisor is
+  // a placeholder; native rejects the bad chunkBytes before the budget matters.
+  const chunkForDefault = Number.isInteger(chunkBytes) && chunkBytes > 0 ? chunkBytes : DEFAULT_SOURCE_CHUNK_BYTES
+  const maxResidentBytes = mrb ?? Math.max(1, Math.floor(DEFAULT_RESIDENT_TARGET_BYTES / chunkForDefault)) * chunkForDefault
   let native: NativeCursor
   try {
     native = openNative(
       {
         size: reader.size,
-        chunkBytes: reader.chunkBytes,
+        chunkBytes,
         read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
       },
       {
-        maxResidentChunks: options?.maxResidentChunks,
+        maxResidentBytes,
       },
     )
   } catch (err) {
