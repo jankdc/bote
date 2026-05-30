@@ -30,14 +30,6 @@ pub enum Structural {
 
 impl Structural {
   const COUNT: usize = 5;
-  #[cfg(test)]
-  const ALL: [Structural; Self::COUNT] = [
-    Structural::Comma,
-    Structural::LBrace,
-    Structural::RBrace,
-    Structural::LBracket,
-    Structural::RBracket,
-  ];
 
   pub fn byte(self) -> u8 {
     match self {
@@ -48,6 +40,15 @@ impl Structural {
       Self::RBracket => b']',
     }
   }
+
+  #[cfg(test)]
+  const ALL: [Structural; Self::COUNT] = [
+    Structural::Comma,
+    Structural::LBrace,
+    Structural::RBrace,
+    Structural::LBracket,
+    Structural::RBracket,
+  ];
 }
 
 /// Bitmaps for a single chunk. Each bitmap is one `u64` per 64-byte window.
@@ -63,14 +64,17 @@ impl ChunkBitmaps {
   /// `entry_carry`. Structural bitmaps are deferred to first access.
   pub fn build_basic(chunk: &[u8], entry_carry: ScanCarry) -> Self {
     let n_words = chunk.len().div_ceil(WINDOW);
+
     let mut in_string = vec![0u64; n_words].into_boxed_slice();
     let mut carry = entry_carry;
+
     for (w, slot) in in_string.iter_mut().enumerate() {
       let window = window_at(chunk, w);
       let (bits, next) = scan_block(&window, carry);
       *slot = bits;
       carry = next;
     }
+
     Self {
       n_words,
       exit_carry: carry,
@@ -85,21 +89,15 @@ impl ChunkBitmaps {
     self.exit_carry
   }
 
+  /// Immutable accessor for a structural bitmap that's already been built.
+  pub fn structural(&self, kind: Structural) -> Option<&[u64]> {
+    self.structural[kind as usize].as_deref()
+  }
+
   /// Return the structural bitmap for `kind`, building it on first access.
   pub fn ensure_structural(&mut self, chunk: &[u8], kind: Structural) -> &[u64] {
     self.structural[kind as usize]
       .get_or_insert_with(|| build_structural(chunk, &self.in_string, kind))
-  }
-
-  #[cfg(test)]
-  fn has_structural(&self, kind: Structural) -> bool {
-    self.structural[kind as usize].is_some()
-  }
-
-  /// Immutable accessor for a structural bitmap that's already been built.
-  /// Returns `None` if [`ensure_structural`] hasn't been called for `kind`.
-  pub fn structural(&self, kind: Structural) -> Option<&[u64]> {
-    self.structural[kind as usize].as_deref()
   }
 
   /// Total bytes of bitmap storage currently held by this chunk
@@ -112,6 +110,11 @@ impl ChunkBitmaps {
       .filter_map(|s| s.as_deref().map(|b| b.len() * 8))
       .sum();
     basic + structural
+  }
+
+  #[cfg(test)]
+  fn has_structural(&self, kind: Structural) -> bool {
+    self.structural[kind as usize].is_some()
   }
 }
 
@@ -183,6 +186,13 @@ impl BitmapStore {
     self.bytes_counter.fetch_add(added, Ordering::Relaxed);
   }
 
+  /// Drop cached bitmaps for a chunk.
+  pub fn evict(&mut self, chunk_offset: u64) {
+    if let Some(bm) = self.chunks.remove(&chunk_offset) {
+      self.bytes_counter.fetch_sub(bm.bytes(), Ordering::Relaxed);
+    }
+  }
+
   /// Build the structural bitmap for `kind` on `chunk_offset` if it isn't
   /// resident yet, updating byte accounting. No-op if the chunk isn't in
   /// the store (caller is responsible for `insert`-ing first).
@@ -195,13 +205,6 @@ impl BitmapStore {
     }
     let added = bm.ensure_structural(chunk, kind).len() * 8;
     self.bytes_counter.fetch_add(added, Ordering::Relaxed);
-  }
-
-  /// Drop cached bitmaps for a chunk.
-  pub fn evict(&mut self, chunk_offset: u64) {
-    if let Some(bm) = self.chunks.remove(&chunk_offset) {
-      self.bytes_counter.fetch_sub(bm.bytes(), Ordering::Relaxed);
-    }
   }
 
   #[cfg(test)]
