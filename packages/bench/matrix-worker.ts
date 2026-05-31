@@ -104,7 +104,7 @@ async function measureCell(cell: Cell): Promise<Result> {
   }
   const { source, cleanup } = await makeSource(cell, fixture.buf)
   try {
-    const cursor = open(source, { maxResidentBytes: cell.maxResidentBytes })
+    const cursor = open(source)
 
     // Let's warm this up it.
     let itemsPerInvocation = 0

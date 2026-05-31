@@ -56,7 +56,7 @@ const rows = results.map((r) => {
 
 const sample = results.find((r) => !r.error)?.cell
 const caption = sample
-  ? `${sample.docShape}, ${sample.source} source, n=${sample.docSize.toLocaleString()}, cap=${fmtBytes(sample.maxResidentBytes)}`
+  ? `${sample.docShape}, ${sample.source} source, n=${sample.docSize.toLocaleString()}, chunk=${fmtBytes(sample.chunkBytes)}`
   : 'no cells'
 
 const md =

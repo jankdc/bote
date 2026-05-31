@@ -7,7 +7,6 @@ export declare class Cursor {
   get key(): string | number | null
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): CursorWalk
-  cacheStats(): CacheStats
 }
 
 /**
@@ -30,30 +29,6 @@ export declare class CursorWalk {
   [Symbol.asyncIterator](): AsyncGenerator<Cursor, void, undefined>
 }
 
-export interface BoteOptions {
-  /**
-   * Bytes of source chunk data to keep resident. Must be a non-zero multiple
-   * of the source's `chunkBytes` (one chunk per slot). Total native memory,
-   * including bitmap overhead, is bounded at roughly 2x this. Required: the
-   * `@botejs/core` facade resolves the public default before calling in.
-   */
-  maxResidentBytes: number
-}
-
-/**
- * Live snapshot of the session's chunk-cache occupancy. The cache is
- * shared by every cursor derived from one `open()` call, so any cursor
- * reports the same figures. `residentBytes + bitmapBytes` is the total
- * native memory held for source data and stays at or below `ceilingBytes`
- * regardless of document size - the library's bounded-memory contract.
- */
-export interface CacheStats {
-  residentBytes: number
-  bitmapBytes: number
-  residentChunks: number
-  ceilingBytes: number
-}
-
 export declare function heapProfilePeakBytes(): number
 
 export declare function heapProfileStart(filePath?: string | undefined | null): void
@@ -61,8 +36,8 @@ export declare function heapProfileStart(filePath?: string | undefined | null): 
 export declare function heapProfileStop(): void
 
 /**
- * Options for `iter`. A `#[napi(object)]` so the facade can grow it
- * without changing the method's arity.
+ * Options for `iter`. A `#[napi(object)]` so the facade can grow it without
+ * changing the method's arity.
  */
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
@@ -70,8 +45,8 @@ export interface IterArgs {
   /** Batch size: each yield is an array of up to this many items. */
   batch: number
   /**
-   * Yield `[key, value]` tuples instead of bare values. The key is a string
-   * for object members and a number for array elements.
+   * Yield `[key, value]` tuples instead of bare values. The key is a string for
+   * object members and a number for array elements.
    */
   withKey?: boolean
 }
@@ -88,7 +63,7 @@ export interface IterArgs {
  *                                    Required: the `@botejs/core` facade resolves the
  *                                    per-source default before calling in.
  */
-export declare function open(source: { size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options: BoteOptions): Cursor
+export declare function open(source: { size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

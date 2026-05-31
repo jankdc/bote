@@ -256,14 +256,12 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   ])
 })
 
-test('iter_select_batch_under_tight_budget_stays_bounded', async (t) => {
-  // Projecting + batching a big array under a tight cap stays under the ceiling.
+test('iter_select_batch_with_small_chunks_stays_correct', async (t) => {
+  // Projecting + batching a big array with tiny chunks streams correctly.
   const rows = Array.from({ length: 4000 }, (_, i) => `{"id":${i},"v":"value-${i}"}`)
-  const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256), { maxResidentBytes: 16 * 256 })
+  const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256))
   t.after(() => db.close())
   let count = 0
   for await (const batch of db.iter({ select: ['id'], batch: 256 })) count += batch.length
   assert.equal(count, 4000)
-  const stats = db.cacheStats()
-  assert.ok(stats.residentBytes + stats.bitmapBytes <= stats.ceilingBytes)
 })

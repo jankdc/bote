@@ -4,36 +4,11 @@ import assert from 'node:assert/strict'
 import { open, type Source } from '../src/index.ts'
 import { memorySource, enc, bigObject } from './fixtures.ts'
 
-// Chunk cache behavior: bounded resident occupancy, chunk-aligned fetches, shared
-// stats across derived cursors, and correctness under a tight slot cap.
+// Chunked-read behavior: reads are chunk-aligned and a large document resolves
+// correctly while only a bounded transient window of chunks is ever resident
+// (the streaming walk stores no chunk or bitmap cache).
 
-test('cache_stats_reports_bounded_occupancy', async (t) => {
-  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
-  t.after(() => cursor.close())
-
-  assert.equal(await cursor.get('k1500'), 1500)
-
-  const stats = cursor.cacheStats()
-  assert.ok(stats.ceilingBytes > 0, `ceilingBytes ${stats.ceilingBytes} should be positive`)
-  assert.ok(stats.residentChunks >= 0 && Number.isFinite(stats.residentChunks))
-  assert.ok(
-    stats.residentBytes + stats.bitmapBytes <= stats.ceilingBytes,
-    `resident ${stats.residentBytes} + bitmap ${stats.bitmapBytes} exceeded ceiling ${stats.ceilingBytes}`,
-  )
-})
-
-test('cache_stats_is_shared_across_derived_cursors', async (t) => {
-  const data = enc('{"users":[{"name":"Alice"},{"name":"Bob"}]}')
-  const cursor = await open(memorySource(data))
-  t.after(() => cursor.close())
-
-  const rootCeiling = cursor.cacheStats().ceilingBytes
-  for await (const user of cursor.walk('users')) {
-    assert.equal(user.cacheStats().ceilingBytes, rootCeiling)
-  }
-})
-
-test('cache_reads_are_chunk_aligned', async () => {
+test('reads_are_chunk_aligned', async () => {
   const data = enc('[' + Array.from({ length: 200 }, () => '1').join(',') + ']')
   const reads: Array<{ offset: number; length: number }> = []
   const source: Source = {
@@ -62,29 +37,11 @@ test('cache_reads_are_chunk_aligned', async () => {
   )
 })
 
-test('cache_large_doc_under_tight_slot_cap', async () => {
-  // 30 KB object with 2000 keys; cap = 16 slots, chunk = 256 bytes.
-  // The query must succeed under heavy fetching and eviction.
-  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
+test('large_doc_resolves_with_small_chunks', async () => {
+  // 30 KB object with 2000 keys, 256-byte chunks: the query succeeds under heavy
+  // forward faulting with only a bounded window of chunks resident at a time.
+  const cursor = await open(memorySource(enc(bigObject(2000)), 256))
   assert.equal(await cursor.get('k1500'), 1500)
   assert.equal(await cursor.get('k0042'), 42)
   assert.equal(await cursor.has('k9999'), false)
-})
-
-test('cache_ceiling_is_twice_the_resident_byte_budget', async (t) => {
-  // maxResidentBytes is the resident chunk-data budget; the enforced RSS
-  // ceiling adds bitmap headroom (a 2x factor).
-  const cursor = await open(memorySource(enc(bigObject(2000)), 256), { maxResidentBytes: 16 * 256 })
-  t.after(() => cursor.close())
-  assert.equal(cursor.cacheStats().ceilingBytes, 16 * 256 * 2)
-})
-
-test('cache_rejects_budget_not_a_multiple_of_chunk_bytes', async () => {
-  // chunkBytes = 256; 300 is not a whole number of chunks.
-  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: 300 }), /multiple/)
-})
-
-test('cache_rejects_non_positive_budget', async () => {
-  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: 0 }), RangeError)
-  await assert.rejects(() => open(memorySource(enc(bigObject(10)), 256), { maxResidentBytes: -256 }), RangeError)
 })

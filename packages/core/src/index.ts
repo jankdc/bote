@@ -4,8 +4,6 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
   ;(Symbol as { asyncDispose?: symbol }).asyncDispose = Symbol.for('Symbol.asyncDispose')
 }
 
-export type { CacheStats } from '@botejs/native'
-
 export {
   type IterOptions
 } from './args.ts'
@@ -24,7 +22,6 @@ export {
   type Cursor,
   type RootCursor,
   type IterIndex as IterKey,
-  type SessionOptions,
 } from './open.ts'
 
 export {

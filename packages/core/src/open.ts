@@ -1,4 +1,4 @@
-import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
+import { open as openNative, type Cursor as NativeCursor } from '@botejs/native'
 
 import { validatePath } from './path.ts'
 import type { Source, SourceReader } from './sources.ts'
@@ -12,18 +12,6 @@ import {
   type VariadicPathArgs,
 } from './args.ts'
 
-export interface SessionOptions {
-  /**
-   * Bytes of source chunk data to keep resident. Must be a non-zero multiple
-   * of the source's `chunkBytes` (one chunk per slot). Total native memory,
-   * including bitmap overhead, is bounded at roughly 2× this. The cache evicts
-   * to stay under it regardless of document size.
-   *
-   * Defaults to ~32 MiB (rounded down to a whole chunk).
-   */
-  maxResidentBytes?: number
-}
-
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
 type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
@@ -31,7 +19,6 @@ type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
 /** Zero-based index of an array element. */
 export type IterIndex = number
 
-export const DEFAULT_RESIDENT_TARGET_BYTES = 32 * 1024 * 1024
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
 
@@ -64,7 +51,6 @@ export interface Cursor {
   iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
   walk(...path: Segment[]): AsyncIterable<Cursor>
-  cacheStats(): CacheStats
 }
 
 export interface RootCursor extends Cursor, AsyncDisposable {
@@ -78,31 +64,16 @@ export interface RootCursor extends Cursor, AsyncDisposable {
  * The returned `RootCursor` owns the reader: `close()` (or `await using`)
  * drives the reader's own `close()` exactly once.
  */
-export async function open(source: Source, options?: SessionOptions): Promise<RootCursor> {
-  const mrb = options?.maxResidentBytes
-  if (mrb !== undefined && (!Number.isInteger(mrb) || mrb <= 0)) {
-    throw new RangeError(`maxResidentBytes must be a positive integer, got ${mrb}`)
-  }
+export async function open(source: Source): Promise<RootCursor> {
   const reader = await source.open()
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
-  if (mrb !== undefined && Number.isInteger(chunkBytes) && chunkBytes > 0 && mrb % chunkBytes !== 0) {
-    await closeReader(reader)
-    throw new RangeError(`maxResidentBytes (${mrb}) must be a multiple of the source's chunkBytes (${chunkBytes})`)
-  }
-  const chunkForDefault = Number.isInteger(chunkBytes) && chunkBytes > 0 ? chunkBytes : DEFAULT_SOURCE_CHUNK_BYTES
-  const maxResidentBytes = mrb ?? Math.max(1, Math.floor(DEFAULT_RESIDENT_TARGET_BYTES / chunkForDefault)) * chunkForDefault
   let native: NativeCursor
   try {
-    native = openNative(
-      {
-        size: reader.size,
-        chunkBytes,
-        read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
-      },
-      {
-        maxResidentBytes,
-      },
-    )
+    native = openNative({
+      size: reader.size,
+      chunkBytes,
+      read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
+    })
   } catch (err) {
     await closeReader(reader)
     throw err
@@ -181,9 +152,6 @@ function wrap(native: NativeCursor): Cursor {
           }
         },
       }
-    },
-    cacheStats() {
-      return native.cacheStats()
     },
   }
 

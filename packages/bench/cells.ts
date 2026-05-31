@@ -1,8 +1,8 @@
 // Cell + Result schema and the default cell set the matrix driver runs.
 //
-// A cell is one fully-specified measurement; the driver spawns a fresh
-// node process per cell so the native chunk cache and bitmap store start
-// cold.
+// A cell is one fully-specified measurement; the driver spawns a fresh node
+// process per cell so the streaming walk starts cold (it stores no chunk or
+// bitmap cache across queries).
 
 import type { DocShape, FixturePattern } from './fixtures.ts'
 
@@ -18,7 +18,6 @@ export interface Cell {
   docShape: DocShape
   docSize: number
   iterations: number
-  maxResidentBytes: number
   op: Operation
   padWidth: number
   samples: number
@@ -66,11 +65,8 @@ export interface Result {
   }
 }
 
-// TODO: need to document this
 function mk(c: Omit<Cell, 'id'>): Cell {
-  const id =
-    `${c.op}.${c.accessPattern}.${c.docShape}.${c.source}` +
-    `.n${c.docSize}.cap${c.maxResidentBytes}.cs${c.chunkBytes}`
+  const id = `${c.op}.${c.accessPattern}.${c.docShape}.${c.source}.n${c.docSize}.cs${c.chunkBytes}`
   return { ...c, id }
 }
 
@@ -98,31 +94,8 @@ export function defaultCells(): Cell[] {
 
   // array-of-objects, memory source: full sweep - the workhorse path.
   for (const docSize of [10_000, 100_000]) {
-    for (const cap of [16, 256]) {
-      for (const op of ['get', 'has'] as Operation[]) {
-        for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
-          cells.push(
-            mk({
-              ...base,
-              op,
-              source: 'memory',
-              docShape: 'array-of-objects',
-              docSize,
-              maxResidentBytes: cap * CHUNK_SIZE,
-              accessPattern: ap,
-              samples: 8,
-              iterations: iterCount(docSize, ap),
-            }),
-          )
-        }
-      }
-      // Traversal: walk-all (count children), iter-all (materialize values),
-      // walk-get-name (walk + per-child get; closer to real usage).
-      for (const [op, ap] of [
-        ['walk', 'walk-all'],
-        ['iter', 'iter-all'],
-        ['walk', 'walk-get-name'],
-      ] as Array<[Operation, AccessPattern]>) {
+    for (const op of ['get', 'has'] as Operation[]) {
+      for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
         cells.push(
           mk({
             ...base,
@@ -130,123 +103,125 @@ export function defaultCells(): Cell[] {
             source: 'memory',
             docShape: 'array-of-objects',
             docSize,
-            maxResidentBytes: cap * CHUNK_SIZE,
             accessPattern: ap,
-            samples: 5,
-            iterations: 1,
+            samples: 8,
+            iterations: iterCount(docSize, ap),
           }),
         )
       }
     }
-  }
-
-  // File source: largest doc, both caps, patterns that drive distinct
-  // chunk-load behavior (cold-shallow, cold-deep, full traversal).
-  for (const cap of [16, 256]) {
-    for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
+    // Traversal: walk-all (count children), iter-all (materialize values),
+    // walk-get-name (walk + per-child get; closer to real usage).
+    for (const [op, ap] of [
+      ['walk', 'walk-all'],
+      ['iter', 'iter-all'],
+      ['walk', 'walk-get-name'],
+    ] as Array<[Operation, AccessPattern]>) {
       cells.push(
         mk({
           ...base,
-          op: 'get',
-          source: 'file',
+          op,
+          source: 'memory',
           docShape: 'array-of-objects',
-          docSize: 100_000,
-          maxResidentBytes: cap * CHUNK_SIZE,
+          docSize,
           accessPattern: ap,
-          samples: 8,
-          iterations: iterCount(100_000, ap),
+          samples: 5,
+          iterations: 1,
         }),
       )
     }
+  }
+
+  // File source: largest doc, patterns that drive distinct chunk-load behavior
+  // (cold-shallow, cold-deep, full traversal).
+  for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
     cells.push(
       mk({
         ...base,
-        op: 'walk',
+        op: 'get',
         source: 'file',
         docShape: 'array-of-objects',
         docSize: 100_000,
-        maxResidentBytes: cap * CHUNK_SIZE,
-        accessPattern: 'walk-get-name',
-        samples: 3,
-        iterations: 1,
+        accessPattern: ap,
+        samples: 8,
+        iterations: iterCount(100_000, ap),
       }),
     )
   }
+  cells.push(
+    mk({
+      ...base,
+      op: 'walk',
+      source: 'file',
+      docShape: 'array-of-objects',
+      docSize: 100_000,
+      accessPattern: 'walk-get-name',
+      samples: 3,
+      iterations: 1,
+    }),
+  )
 
-  // First-child latency guard. Walks `/items` and stops after one element,
-  // on a doc far larger than the cache ceiling (cap x chunkBytes) so the
-  // array can't be fully resident. Time-to-first-child must stay ~flat: a
-  // regression that resolves the container's full extent before yielding the
-  // first child would make this O(doc) and balloon min_ns. File source so
-  // chunks fault through the cache like real usage.
-  for (const cap of [16, 256]) {
+  // First-child latency guard. Walks `/items` and stops after one element, on a
+  // doc far larger than the resident window so the array can't be fully resident.
+  // Time-to-first-child must stay ~flat: a regression that resolves the
+  // container's full extent before yielding the first child would make this
+  // O(doc) and balloon min_ns. File source so chunks fault like real usage.
+  cells.push(
+    mk({
+      ...base,
+      op: 'walk',
+      source: 'file',
+      docShape: 'array-of-objects',
+      docSize: 500_000,
+      accessPattern: 'walk-first',
+      samples: 8,
+      iterations: 1,
+    }),
+  )
+
+  // Deep-nested: depth 500 stresses pointer-walking overhead. Point access only.
+  for (const ap of ['shallow', 'mid', 'deep'] as AccessPattern[]) {
     cells.push(
       mk({
         ...base,
-        op: 'walk',
-        source: 'file',
-        docShape: 'array-of-objects',
-        docSize: 500_000,
-        maxResidentBytes: cap * CHUNK_SIZE,
-        accessPattern: 'walk-first',
+        op: 'get',
+        source: 'memory',
+        docShape: 'deep-nested',
+        docSize: 500,
+        accessPattern: ap,
         samples: 8,
-        iterations: 1,
+        iterations: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
       }),
     )
-  }
-
-  // Deep-nested: depth 500 stresses pointer-walking overhead. Point
-  // access only - walk/iter aren't meaningful here.
-  for (const cap of [16, 256]) {
-    for (const ap of ['shallow', 'mid', 'deep'] as AccessPattern[]) {
-      cells.push(
-        mk({
-          ...base,
-          op: 'get',
-          source: 'memory',
-          docShape: 'deep-nested',
-          docSize: 500,
-          maxResidentBytes: cap * CHUNK_SIZE,
-          accessPattern: ap,
-          samples: 8,
-          iterations: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
-        }),
-      )
-    }
   }
 
   // Wide-flat: 100k top-level keys (~2.5 MB doc, ~40 chunks at 64 KB).
-  // Forces eviction at cap=16, fits resident at cap=256.
-  for (const cap of [16, 256]) {
-    for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
-      cells.push(
-        mk({
-          ...base,
-          op: 'get',
-          source: 'memory',
-          docShape: 'wide-flat',
-          docSize: 100_000,
-          maxResidentBytes: cap * CHUNK_SIZE,
-          accessPattern: ap,
-          samples: 8,
-          iterations: iterCount(100_000, ap),
-        }),
-      )
-    }
+  for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
     cells.push(
       mk({
         ...base,
-        op: 'walk',
+        op: 'get',
         source: 'memory',
         docShape: 'wide-flat',
         docSize: 100_000,
-        maxResidentBytes: cap * CHUNK_SIZE,
-        accessPattern: 'walk-all',
-        samples: 3,
-        iterations: 1,
+        accessPattern: ap,
+        samples: 8,
+        iterations: iterCount(100_000, ap),
       }),
     )
   }
+  cells.push(
+    mk({
+      ...base,
+      op: 'walk',
+      source: 'memory',
+      docShape: 'wide-flat',
+      docSize: 100_000,
+      accessPattern: 'walk-all',
+      samples: 3,
+      iterations: 1,
+    }),
+  )
 
   return cells
 }
@@ -259,7 +234,6 @@ export function commonCells(): Cell[] {
     source: 'memory' as SourceKind,
     docShape: 'array-of-objects' as DocShape,
     docSize: 100_000,
-    maxResidentBytes: 256 * CHUNK_SIZE,
   }
   const cells: Cell[] = []
   for (const [op, ap] of [

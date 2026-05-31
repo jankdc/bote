@@ -2,7 +2,7 @@
 #![feature(portable_simd)]
 
 // I/O
-mod cache;
+mod chunks;
 mod source;
 
 // bitmaps
@@ -31,7 +31,6 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, Uint8Array};
 use napi_derive::napi;
 
-use crate::cache::CacheOptions;
 use crate::cursor::Cursor;
 use crate::session::Session;
 use crate::source::{JsSource, ReadArgs};
@@ -42,15 +41,6 @@ static GLOBAL: dhat::Alloc = dhat::Alloc;
 
 #[cfg(feature = "heap-profile")]
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
-
-#[napi(object)]
-pub struct BoteOptions {
-  /// Bytes of source chunk data to keep resident. Must be a non-zero multiple
-  /// of the source's `chunkBytes` (one chunk per slot). Total native memory,
-  /// including bitmap overhead, is bounded at roughly 2x this. Required: the
-  /// `@botejs/core` facade resolves the public default before calling in.
-  pub max_resident_bytes: f64,
-}
 
 /// Build a [`Cursor`] from a JS source object.
 ///
@@ -68,7 +58,6 @@ pub fn open(
     ts_arg_type = "{ size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
   )]
   source: Object<'_>,
-  options: BoteOptions,
 ) -> napi::Result<Cursor> {
   let size = source.get_named_property::<f64>("size")?;
   if !size.is_finite() || size < 0.0 {
@@ -81,7 +70,7 @@ pub fn open(
 
   // chunkBytes is required and must be a whole positive number; reject anything
   // else outright rather than truncating (e.g. `0.5 as usize == 0`). The non-zero
-  // multiple-of-64 rule is enforced by `ChunkCache::new`. The core facade fills
+  // multiple-of-64 rule is enforced by `ChunkReader::new`. The core facade fills
   // in the per-source default before calling, so there is no default here.
   let chunk_size = match source.get_named_property::<Option<f64>>("chunkBytes") {
     Ok(Some(n)) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
@@ -99,23 +88,8 @@ pub fn open(
     }
   };
 
-  // Always required; the caller (the core facade) resolves any public default.
-  let n = options.max_resident_bytes;
-  if !(n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64) {
-    return Err(napi::Error::from_reason(format!(
-      "maxResidentBytes must be a whole positive number of bytes, got {n}"
-    )));
-  }
-  let max_resident_bytes = n as usize;
-
-  let session = Session::new(
-    Arc::new(JsSource::new(ts_read_fn, size as u64)),
-    CacheOptions {
-      chunk_size,
-      max_resident_bytes,
-    },
-  )
-  .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+  let session = Session::new(Arc::new(JsSource::new(ts_read_fn, size as u64)), chunk_size)
+    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
   Ok(Cursor::root(session))
 }

@@ -30,7 +30,7 @@ test('source_from_file_reads_from_disk', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'bote-'))
   const path = join(dir, 'doc.json')
   writeFileSync(path, DOC)
-  const cursor = await open(fromFile(path, { chunkBytes: 64 }), { maxResidentBytes: 16 * 64 })
+  const cursor = await open(fromFile(path, { chunkBytes: 64 }))
   t.after(() => cursor.close())
   assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
   const names: string[] = []
@@ -72,12 +72,9 @@ test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
   await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 100 })), /multiple of 64/)
 })
 
-test('source_invalid_chunk_bytes_reports_chunk_fault_not_misleading_multiple_error', async () => {
-  // With a budget set AND chunkBytes invalid (0), the multiple check must not
-  // throw a misleading `mrb % 0 === NaN` rejection; the real chunkBytes fault
-  // should surface instead.
+test('source_invalid_chunk_bytes_is_rejected', async () => {
   await assert.rejects(
-    () => open(fromBuffer(enc(DOC), { chunkBytes: 0 }), { maxResidentBytes: 65536 }),
+    () => open(fromBuffer(enc(DOC), { chunkBytes: 0 })),
     /chunkBytes must be a whole positive/,
   )
 })
