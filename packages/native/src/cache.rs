@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use crate::path::Segment;
-use crate::resolve::{ContainerKind, ResumePoint, ValueLocation};
+use crate::resolve::{ContainerKind, ResumePoint, ScanRecord, ValueLocation};
 
 /// Per-container cap on tabled object members. A huge object doesn't get an
 /// unbounded table; past the cap it stops tabling and keeps only the resume
@@ -142,6 +142,73 @@ impl StructuralIndex {
     let tick = self.next_tick();
     if let Some(node) = self.nodes.get_mut(&NodeKey::new(anchor, path)) {
       node.last_used = tick;
+    }
+  }
+
+  /// Walk cached container hops from `anchor` along `path`, returning the deepest
+  /// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
+  /// member is an O(1) hop; the first uncached level returns the container's start
+  /// plus a resume point (object high-water, or array landmark at/under the
+  /// target) so the resolver resumes near the target instead of at the open.
+  pub fn chain_hops(&mut self, anchor: u64, path: &[Segment]) -> (u64, usize, Option<ResumePoint>) {
+    let mut start = anchor;
+    let mut seg = 0;
+    while seg < path.len() {
+      let prefix = &path[..seg];
+      // Read the node's fields into owned values (ending the borrow) before the
+      // recency bump.
+      let Some((kind, resume_point, member_vs)) = self.get(anchor, prefix).map(|n| {
+        let mvs = match &path[seg] {
+          Segment::Member(name) => n.member(name),
+          Segment::Element(_) => None,
+        };
+        (n.kind(), n.resume_point(), mvs)
+      }) else {
+        return (start, seg, None);
+      };
+      self.touch(anchor, prefix);
+      match (&path[seg], kind) {
+        (Segment::Member(_), ContainerKind::Object) => {
+          if let Some(vs) = member_vs {
+            start = vs;
+            seg += 1;
+            continue; // O(1) hop into a tabled member
+          }
+          // Seed the resolver with the object's high-water resume point.
+          return (start, seg, Some(resume_point));
+        }
+        (Segment::Element(idx), ContainerKind::Array) => {
+          // Seed only if the landmark is at or before the target; a resume point
+          // past the target would skip elements, so scan from the open instead.
+          let seed = matches!(resume_point, ResumePoint::Array { index, .. } if index <= *idx)
+            .then_some(resume_point);
+          return (start, seg, seed);
+        }
+        // Kind/segment mismatch: resolve will return None; seed at the container
+        // start with no hint.
+        _ => return (start, seg, None),
+      }
+    }
+    (start, seg, None) // whole path hopped: `start` is the resolved value
+  }
+
+  /// Drain a scan's collected child offsets into the cache, one node per entered
+  /// container.
+  pub fn apply_scan_record(&mut self, anchor: u64, path: &[Segment], scan_record: &ScanRecord) {
+    for cs in &scan_record.containers {
+      let prefix = &path[..cs.seg];
+      match cs.kind {
+        ContainerKind::Object => self.merge_object_scan(
+          anchor,
+          prefix,
+          cs.value_start,
+          &cs.members,
+          cs.object_resume,
+        ),
+        ContainerKind::Array => {
+          self.merge_array_scan(anchor, prefix, cs.value_start, cs.array_resume)
+        }
+      }
     }
   }
 

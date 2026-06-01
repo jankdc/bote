@@ -16,21 +16,19 @@
 //! Bitmaps aren't stored - the walker builds them per block on the fly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
-use crate::chunks::{ChunkMiss, ChunkReader, ChunkWindow, ReaderError};
 use crate::cache::StructuralIndex;
+use crate::chunks::{ChunkMiss, ChunkReader, ChunkWindow, ReaderError};
 use crate::path::Segment;
 use crate::resolve::{
-  self, ChildEntry, ContainerCursor, ContainerKind, ResolveState, ResumePoint, ScanRecord,
-  ValueLocation,
+  self, ChildEntry, ContainerCursor, ContainerKind, ResolveState, ValueLocation,
 };
 use crate::select::SelectError;
 use crate::source::ByteStream;
 use crate::walker::{self, SkipState, TraverseError, Walker};
-
-use std::sync::{Arc, Mutex};
 
 /// Children-budget default when the facade doesn't pass `indexCacheEntries`.
 pub(crate) const DEFAULT_INDEX_CACHE_ENTRIES: usize = 1024;
@@ -80,6 +78,7 @@ pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
   }
 }
 
+/// Construction and window lifecycle.
 impl Session {
   pub fn new(
     source: Arc<dyn ByteStream>,
@@ -97,77 +96,26 @@ impl Session {
     }))
   }
 
-  /// Cached child count for `(anchor, path)`, when a prior `count`/`iter`/`walk`
-  /// learned it - lets a repeat `count` skip the scan entirely.
-  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
-    if !self.cache_enabled {
-      return None;
-    }
-    self.cache.lock().unwrap().get(anchor, path)?.child_count()
-  }
-
-  pub(crate) fn store_child_count(
-    &self,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-  ) {
-    if !self.cache_enabled {
-      return;
-    }
-    self
-      .cache
-      .lock()
-      .unwrap()
-      .store_child_count(anchor, path, kind, value_start, count);
-  }
-
-  /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
-  pub(crate) fn store_close(
-    &self,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    close: u64,
-  ) {
-    if !self.cache_enabled {
-      return;
-    }
-    self
-      .cache
-      .lock()
-      .unwrap()
-      .store_close(anchor, path, kind, value_start, close);
-  }
-
-  /// Record an array resume-point landmark `(index, offset)` at `(anchor, path)` -
-  /// used by `iter`/`walk` early termination so a later random index resumes
-  /// near the stop point.
-  pub(crate) fn store_array_resume_point(
-    &self,
-    anchor: u64,
-    path: &[Segment],
-    value_start: u64,
-    index: usize,
-    offset: u64,
-  ) {
-    if !self.cache_enabled {
-      return;
-    }
-    self
-      .cache
-      .lock()
-      .unwrap()
-      .merge_array_scan(anchor, path, value_start, Some((index, offset)));
-  }
-
   pub(crate) fn new_window(&self) -> ChunkWindow {
     ChunkWindow::new(self.chunk_bytes, self.source_size)
   }
 
+  /// Prune the iterator window to the scan position: keep just the chunk
+  /// covering `next_offset` so the next yield's first read is hot, dropping
+  /// everything behind it. Clears entirely once iteration walks off the end.
+  /// Bounds the iterator's resident chunks to ~1 between yields.
+  pub(crate) fn prune_window(&self, window: &mut ChunkWindow, next_offset: u64) {
+    if next_offset >= self.source_size {
+      window.clear();
+    } else {
+      window.drop_below(next_offset);
+    }
+  }
+}
+
+/// One-shot public queries. Each opens a transient window, resolves, and drops
+/// the window (and its resident chunks) on return.
+impl Session {
   pub async fn locate_at(
     &self,
     path: &[Segment],
@@ -199,19 +147,11 @@ impl Session {
     let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
     Ok(Some(serde_json::from_slice(&bytes)?))
   }
+}
 
-  /// Prune the iterator window to the scan position: keep just the chunk
-  /// covering `next_offset` so the next yield's first read is hot, dropping
-  /// everything behind it. Clears entirely once iteration walks off the end.
-  /// Bounds the iterator's resident chunks to ~1 between yields.
-  pub(crate) fn prune_window(&self, window: &mut ChunkWindow, next_offset: u64) {
-    if next_offset >= self.source_size {
-      window.clear();
-    } else {
-      window.drop_below(next_offset);
-    }
-  }
-
+/// Cursor/iterator support, called from `cursor.rs`. These take a caller-owned,
+/// long-lived window that `cursor.rs` prunes to the scan frontier between yields.
+impl Session {
   /// Open a child iterator over the container starting at `value_start`.
   /// Returns `Ok(None)` if the value isn't an object or array.
   pub async fn enter_container(
@@ -258,7 +198,10 @@ impl Session {
     let bytes = self.read_range(loc.start, loc.end, window).await?;
     Ok(serde_json::from_slice(&bytes)?)
   }
+}
 
+/// Path resolution - the structural-index memoization seam.
+impl Session {
   /// Resolve `path` from `anchor_start`, returning only the resolved value's
   /// start offset (no extent walk).
   ///
@@ -277,11 +220,10 @@ impl Session {
     anchor_start: u64,
     window: &mut ChunkWindow,
   ) -> Result<Option<u64>, SessionError> {
-    // walk cached container hops to the deepest landmark (lock held only for
+    // Walk cached container hops to the deepest landmark (lock held only for
     // this synchronous lookup, never across the drive below).
     let (start, seg, hint) = if self.cache_enabled {
-      let mut cache = self.cache.lock().unwrap();
-      chain_hops(&mut cache, anchor_start, path)
+      self.cache.lock().unwrap().chain_hops(anchor_start, path)
     } else {
       (anchor_start, 0, None)
     };
@@ -298,8 +240,11 @@ impl Session {
       })
       .await?;
     if let Some(scan_record) = state.take_scan_record() {
-      let mut cache = self.cache.lock().unwrap();
-      write_back(&mut cache, anchor_start, path, &scan_record);
+      self
+        .cache
+        .lock()
+        .unwrap()
+        .apply_scan_record(anchor_start, path, &scan_record);
     }
     Ok(result)
   }
@@ -319,10 +264,9 @@ impl Session {
       return Ok(Some(ValueLocation { start, end }));
     }
     // A cached close skips the extent walk entirely for a large container.
-    let cached = {
-      let cache = self.cache.lock().unwrap();
-      cache.get(anchor_start, path).and_then(|n| n.location())
-    };
+    let cached = self
+      .with_cache(|c| c.get(anchor_start, path).and_then(|n| n.location()))
+      .flatten();
     if let Some(loc) = cached {
       return Ok(Some(loc));
     }
@@ -400,7 +344,69 @@ impl Session {
       )
       .await
   }
+}
 
+/// Structural-index cache accessors. Each is a no-op when caching is disabled;
+/// the actual table logic lives in `cache.rs`. Called from `count.rs` /
+/// `cursor.rs` as scans learn child counts, closes, and array landmarks.
+impl Session {
+  /// Run `f` against the cache under the lock, skipping entirely when caching is
+  /// off. The lock is never held across an `.await`.
+  fn with_cache<R>(&self, f: impl FnOnce(&mut StructuralIndex) -> R) -> Option<R> {
+    if !self.cache_enabled {
+      return None;
+    }
+    Some(f(&mut self.cache.lock().unwrap()))
+  }
+
+  /// Cached child count for `(anchor, path)`, when a prior `count`/`iter`/`walk`
+  /// learned it - lets a repeat `count` skip the scan entirely.
+  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
+    self
+      .with_cache(|c| c.get(anchor, path)?.child_count())
+      .flatten()
+  }
+
+  pub(crate) fn store_child_count(
+    &self,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    count: u64,
+  ) {
+    self.with_cache(|c| c.store_child_count(anchor, path, kind, value_start, count));
+  }
+
+  /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
+  pub(crate) fn store_close(
+    &self,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    close: u64,
+  ) {
+    self.with_cache(|c| c.store_close(anchor, path, kind, value_start, close));
+  }
+
+  /// Record an array resume-point landmark `(index, offset)` at `(anchor, path)` -
+  /// used by `iter`/`walk` early termination so a later random index resumes
+  /// near the stop point.
+  pub(crate) fn store_array_resume_point(
+    &self,
+    anchor: u64,
+    path: &[Segment],
+    value_start: u64,
+    index: usize,
+    offset: u64,
+  ) {
+    self.with_cache(|c| c.merge_array_scan(anchor, path, value_start, Some((index, offset))));
+  }
+}
+
+/// The chunk-fault retry engine.
+impl Session {
   /// The shared retry loop: build a fresh [`Walker`] over the window, run a sync
   /// `step`, and on `ChunkMiss(off)` read a burst of chunks (sized by
   /// `burst_for`) into the window, drop everything below `min_reachable`, and retry.
@@ -436,77 +442,6 @@ impl Session {
   }
 }
 
-/// Walk cached container hops from `anchor` along `path`, returning the deepest
-/// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
-/// member is an O(1) hop; the first uncached level returns the container's start
-/// plus a resume point (object high-water, or array landmark at/under the
-/// target) so the resolver resumes near the target instead of at the open.
-fn chain_hops(
-  cache: &mut StructuralIndex,
-  anchor: u64,
-  path: &[Segment],
-) -> (u64, usize, Option<ResumePoint>) {
-  let mut start = anchor;
-  let mut seg = 0;
-  while seg < path.len() {
-    let prefix = &path[..seg];
-    // Read the node's fields into owned values (ending the borrow) before the
-    // recency bump.
-    let Some((kind, resume_point, member_vs)) = cache.get(anchor, prefix).map(|n| {
-      let mvs = match &path[seg] {
-        Segment::Member(name) => n.member(name),
-        Segment::Element(_) => None,
-      };
-      (n.kind(), n.resume_point(), mvs)
-    }) else {
-      return (start, seg, None);
-    };
-    cache.touch(anchor, prefix);
-    match (&path[seg], kind) {
-      (Segment::Member(_), ContainerKind::Object) => {
-        if let Some(vs) = member_vs {
-          start = vs;
-          seg += 1;
-          continue; // O(1) hop into a tabled member
-        }
-        // Seed the resolver with the object's high-water resume point.
-        return (start, seg, Some(resume_point));
-      }
-      (Segment::Element(idx), ContainerKind::Array) => {
-        // Seed only if the landmark is at or before the target; a resume point
-        // past the target would skip elements, so scan from the open instead.
-        let seed = matches!(resume_point, ResumePoint::Array { index, .. } if index <= *idx)
-          .then_some(resume_point);
-        return (start, seg, seed);
-      }
-      // Kind/segment mismatch: resolve will return None; seed at the container
-      // start with no hint.
-      _ => return (start, seg, None),
-    }
-  }
-  (start, seg, None) // whole path hopped: `start` is the resolved value
-}
-
-/// Drain a scan's collected child offsets into the cache, one node per entered
-/// container.
-fn write_back(cache: &mut StructuralIndex, anchor: u64, path: &[Segment], scan_record: &ScanRecord) {
-  for cs in &scan_record.containers {
-    let prefix = &path[..cs.seg];
-    match cs.kind {
-      ContainerKind::Object => cache.merge_object_scan(
-        anchor,
-        prefix,
-        cs.value_start,
-        &cs.members,
-        cs.object_resume,
-      ),
-      ContainerKind::Array => {
-        cache.merge_array_scan(anchor, prefix, cs.value_start, cs.array_resume)
-      }
-    }
-  }
-}
-
 /// RAII scope for a one-shot query (`locate_at` / `get_at` / `count_at`): owns
 /// the transient [`ChunkWindow`] so its chunks are released when the query
 /// returns, including on early-`?` and early-`return` paths.
@@ -527,8 +462,14 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::AtomicUsize;
+
+  use async_trait::async_trait;
+  use bytes::Bytes;
+
   use super::*;
-  use crate::source::InMemoryStream;
+  use crate::resolve::ResumePoint;
+  use crate::source::{InMemoryStream, SourceError};
 
   #[test]
   fn burst_doubling_schedule_caps_at_max_burst() {
@@ -586,13 +527,6 @@ mod tests {
     }
     assert!(seen > 1000, "scanned {seen} elements");
   }
-
-  use std::sync::atomic::AtomicUsize;
-
-  use async_trait::async_trait;
-  use bytes::Bytes;
-
-  use crate::source::SourceError;
 
   /// Wraps an [`InMemoryStream`] and counts its `read` calls, so the cache's
   /// effect on chunk faulting is directly observable.
