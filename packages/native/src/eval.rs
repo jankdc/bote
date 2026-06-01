@@ -40,7 +40,7 @@ async fn project_map(
     if let Some(mut cursor) = session.enter_container(child_start, window).await? {
       while remaining > 0 {
         let Some(entry) = session.next_child(&mut cursor, window).await? else {
-          break; // container exhausted; any still-unmatched fields stay null
+          break; // exhausted; unmatched fields stay null
         };
         for (slot, (_, path)) in matched.iter_mut().zip(fields) {
           if slot.is_none() && path.first().is_some_and(|seg| segment_matches(seg, &entry)) {
@@ -56,12 +56,12 @@ async fn project_map(
   let mut obj = serde_json::Map::new();
   for ((key, path), loc) in fields.iter().zip(matched) {
     let value = match (path.len(), loc) {
-      // Defensive: the facade rejects empty sub-paths; treat as the whole child.
+      // defensive: facade rejects empty sub-paths; treat as the whole child
       (0, _) => project_one(session, path, child_start, window).await?,
       (_, None) => serde_json::Value::Null,
-      // Single segment: the matched entry's location is the value itself.
+      // single segment: the matched entry's location is the value itself
       (1, Some(loc)) => session.materialize(loc, window).await?,
-      // Deeper sub-path: resolve the tail from the matched entry's start.
+      // deeper: resolve the tail from the matched entry's start
       (_, Some(loc)) => project_one(session, &path[1..], loc.start, window).await?,
     };
     obj.insert(key.clone(), value);

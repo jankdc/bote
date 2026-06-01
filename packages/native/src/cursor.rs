@@ -32,10 +32,9 @@ fn map_err(e: SessionError) -> NapiError {
 pub struct IterArgs {
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
-  /// Batch size: each yield is an array of up to this many items.
+  /// How many items do we yield per iteration?
   pub batch: f64,
-  /// Yield `[key, value]` tuples instead of bare values. The key is a string for
-  /// object members and a number for array elements.
+  /// Yield `[key, value]` tuples instead of bare values.
   pub with_key: Option<bool>,
 }
 
@@ -154,10 +153,9 @@ struct StreamCore {
   base_value_start: Option<u64>,
   /// Children yielded so far - the child count once iteration runs to the end.
   yielded: u64,
-  /// Byte window reused across yields. At rest it holds at most the single chunk
-  /// covering the child_cursor's `next_offset`, so the next yield's first read is a
-  /// hit; everything else is pruned after each yield, bounding resident chunks
-  /// to ~1 between yields.
+  /// At rest holds at most the chunk covering child_cursor's `next_offset` so the
+  /// next yield's first read hits; everything else is pruned after each yield,
+  /// bounding resident chunks to ~1 between yields.
   window: ChunkWindow,
 }
 
@@ -179,13 +177,10 @@ impl StreamCore {
 /// key-wrapping. `walk` navigates positions and uses [`StreamCore`] directly.
 struct IterState {
   core: StreamCore,
-  /// Serialized projection IR, parsed lazily into `select` on first `next()`.
   select_ir: Option<String>,
-  /// Compiled `select` projection. `None` yields the whole child.
+  /// Compiled lazily from `select_ir` on first `next()`. `None` yields the whole child.
   select: Option<CompiledSelect>,
-  /// Batch size: each yield is an array of up to `batch` items.
   batch: usize,
-  /// Wrap each yielded value in a `[key, value]` array.
   with_key: bool,
 }
 
@@ -225,10 +220,10 @@ async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<()
   Ok(())
 }
 
-/// Record an array resume point on early termination (`complete`) so a
-/// later random `get([base, N])` resumes near the stop point. Only arrays: an
-/// object resume_point would claim its prefix members are tabled, but the streaming
-/// path doesn't table them. A no-op before any element boundary is passed.
+/// Record an array resume point on early termination so a later random
+/// `get([base, N])` resumes near the stop point. Arrays only: an object
+/// resume_point would claim its prefix members are tabled, but the streaming path
+/// doesn't table them. No-op before any element boundary is passed.
 fn record_early_break(session: &Session, core: &StreamCore) {
   if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
     if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
@@ -266,8 +261,7 @@ impl CursorIter {
   }
 }
 
-/// Render a `ChildEntry`'s key as a JSON value for tuple yields. Member keys
-/// become strings; element indices become numbers.
+/// Member keys become strings; element indices become numbers.
 fn child_key_json(child: &ChildEntry) -> serde_json::Value {
   match child {
     ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
@@ -328,10 +322,9 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
-      // Items are materialized eagerly and accumulated here; the window is
-      // pruned after each item, so the buffer (not chunks) is the in-flight
-      // batch. The buffer lives in this `next()` frame, so early termination via
-      // `complete` needs no special handling.
+      // window is pruned after each item, so the buffer (not chunks) is the
+      // in-flight batch. The buffer lives in this `next()` frame, so early
+      // termination via `complete` needs no special handling.
       let result: Result<Option<serde_json::Value>, SessionError> = async {
         let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
         loop {

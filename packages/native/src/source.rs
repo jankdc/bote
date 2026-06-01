@@ -26,7 +26,6 @@ pub enum SourceError {
 
 #[async_trait]
 pub trait ByteStream: Send + Sync {
-  /// Total length of the underlying byte stream.
   fn size(&self) -> u64;
 
   /// Read up to `length` bytes starting at `offset`. May return fewer bytes
@@ -73,17 +72,10 @@ pub struct ReadArgs {
   pub length: f64,
 }
 
-/// `ThreadsafeFunction` returned by `Function::build_threadsafe_function().weak::<true>().build()` -
-/// `CalleeHandled = false`, so `call_async` takes the args directly (no
-/// `Result` wrapper). We always pass a success value; JS-side rejections from
-/// the returned `Promise` propagate via the inner `.await`.
-///
-/// JS returns `Promise<Uint8Array>` whose `.byteLength` is the bytes read.
-///
-/// `Weak = true` so the tsfn does not, on its own, keep the Node event loop
-/// alive - a dormant Cursor reference shouldn't pin the process. Pending
-/// `await`s on cursor operations are real Promises and still keep the loop
-/// alive on their own merits.
+/// `CalleeHandled = false`, so `call_async` takes args directly (no `Result`
+/// wrapper); JS-side rejections propagate via the returned `Promise`'s `.await`.
+/// `Weak = true` so a dormant Cursor's tsfn doesn't pin the Node event loop -
+/// pending cursor `await`s are real Promises and keep the loop alive on their own.
 pub type ReadFn =
   ThreadsafeFunction<ReadArgs, Promise<Uint8Array>, ReadArgs, napi::Status, false, true>;
 
@@ -122,21 +114,13 @@ impl ByteStream for JsByteStream {
       .as_ref()
       .ok_or_else(|| SourceError::Io("source already closed".into()))?;
 
-    // Pull-from-JS protocol. We ask the JS callback for up to `length`
-    // bytes at `offset`; it resolves with a `Uint8Array` whose
-    // `.byteLength` is the bytes actually read (`<= length`). We copy
-    // those bytes out, return `Bytes`, and the JS-side view becomes
-    // immediately GC-eligible.
-    //
-    // The previous protocol pushed a Rust-owned buffer to JS via
-    // `Uint8Array::with_external_data`, which on each call (a) registered
-    // an external-memory entry against V8's `arrayBuffers` accounting and
-    // (b) added a strong napi reference. The reference's drop ran on a
-    // tokio worker thread and was queued through napi-rs's
-    // `CUSTOM_GC_TSFN`; under a continuous scan the JS thread never
-    // idled, the queue backed up, and `arrayBuffers` grew with bytes-read
-    // (not with the live cache). Returning the buffer from JS instead -
-    // V8-owned and V8-GC'd - sidesteps both pieces of machinery.
+    // Pull-from-JS: ask for up to `length` bytes at `offset`, JS resolves a
+    // V8-owned `Uint8Array` we copy out of. Returning the buffer *from* JS
+    // (rather than pushing a Rust-owned `with_external_data` view *to* JS)
+    // keeps it V8-owned/V8-GC'd, avoiding external-memory `arrayBuffers`
+    // accounting and a strong napi ref whose drop queues through
+    // `CUSTOM_GC_TSFN` - under a continuous scan the JS thread never idles,
+    // that queue backs up, and resident bytes grow with bytes-read.
     let promise = read_fn
       .call_async(ReadArgs {
         offset: offset as f64,

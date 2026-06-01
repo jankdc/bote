@@ -1,29 +1,21 @@
 #![deny(clippy::all)]
 #![feature(portable_simd)]
 
-// I/O
 mod chunks;
 mod source;
 
-// bitmaps
 mod bitmap;
 mod simd;
 
-// traversal
 mod walker;
 
-// evaluation
 mod path;
 mod resolve;
 mod select;
 
-// structural-index cache (above resolve, below session)
 mod cache;
-
-// async orchestration
 mod session;
 
-// operations layered above the session
 mod count;
 mod eval;
 
@@ -45,16 +37,11 @@ static GLOBAL: dhat::Alloc = dhat::Alloc;
 #[cfg(feature = "heap-profile")]
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
-/// Build a [`Cursor`] from a JS source object.
-///
-/// The `source` argument must be a JS object with:
-///   - `size: number`                 total source size in bytes
-///   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
-///                                    JS resolves with a `Uint8Array` of bytes read
-///                                    (its `.byteLength` is the actual count, `<= length`)
-///   - `chunkBytes: number`           read granularity in bytes (whole, multiple of 64).
-///                                    Required: the `@botejs/core` facade resolves the
-///                                    per-source default before calling in.
+/// Build a [`Cursor`] from a JS source object with:
+///   - `size: number` total source size in bytes
+///   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
+///     `.byteLength` is the actual count read, `<= length`
+///   - `chunkBytes: number` read granularity (whole, multiple of 64)
 #[napi]
 pub fn open(
   #[napi(
@@ -71,10 +58,8 @@ pub fn open(
   let read_fn: Function<ReadArgs, Promise<Uint8Array>> = source.get_named_property("read")?;
   let ts_read_fn = read_fn.build_threadsafe_function().weak::<true>().build()?;
 
-  // chunkBytes is required and must be a whole positive number; reject anything
-  // else outright rather than truncating (e.g. `0.5 as usize == 0`). The non-zero
-  // multiple-of-64 rule is enforced by `ChunkReader::new`. The core facade fills
-  // in the per-source default before calling, so there is no default here.
+  // reject non-whole/non-positive outright rather than truncating (`0.5 as usize == 0`).
+  // multiple-of-64 enforced by `ChunkReader::new`. required: facade fills the default.
   let chunk_bytes = match source.get_named_property::<Option<f64>>("chunkBytes") {
     Ok(Some(n)) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
       n as usize
@@ -91,9 +76,8 @@ pub fn open(
     }
   };
 
-  // indexCacheEntries is the structural-index cache's children budget. Optional;
-  // unlike chunkBytes it permits 0 (which disables the cache). Missing => the
-  // default. The core facade also validates, but enforce the same hygiene here.
+  // structural-index cache children budget. unlike chunkBytes, 0 is allowed (disables
+  // the cache); missing => default.
   let index_cache_budget = match source.get_named_property::<Option<f64>>("indexCacheEntries") {
     Ok(Some(n)) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
       n as usize

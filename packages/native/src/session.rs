@@ -10,11 +10,10 @@
 //!      window, drop everything below the step's retention bound, and retry.
 //!   3. On success, return.
 //!
-//! Nothing persists across queries: the window is owned by the query (one-shot
-//! [`Query`]) or the iterator (`StreamCore`) and is dropped or pruned to the
-//! scan position as the walk advances, so resident source memory stays bounded
-//! by the burst window regardless of document size. Bitmaps aren't stored at
-//! all - the walker builds them per block on the fly.
+//! The window is owned by the query (one-shot [`Query`]) or the iterator and is
+//! dropped or pruned to the scan position as the walk advances, so resident
+//! source memory stays bounded by the burst window regardless of document size.
+//! Bitmaps aren't stored - the walker builds them per block on the fly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -53,10 +52,10 @@ pub struct Session {
   pub chunk_bytes: u64,
   pub reader: Arc<ChunkReader>,
   /// Structural-index cache, shared across every cursor over this source.
-  /// `&self` methods mutate it through interior mutability; the lock is held
-  /// only for the synchronous lookup/write-back, never across an `.await`.
+  /// The lock is held only for the synchronous lookup/write-back, never across
+  /// an `.await`.
   cache: Mutex<StructuralIndex>,
-  /// Mirror of `budget > 0`, so the hot gate checks never take the lock.
+  /// Mirror of `budget > 0` so the hot gate checks never take the lock.
   cache_enabled: bool,
 }
 
@@ -266,8 +265,8 @@ impl Session {
   /// Memoization seam: `run_locate` (and [`run_resolve`](Self::run_resolve) /
   /// [`locate_at`](Self::locate_at), which wrap it) is the single point every
   /// path resolution flows through - `get`/`has`/`count`/`iter`/`walk`/`select`
-  /// all route here. The structural-index cache (`index_cache`) lives at exactly
-  /// this boundary: a chain of cached container hops starts the scan as deep as
+  /// all route here. The structural-index cache lives at exactly this
+  /// boundary: a chain of cached container hops starts the scan as deep as
   /// possible (an all-hit returns the offset without faulting a single chunk),
   /// the first uncached level resumes from the deepest landmark, and the scan's
   /// collected child offsets are written back. Keep these three the only
@@ -278,18 +277,17 @@ impl Session {
     anchor_start: u64,
     window: &mut ChunkWindow,
   ) -> Result<Option<u64>, SessionError> {
-    // 1. Walk cached container hops to the deepest landmark (lock held only for
-    //    this synchronous lookup, never across the drive below).
+    // walk cached container hops to the deepest landmark (lock held only for
+    // this synchronous lookup, never across the drive below).
     let (start, seg, hint) = if self.cache_enabled {
       let mut cache = self.cache.lock().unwrap();
       chain_hops(&mut cache, anchor_start, path)
     } else {
       (anchor_start, 0, None)
     };
-    // 2. Drive the resolver from the seed. ResolveState persists across
-    //    `ChunkMiss` retries; the min_reachable follows the resolver's committed
-    //    iteration offset so chunks behind it are dropped while the key being
-    //    read (which `read_range`s behind the scan position) stays resident.
+    // ResolveState persists across `ChunkMiss` retries; min_reachable follows the
+    // resolver's committed iteration offset so chunks behind it are dropped while
+    // the key being read (which `read_range`s behind the scan position) stays resident.
     let mut state = ResolveState::resume(start, seg, hint, self.cache_enabled);
     let min_reachable = AtomicU64::new(start);
     let result = self
@@ -299,7 +297,6 @@ impl Session {
         r
       })
       .await?;
-    // 3. Write the collected child offsets back.
     if let Some(scan_record) = state.take_scan_record() {
       let mut cache = self.cache.lock().unwrap();
       write_back(&mut cache, anchor_start, path, &scan_record);

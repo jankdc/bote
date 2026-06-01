@@ -22,14 +22,13 @@ pub async fn at(
   path: &[Segment],
   anchor_start: u64,
 ) -> Result<u64, SessionError> {
-  // A repeat count is O(1): the prior scan cached the child count, so no chunk
-  // is faulted.
+  // repeat count is O(1): prior scan cached it, no chunk faulted.
   if let Some(n) = session.cached_child_count(anchor_start, path) {
     return Ok(n);
   }
   let mut q = Query::new(session);
-  // run_locate (not run_resolve): we only need the container's start; the child
-  // count comes from a per-comma scan started at the opener.
+  // run_locate (not run_resolve): we only need the container's start; the count
+  // comes from a per-comma scan started at the opener.
   let Some(start) = session
     .run_locate(path, anchor_start, &mut q.window)
     .await?
@@ -41,8 +40,8 @@ pub async fn at(
   };
   let kind = cursor.kind;
   let count = children(session, cursor.next_offset, &mut q.window).await?;
-  // Record the child count (not the close: the counting scan carries the comma
-  // count, not the close offset - see index_cache / the design doc).
+  // store the count, not the close offset: the comma scan never sees the close
+  // (see index_cache / the design doc).
   session.store_child_count(anchor_start, path, kind, start, count);
   Ok(count)
 }
@@ -99,9 +98,9 @@ impl CountState {
 /// next chunk. `state` carries progress across faults.
 fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, TraverseError> {
   if !state.peeked {
-    // Empty-container short-circuit: a `}`/`]` immediately after the opener
-    // means zero children. Commit the whitespace-skipped offset before `byte_at`
-    // so a fault doesn't re-skip.
+    // empty-container short-circuit: a close right after the opener is 0
+    // children. commit the skipped offset before `byte_at` so a fault here
+    // doesn't re-skip.
     let off = walker.skip_whitespace(state.offset)?;
     state.offset = off;
     match walker.byte_at(off)? {

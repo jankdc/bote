@@ -116,7 +116,6 @@ impl<'a> Walker<'a> {
     Ok(block)
   }
 
-  /// Return the byte at `offset`, or `None` if past end-of-source.
   #[inline]
   pub fn byte_at(&mut self, offset: u64) -> Result<Option<u8>, ChunkMiss> {
     let source_size = self.source_size();
@@ -218,8 +217,8 @@ impl<'a> Walker<'a> {
     Ok(None)
   }
 
-  /// Skip past a JSON value starting at `from` (its first byte, whitespace
-  /// already consumed). Returns the offset immediately after the value.
+  /// Skip past a JSON value whose first byte is at `from` (whitespace already
+  /// consumed), returning the offset immediately after it.
   pub fn skip_value(&mut self, from: u64) -> Result<u64, TraverseError> {
     let mut state = SkipState::start(from);
     skip_value_step(self, &mut state)
@@ -274,9 +273,8 @@ impl<'a> Walker<'a> {
   /// is the string-scan carry at `from` (default at element boundaries, or the
   /// committed carry from a prior [`CommaStop::Partial`]).
   ///
-  /// Builds the `{`/`[`/`}`/`]`/`,` bitmaps per 64-byte block on the fly,
-  /// tracking depth bit-by-bit; depth-0 commas are element boundaries. The
-  /// depth-0 fast path popcounts whole blocks with no nesting transitions.
+  /// Depth-0 commas are element boundaries; a block with no nesting transitions
+  /// takes the popcount fast path instead of walking bit-by-bit.
   pub fn advance_top_level_commas(
     &mut self,
     from: u64,
@@ -390,13 +388,10 @@ pub struct StringScan {
 /// faults without restarting from the value's first byte.
 #[derive(Debug, Clone)]
 pub(crate) enum SkipState {
-  /// First-call state: still need the opening byte at `from` to pick a kind.
+  /// Need the opening byte at `from` to pick a kind.
   Pending { from: u64 },
-  /// Skipping a `"..."` string, resumable at the block boundary.
   String(StringScan),
-  /// Skipping a JSON primitive (number, `true`, `false`, `null`).
   Primitive { offset: u64 },
-  /// Skipping a `{...}`/`[...]` container, resumable at the block boundary.
   Container(ContainerSkipState),
 }
 

@@ -43,8 +43,6 @@ impl Structural {
 /// Structural bitmap for a single 64-byte block: bits set where `kind`'s byte
 /// occurs outside a string literal. Masks out positions covered by `in_string`
 /// (the closing-quote-exclusive string mask from [`crate::simd::scan_block`]).
-/// Callers compute the one word they need for the block they're scanning, with
-/// no per-chunk storage.
 pub fn structural_word(block: &[u8; BLOCK_BYTES], in_string: u64, kind: Structural) -> u64 {
   let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
   let raw = v.simd_eq(Simd::splat(kind.byte())).to_bitmask();

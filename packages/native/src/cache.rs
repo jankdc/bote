@@ -251,7 +251,6 @@ impl StructuralIndex {
     });
   }
 
-  /// Record a container's child count.
   pub fn store_child_count(
     &mut self,
     anchor: u64,
@@ -474,7 +473,6 @@ mod tests {
     c.store_child_count(0, &[], ContainerKind::Array, 0, 7);
     let node = c.get(0, &[]).unwrap();
     assert_eq!(node.child_count(), Some(7));
-    // `location` exposes the recorded close as a full `[start, end)`.
     assert_eq!(node.location(), Some(ValueLocation { start: 0, end: 42 }));
   }
 

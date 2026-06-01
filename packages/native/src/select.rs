@@ -9,17 +9,16 @@ use serde::Deserialize;
 
 use crate::path::Segment;
 
-/// Compiled projection. Externally tagged so the facade's `{"one": [...]}` /
-/// `{"map": [...]}` JSON decodes straight into it; each sub-path's segments
-/// decode via [`Segment`]'s untagged `Deserialize`. Lowercase to match the
-/// JSON the facade emits.
+/// Externally tagged + lowercase so the facade's `{"one": [...]}` /
+/// `{"map": [...]}` JSON decodes straight into it; sub-path segments decode
+/// via [`Segment`]'s untagged `Deserialize`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompiledSelect {
-  /// A single sub-path - yield the bare sub-value.
+  /// Yield the bare sub-value at this sub-path.
   One(Vec<Segment>),
-  /// Output-key -> sub-path pairs - yield an object of sub-values in the
-  /// declared key order (relies on serde_json `preserve_order`).
+  /// Yield an object of sub-values in declared key order (relies on
+  /// serde_json `preserve_order`).
   Map(Vec<(String, Vec<Segment>)>),
 }
 

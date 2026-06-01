@@ -219,10 +219,9 @@ mod tests {
   fn carry_out_set_when_ends_inside_string() {
     // String starts in this block and is not closed by end-of-block.
     let mut block = [b'x'; BLOCK_BYTES];
-    block[0] = b'"';
-    // bytes 1..63 are all 'x' (inside string), no closing quote.
+    block[0] = b'"'; // opens a string never closed in this block
     let (in_string, out_carry) = scan_block(&block, ScanCarry::default());
-    assert_eq!(in_string, !0u64); // every bit is in_string
+    assert_eq!(in_string, !0u64);
     assert_eq!(out_carry.inside_string, !0u64);
   }
 
@@ -249,10 +248,9 @@ mod tests {
   #[test]
   fn parity_prefix_basic() {
     assert_eq!(parity_prefix(0), 0);
-    assert_eq!(parity_prefix(1), !0); // bit 0 set propagates to all higher
-                                      // bits 0 and 2 set in input → parity output: bit 0=1, bit 1=1, bit 2=0, bit 3+=0
+    assert_eq!(parity_prefix(1), !0); // bit 0 propagates to all higher bits
+    // bits 0,2 set → parity: bit 0=1, bit 1=1, bit 2=0
     assert_eq!(parity_prefix(0b101), 0b011);
-    // bit 63 only → only bit 63 set in output
     assert_eq!(parity_prefix(1 << 63), 1 << 63);
   }
 

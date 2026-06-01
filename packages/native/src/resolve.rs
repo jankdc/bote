@@ -18,8 +18,7 @@ pub struct ValueLocation {
 
 /// A saved position inside a container that a re-entering scan jumps to,
 /// instead of rescanning from the container's open. Stored in the structural-
-/// index cache (`index_cache`) and consumed by the resolver as a seed. Shared
-/// by both: the cache stores one, the resolver resumes from it.
+/// index cache (`index_cache`) and consumed by the resolver as a seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumePoint {
   /// Object: resume the member scan from this high-water offset.
@@ -30,7 +29,7 @@ pub enum ResumePoint {
 
 /// Child offsets a scan passed over, collected for the structural-index cache.
 /// One [`ContainerRecord`] per container the resolver entered; `session` drains
-/// these into `index_cache` after the drive. Plain data - no cache dependency.
+/// these into `index_cache` after the drive.
 #[derive(Debug, Clone, Default)]
 pub struct ScanRecord {
   pub containers: Vec<ContainerRecord>,
@@ -59,8 +58,7 @@ pub struct ContainerRecord {
 /// in - see [`resolve_step`].
 #[derive(Debug, Clone)]
 pub struct ResolveState {
-  /// 0-based index of the segment we're currently processing. Reaches
-  /// `path.len()` once all segments are resolved.
+  /// Segment currently being processed. Reaches `path.len()` once all resolved.
   segment_idx: usize,
   /// Byte offset where the current segment's value starts.
   start: u64,
@@ -76,13 +74,13 @@ pub struct ResolveState {
 }
 
 /// Per-iteration scan state for `step_object` / `step_array`. Flattened across
-/// both container kinds: object scans read only `offset`; array scans use all
-/// fields (the comma-bitmap fast path needs `index`, `depth`, and `carry` so a
-/// `ChunkMiss` mid-scan can resume without losing them).
+/// both kinds: object scans read only `offset`; array scans use all fields (the
+/// comma fast path needs `index`/`depth`/`carry` to resume after a mid-scan
+/// `ChunkMiss`).
 #[derive(Debug, Clone)]
 struct SegmentScan {
   kind: ContainerKind,
-  /// Byte offset where the next iteration begins.
+  /// Where the next iteration begins.
   offset: u64,
   /// Array element index considered next. Always 0 for objects.
   index: usize,
@@ -144,8 +142,8 @@ pub fn resolve_step(
     if segment_scan.is_none() {
       let (kind, value_start, ls) = if let Some(hint) = seed.take() {
         // Seeded resume: kind and scan position come from the cache landmark; the
-        // open byte is never read (no I/O for a cached level). Only ever consumed
-        // on the first container entered.
+        // open byte is never read (no I/O for a cached level). Only the first
+        // container entered is ever seeded.
         let ls = match hint {
           ResumePoint::Object { offset } => SegmentScan {
             kind: ContainerKind::Object,
@@ -307,9 +305,9 @@ fn step_object(
         }
       }
       Some(b'}') => {
-        // Last member of the object (no trailing comma). It was fully scanned,
-        // so it must be recorded before the resume point advances to
-        // the close - otherwise the resume_point would claim a member it skipped.
+        // Last member (no trailing comma). It was fully scanned, so record it
+        // before the resume point advances to the close - otherwise the resume
+        // point would claim a member it skipped.
         if let Some(cs) = cs.as_deref_mut() {
           if let Some(name) = decoded.take() {
             cs.members.push((name.into(), iter_offset, value_start));
