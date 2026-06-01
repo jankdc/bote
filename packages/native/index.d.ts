@@ -42,26 +42,18 @@ export declare function heapProfileStop(): void
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /** Batch size: each yield is an array of up to this many items. */
+  /** How many items do we yield per iteration? */
   batch: number
-  /**
-   * Yield `[key, value]` tuples instead of bare values. The key is a string for
-   * object members and a number for array elements.
-   */
+  /** Yield `[key, value]` tuples instead of bare values. */
   withKey?: boolean
 }
 
 /**
- * Build a [`Cursor`] from a JS source object.
- *
- * The `source` argument must be a JS object with:
- *   - `size: number`                 total source size in bytes
- *   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
- *                                    JS resolves with a `Uint8Array` of bytes read
- *                                    (its `.byteLength` is the actual count, `<= length`)
- *   - `chunkBytes: number`           read granularity in bytes (whole, multiple of 64).
- *                                    Required: the `@botejs/core` facade resolves the
- *                                    per-source default before calling in.
+ * Build a [`Cursor`] from a JS source object with:
+ *   - `size: number` total source size in bytes
+ *   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
+ *     `.byteLength` is the actual count read, `<= length`
+ *   - `chunkBytes: number` read granularity (whole, multiple of 64)
  */
 export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
