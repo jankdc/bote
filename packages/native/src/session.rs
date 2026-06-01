@@ -471,63 +471,6 @@ mod tests {
   use crate::resolve::ResumePoint;
   use crate::source::{InMemoryStream, SourceError};
 
-  #[test]
-  fn burst_doubling_schedule_caps_at_max_burst() {
-    let mut b = doubling_burst();
-    let mut expected = 1u64;
-    for _ in 0..16 {
-      assert_eq!(b(0), expected, "expected {expected} at this step");
-      expected = expected.saturating_mul(2).min(MAX_BURST);
-    }
-    assert_eq!(b(0), MAX_BURST);
-    assert_eq!(b(0), MAX_BURST);
-  }
-
-  /// A full linear scan of a many-chunk document keeps the byte window bounded
-  /// by the burst, never by document size: the bounded-memory contract, now an
-  /// internal invariant (there is no `cacheStats` to assert it through).
-  #[tokio::test]
-  async fn window_stays_bounded_under_full_scan() {
-    // 4 MiB doc of a flat array of small objects; 4 KiB chunks => ~1000 chunks.
-    let mut doc = String::from("{\"items\":[");
-    let mut i = 0;
-    while doc.len() < 4 * 1024 * 1024 {
-      if i > 0 {
-        doc.push(',');
-      }
-      doc.push_str(&format!("{{\"n\":{i}}}"));
-      i += 1;
-    }
-    doc.push_str("]}");
-    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
-    let session = Session::new(source, 4096, DEFAULT_INDEX_CACHE_ENTRIES).unwrap();
-
-    let start = session
-      .locate_at(&[Segment::Member("items".into())], 0)
-      .await
-      .unwrap()
-      .expect("items resolves");
-
-    let mut window = session.new_window();
-    let mut cursor = session
-      .enter_container(start, &mut window)
-      .await
-      .unwrap()
-      .expect("array");
-    let bound = (MAX_BURST as usize) + 4; // one burst + small slack
-    let mut seen = 0;
-    while let Some(_child) = session.next_child(&mut cursor, &mut window).await.unwrap() {
-      seen += 1;
-      session.prune_window(&mut window, cursor.next_offset);
-      assert!(
-        window.len() <= bound,
-        "window held {} chunks at element {seen} (bound {bound})",
-        window.len()
-      );
-    }
-    assert!(seen > 1000, "scanned {seen} elements");
-  }
-
   /// Wraps an [`InMemoryStream`] and counts its `read` calls, so the cache's
   /// effect on chunk faulting is directly observable.
   struct CountingSource {
@@ -574,8 +517,35 @@ mod tests {
     format!("{{\"a\":{{\"b\":{b}}}}}")
   }
 
+  /// `{"arr":[{"v":"<padding>"}, ... 100 elements ...]}` - elements are large
+  /// enough that the comma popcount to a deep index faults several chunks.
+  fn big_array_doc() -> String {
+    let pad = "x".repeat(40);
+    let mut s = String::from("{\"arr\":[");
+    for i in 0..100 {
+      if i > 0 {
+        s.push(',');
+      }
+      s.push_str(&format!("{{\"v\":\"{pad}\"}}"));
+    }
+    s.push_str("]}");
+    s
+  }
+
+  #[test]
+  fn burst_doubling_schedule_caps_at_max_burst() {
+    let mut b = doubling_burst();
+    let mut expected = 1u64;
+    for _ in 0..16 {
+      assert_eq!(b(0), expected, "expected {expected} at this step");
+      expected = expected.saturating_mul(2).min(MAX_BURST);
+    }
+    assert_eq!(b(0), MAX_BURST);
+    assert_eq!(b(0), MAX_BURST);
+  }
+
   #[tokio::test]
-  async fn object_sibling_access_faults_fewer_chunks() {
+  async fn cache_object_sibling_faults_fewer_chunks() {
     let path_c = [member("a"), member("b"), member("c")];
     let path_d = [member("a"), member("b"), member("d")];
 
@@ -605,23 +575,8 @@ mod tests {
     );
   }
 
-  /// `{"arr":[{"v":"<padding>"}, ... 100 elements ...]}` - elements are large
-  /// enough that the comma popcount to a deep index faults several chunks.
-  fn big_array_doc() -> String {
-    let pad = "x".repeat(40);
-    let mut s = String::from("{\"arr\":[");
-    for i in 0..100 {
-      if i > 0 {
-        s.push(',');
-      }
-      s.push_str(&format!("{{\"v\":\"{pad}\"}}"));
-    }
-    s.push_str("]}");
-    s
-  }
-
   #[tokio::test]
-  async fn array_resume_faults_fewer_chunks() {
+  async fn cache_array_resume_faults_fewer_chunks() {
     let at = |i: usize| [member("arr"), Segment::Element(i)];
 
     let (warm, warm_reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
@@ -648,7 +603,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn repeat_count_issues_no_reads() {
+  async fn cache_repeat_count_issues_no_reads() {
     let (s, reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
     let path = [member("arr")];
     let first = crate::count::at(&s, &path, 0).await.unwrap();
@@ -665,7 +620,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn disabled_cache_still_resolves() {
+  async fn cache_disabled_still_resolves() {
     // budget 0 => no caching; results must be identical and reads still happen.
     let (s, _reads) = counting_session(deep_object_doc(), 256, 0);
     assert!(!s.cache_enabled);
@@ -761,5 +716,50 @@ mod tests {
       Some(100),
       "count must record the child count on the node"
     );
+  }
+
+  /// A full linear scan of a many-chunk document keeps the byte window bounded
+  /// by the burst, never by document size: the bounded-memory contract, now an
+  /// internal invariant (there is no `cacheStats` to assert it through).
+  #[tokio::test]
+  async fn window_stays_bounded_under_full_scan() {
+    // 4 MiB doc of a flat array of small objects; 4 KiB chunks => ~1000 chunks.
+    let mut doc = String::from("{\"items\":[");
+    let mut i = 0;
+    while doc.len() < 4 * 1024 * 1024 {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!("{{\"n\":{i}}}"));
+      i += 1;
+    }
+    doc.push_str("]}");
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
+    let session = Session::new(source, 4096, DEFAULT_INDEX_CACHE_ENTRIES).unwrap();
+
+    let start = session
+      .locate_at(&[Segment::Member("items".into())], 0)
+      .await
+      .unwrap()
+      .expect("items resolves");
+
+    let mut window = session.new_window();
+    let mut cursor = session
+      .enter_container(start, &mut window)
+      .await
+      .unwrap()
+      .expect("array");
+    let bound = (MAX_BURST as usize) + 4; // one burst + small slack
+    let mut seen = 0;
+    while let Some(_child) = session.next_child(&mut cursor, &mut window).await.unwrap() {
+      seen += 1;
+      session.prune_window(&mut window, cursor.next_offset);
+      assert!(
+        window.len() <= bound,
+        "window held {} chunks at element {seen} (bound {bound})",
+        window.len()
+      );
+    }
+    assert!(seen > 1000, "scanned {seen} elements");
   }
 }
