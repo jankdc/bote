@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::source::{Source, SourceError};
+use crate::source::{ByteStream, SourceError};
 
 /// Returned when a primitive needs a chunk that isn't currently resident in the
 /// window. The async driver is expected to read the chunk at this offset and
@@ -15,16 +15,16 @@ use crate::source::{Source, SourceError};
 #[error("chunk at offset {0} not loaded")]
 pub struct ChunkMiss(pub u64);
 
-pub struct ByteWindow {
-  chunk_size: u64,
+pub struct ChunkWindow {
+  chunk_bytes: u64,
   source_size: u64,
   chunks: HashMap<u64, Bytes>,
 }
 
-impl ByteWindow {
-  pub fn new(chunk_size: u64, source_size: u64) -> Self {
+impl ChunkWindow {
+  pub fn new(chunk_bytes: u64, source_size: u64) -> Self {
     Self {
-      chunk_size,
+      chunk_bytes,
       source_size,
       chunks: HashMap::new(),
     }
@@ -34,17 +34,17 @@ impl ByteWindow {
     self.source_size
   }
 
-  pub fn chunk_size(&self) -> u64 {
-    self.chunk_size
+  pub fn chunk_bytes(&self) -> u64 {
+    self.chunk_bytes
   }
 
   #[inline]
-  pub fn chunk_offset_for(&self, offset: u64) -> u64 {
-    (offset / self.chunk_size) * self.chunk_size
+  pub fn chunk_start_of(&self, offset: u64) -> u64 {
+    (offset / self.chunk_bytes) * self.chunk_bytes
   }
 
-  pub fn insert(&mut self, chunk_offset: u64, bytes: Bytes) {
-    self.chunks.insert(chunk_offset, bytes);
+  pub fn insert(&mut self, chunk_start: u64, bytes: Bytes) {
+    self.chunks.insert(chunk_start, bytes);
   }
 
   /// Resident-chunk count. The bounded-memory invariant is asserted through
@@ -60,38 +60,38 @@ impl ByteWindow {
   }
 
   #[cfg(test)]
-  pub fn contains(&self, chunk_offset: u64) -> bool {
-    self.chunks.contains_key(&chunk_offset)
+  pub fn contains(&self, chunk_start: u64) -> bool {
+    self.chunks.contains_key(&chunk_start)
   }
 
   pub fn clear(&mut self) {
     self.chunks.clear();
   }
 
-  /// Drop every chunk strictly below the chunk containing `floor`. Forward-only
+  /// Drop every chunk strictly below the chunk containing `min_reachable`. Forward-only
   /// traversal guarantees nothing below the resolver's committed position is
   /// reachable again, so this keeps the window bounded as the scan advances.
-  pub fn drop_below(&mut self, floor: u64) {
-    let fc = self.chunk_offset_for(floor);
+  pub fn drop_below(&mut self, min_reachable: u64) {
+    let fc = self.chunk_start_of(min_reachable);
     self.chunks.retain(|&off, _| off >= fc);
   }
 
-  /// The bytes of the chunk at chunk-aligned `chunk_offset`, or `ChunkMiss` if
+  /// The bytes of the chunk at chunk-aligned `chunk_start`, or `ChunkMiss` if
   /// it isn't resident. The lifetime is tied to the window, so the [`Walker`]'s
   /// per-step chunk cache can hold the slice across `&mut self` calls. The
-  /// walker builds all byte access (`byte_at`, `read_range`, `window64`) on top
+  /// walker builds all byte access (`byte_at`, `read_range`, `block_at`) on top
   /// of this, cached, so there is no uncached duplicate here.
   #[inline]
-  pub(crate) fn chunk_for(&self, chunk_offset: u64) -> Result<&[u8], ChunkMiss> {
+  pub(crate) fn chunk_for(&self, chunk_start: u64) -> Result<&[u8], ChunkMiss> {
     self
       .chunks
-      .get(&chunk_offset)
+      .get(&chunk_start)
       .map(|b| &b[..])
-      .ok_or(ChunkMiss(chunk_offset))
+      .ok_or(ChunkMiss(chunk_start))
   }
 }
 
-const MIN_CHUNK_SIZE: usize = 64;
+const MIN_CHUNK_BYTES: usize = 64;
 
 /// Upper bound on a single coalesced `source.read`. A burst larger than this is
 /// split into multiple reads so the transient read buffer stays bounded
@@ -102,29 +102,29 @@ const MAX_COALESCED_READ_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Error)]
 pub enum ReaderError {
   #[error(transparent)]
-  Source(#[from] SourceError),
-  #[error("chunk size must be a non-zero multiple of {MIN_CHUNK_SIZE}, got {0}")]
+  ByteStream(#[from] SourceError),
+  #[error("chunk size must be a non-zero multiple of {MIN_CHUNK_BYTES}, got {0}")]
   InvalidChunkSize(usize),
 }
 
 pub struct ChunkReader {
-  source: Arc<dyn Source>,
-  chunk_size: u64,
+  source: Arc<dyn ByteStream>,
+  chunk_bytes: u64,
 }
 
 impl ChunkReader {
-  pub fn new(source: Arc<dyn Source>, chunk_size: usize) -> Result<Arc<Self>, ReaderError> {
-    if chunk_size == 0 || !chunk_size.is_multiple_of(MIN_CHUNK_SIZE) {
-      return Err(ReaderError::InvalidChunkSize(chunk_size));
+  pub fn new(source: Arc<dyn ByteStream>, chunk_bytes: usize) -> Result<Arc<Self>, ReaderError> {
+    if chunk_bytes == 0 || !chunk_bytes.is_multiple_of(MIN_CHUNK_BYTES) {
+      return Err(ReaderError::InvalidChunkSize(chunk_bytes));
     }
     Ok(Arc::new(Self {
       source,
-      chunk_size: chunk_size as u64,
+      chunk_bytes: chunk_bytes as u64,
     }))
   }
 
-  pub fn chunk_size(&self) -> u64 {
-    self.chunk_size
+  pub fn chunk_bytes(&self) -> u64 {
+    self.chunk_bytes
   }
 
   /// Read the `n` chunks starting at chunk-aligned `start`, coalescing
@@ -134,12 +134,12 @@ impl ChunkReader {
   /// coalesced buffer). Clamps the span to end-of-source; the final chunk may
   /// be a partial tail. Returns chunks in ascending offset order.
   pub async fn read_chunks(&self, start: u64, n: u64) -> Result<Vec<(u64, Bytes)>, ReaderError> {
-    debug_assert!(start.is_multiple_of(self.chunk_size));
-    let cs = self.chunk_size;
+    debug_assert!(start.is_multiple_of(self.chunk_bytes));
+    let cs = self.chunk_bytes;
     let span_end = start
       .saturating_add(n.saturating_mul(cs))
       .min(self.source.size());
-    let max_per_read = (MAX_COALESCED_READ_BYTES / self.chunk_size as usize).max(1) as u64;
+    let max_per_read = (MAX_COALESCED_READ_BYTES / self.chunk_bytes as usize).max(1) as u64;
     let span_chunks = span_end.saturating_sub(start).div_ceil(cs) as usize;
     let mut out = Vec::with_capacity(span_chunks);
 
@@ -155,7 +155,7 @@ impl ChunkReader {
         if rel >= buf.len() {
           break; // defensive: a short read before EOF violates the contract
         }
-        let end = (rel + self.chunk_size as usize).min(buf.len());
+        let end = (rel + self.chunk_bytes as usize).min(buf.len());
         out.push((off, Bytes::copy_from_slice(&buf[rel..end])));
         off += cs;
       }
@@ -172,15 +172,15 @@ mod tests {
   use async_trait::async_trait;
 
   use super::*;
-  use crate::source::InMemorySource;
+  use crate::source::InMemoryStream;
 
-  fn window(chunk_size: u64, source: &[u8]) -> ByteWindow {
-    let mut w = ByteWindow::new(chunk_size, source.len() as u64);
+  fn window(chunk_bytes: u64, source: &[u8]) -> ChunkWindow {
+    let mut w = ChunkWindow::new(chunk_bytes, source.len() as u64);
     let mut off = 0u64;
     while (off as usize) < source.len() {
-      let end = (off as usize + chunk_size as usize).min(source.len());
+      let end = (off as usize + chunk_bytes as usize).min(source.len());
       w.insert(off, Bytes::copy_from_slice(&source[off as usize..end]));
-      off += chunk_size;
+      off += chunk_bytes;
     }
     w
   }
@@ -207,15 +207,15 @@ mod tests {
     assert_eq!(w.len(), 2);
   }
 
-  /// Wraps an [`InMemorySource`] and counts its `read` calls so coalescing is
+  /// Wraps an [`InMemoryStream`] and counts its `read` calls so coalescing is
   /// directly observable.
   struct CountingSource {
-    inner: InMemorySource,
+    inner: InMemoryStream,
     reads: Arc<AtomicUsize>,
   }
 
   #[async_trait]
-  impl Source for CountingSource {
+  impl ByteStream for CountingSource {
     fn size(&self) -> u64 {
       self.inner.size()
     }
@@ -228,8 +228,8 @@ mod tests {
   fn reader(size: usize, chunk: usize) -> (Arc<ChunkReader>, Arc<AtomicUsize>) {
     let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
     let reads = Arc::new(AtomicUsize::new(0));
-    let source: Arc<dyn Source> = Arc::new(CountingSource {
-      inner: InMemorySource::new(data),
+    let source: Arc<dyn ByteStream> = Arc::new(CountingSource {
+      inner: InMemoryStream::new(data),
       reads: reads.clone(),
     });
     (ChunkReader::new(source, chunk).unwrap(), reads)
@@ -237,7 +237,7 @@ mod tests {
 
   #[test]
   fn rejects_invalid_chunk_size() {
-    let src: Arc<dyn Source> = Arc::new(InMemorySource::new(vec![]));
+    let src: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(vec![]));
     assert!(matches!(
       ChunkReader::new(src.clone(), 63).err().expect("rejects 63"),
       ReaderError::InvalidChunkSize(63)

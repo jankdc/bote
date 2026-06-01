@@ -2,17 +2,17 @@
 //!
 //! A [`Session`] owns the immutable source metadata and a [`ChunkReader`]
 //! (coalesced async byte fetch, no residency of its own). Per-query it runs the
-//! [`Session::drive`] retry loop over a transient [`ByteWindow`]:
+//! [`Session::drive`] retry loop over a transient [`ChunkWindow`]:
 //!
 //!   1. Build a [`Walker`] over the window's currently-resident chunks and run
 //!      the caller-supplied sync step.
 //!   2. On `ChunkMiss(off)`, read a burst of chunks async, insert them into the
-//!      window, drop everything below the step's retention floor, and retry.
+//!      window, drop everything below the step's retention bound, and retry.
 //!   3. On success, return.
 //!
 //! Nothing persists across queries: the window is owned by the query (one-shot
 //! [`Query`]) or the iterator (`StreamCore`) and is dropped or pruned to the
-//! scan frontier as the walk advances, so resident source memory stays bounded
+//! scan position as the walk advances, so resident source memory stays bounded
 //! by the burst window regardless of document size. Bitmaps aren't stored at
 //! all - the walker builds them per block on the fly.
 
@@ -20,14 +20,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
-use crate::chunks::{ByteWindow, ChunkMiss, ChunkReader, ReaderError};
-use crate::index_cache::{Frontier, IndexCache};
+use crate::chunks::{ChunkMiss, ChunkReader, ChunkWindow, ReaderError};
+use crate::cache::StructuralIndex;
 use crate::path::Segment;
 use crate::resolve::{
-  self, ChildEntry, Children, ContainerKind, ResolveState, ResumeHint, ScanHarvest, ValueLocation,
+  self, ChildEntry, ContainerCursor, ContainerKind, ResolveState, ResumePoint, ScanRecord,
+  ValueLocation,
 };
 use crate::select::SelectError;
-use crate::source::Source;
+use crate::source::ByteStream;
 use crate::walker::{self, SkipState, TraverseError, Walker};
 
 use std::sync::{Arc, Mutex};
@@ -49,12 +50,12 @@ pub enum SessionError {
 
 pub struct Session {
   pub source_size: u64,
-  pub chunk_size: u64,
+  pub chunk_bytes: u64,
   pub reader: Arc<ChunkReader>,
   /// Structural-index cache, shared across every cursor over this source.
   /// `&self` methods mutate it through interior mutability; the lock is held
   /// only for the synchronous lookup/write-back, never across an `.await`.
-  cache: Mutex<IndexCache>,
+  cache: Mutex<StructuralIndex>,
   /// Mirror of `budget > 0`, so the hot gate checks never take the lock.
   cache_enabled: bool,
 }
@@ -82,17 +83,17 @@ pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
 
 impl Session {
   pub fn new(
-    source: Arc<dyn Source>,
-    chunk_size: usize,
+    source: Arc<dyn ByteStream>,
+    chunk_bytes: usize,
     index_cache_budget: usize,
   ) -> Result<Arc<Self>, SessionError> {
     let source_size = source.size();
-    let reader = ChunkReader::new(source, chunk_size)?;
+    let reader = ChunkReader::new(source, chunk_bytes)?;
     Ok(Arc::new(Self {
       source_size,
-      chunk_size: reader.chunk_size(),
+      chunk_bytes: reader.chunk_bytes(),
       reader,
-      cache: Mutex::new(IndexCache::new(index_cache_budget)),
+      cache: Mutex::new(StructuralIndex::new(index_cache_budget)),
       cache_enabled: index_cache_budget > 0,
     }))
   }
@@ -106,7 +107,7 @@ impl Session {
     self.cache.lock().unwrap().get(anchor, path)?.child_count()
   }
 
-  pub(crate) fn record_child_count(
+  pub(crate) fn store_child_count(
     &self,
     anchor: u64,
     path: &[Segment],
@@ -121,11 +122,11 @@ impl Session {
       .cache
       .lock()
       .unwrap()
-      .record_child_count(anchor, path, kind, value_start, count);
+      .store_child_count(anchor, path, kind, value_start, count);
   }
 
   /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
-  pub(crate) fn record_close(
+  pub(crate) fn store_close(
     &self,
     anchor: u64,
     path: &[Segment],
@@ -140,13 +141,13 @@ impl Session {
       .cache
       .lock()
       .unwrap()
-      .record_close(anchor, path, kind, value_start, close);
+      .store_close(anchor, path, kind, value_start, close);
   }
 
-  /// Record an array frontier landmark `(index, offset)` at `(anchor, path)` -
+  /// Record an array resume-point landmark `(index, offset)` at `(anchor, path)` -
   /// used by `iter`/`walk` early termination so a later random index resumes
   /// near the stop point.
-  pub(crate) fn record_array_frontier(
+  pub(crate) fn store_array_resume_point(
     &self,
     anchor: u64,
     path: &[Segment],
@@ -161,11 +162,11 @@ impl Session {
       .cache
       .lock()
       .unwrap()
-      .record_array_scan(anchor, path, value_start, Some((index, offset)));
+      .merge_array_scan(anchor, path, value_start, Some((index, offset)));
   }
 
-  pub(crate) fn new_window(&self) -> ByteWindow {
-    ByteWindow::new(self.chunk_size, self.source_size)
+  pub(crate) fn new_window(&self) -> ChunkWindow {
+    ChunkWindow::new(self.chunk_bytes, self.source_size)
   }
 
   pub async fn locate_at(
@@ -200,11 +201,11 @@ impl Session {
     Ok(Some(serde_json::from_slice(&bytes)?))
   }
 
-  /// Prune the iterator window to the scan frontier: keep just the chunk
+  /// Prune the iterator window to the scan position: keep just the chunk
   /// covering `next_offset` so the next yield's first read is hot, dropping
   /// everything behind it. Clears entirely once iteration walks off the end.
   /// Bounds the iterator's resident chunks to ~1 between yields.
-  pub(crate) fn prune_window(&self, window: &mut ByteWindow, next_offset: u64) {
+  pub(crate) fn prune_window(&self, window: &mut ChunkWindow, next_offset: u64) {
     if next_offset >= self.source_size {
       window.clear();
     } else {
@@ -217,34 +218,34 @@ impl Session {
   pub async fn enter_container(
     &self,
     value_start: u64,
-    window: &mut ByteWindow,
-  ) -> Result<Option<Children>, SessionError> {
-    let floor = AtomicU64::new(value_start);
+    window: &mut ChunkWindow,
+  ) -> Result<Option<ContainerCursor>, SessionError> {
+    let min_reachable = AtomicU64::new(value_start);
     self
       .drive(
         window,
-        &floor,
+        &min_reachable,
         |_| 1,
         |walker| resolve::enter_container(walker, value_start),
       )
       .await
   }
 
-  /// Advance `cw` to the next child entry.
+  /// Advance `cursor` to the next child entry.
   pub async fn next_child(
     &self,
-    cw: &mut Children,
-    window: &mut ByteWindow,
+    cursor: &mut ContainerCursor,
+    window: &mut ChunkWindow,
   ) -> Result<Option<ChildEntry>, SessionError> {
     // One element typically stays inside one chunk; burst=1 is fine, and the
     // per-call invocation means no quadratic-restart risk to amortize.
-    let floor = AtomicU64::new(cw.next_offset);
+    let min_reachable = AtomicU64::new(cursor.next_offset);
     self
       .drive(
         window,
-        &floor,
+        &min_reachable,
         |_| 1,
-        |walker| resolve::next_child(walker, cw),
+        |walker| resolve::next_child(walker, cursor),
       )
       .await
   }
@@ -253,7 +254,7 @@ impl Session {
   pub async fn materialize(
     &self,
     loc: ValueLocation,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<serde_json::Value, SessionError> {
     let bytes = self.read_range(loc.start, loc.end, window).await?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -269,13 +270,13 @@ impl Session {
   /// this boundary: a chain of cached container hops starts the scan as deep as
   /// possible (an all-hit returns the offset without faulting a single chunk),
   /// the first uncached level resumes from the deepest landmark, and the scan's
-  /// harvested child offsets are written back. Keep these three the only
+  /// collected child offsets are written back. Keep these three the only
   /// resolution entry points so the cache has one place to live.
   pub(crate) async fn run_locate(
     &self,
     path: &[Segment],
     anchor_start: u64,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<Option<u64>, SessionError> {
     // 1. Walk cached container hops to the deepest landmark (lock held only for
     //    this synchronous lookup, never across the drive below).
@@ -286,22 +287,22 @@ impl Session {
       (anchor_start, 0, None)
     };
     // 2. Drive the resolver from the seed. ResolveState persists across
-    //    `ChunkMiss` retries; the floor follows the resolver's committed
+    //    `ChunkMiss` retries; the min_reachable follows the resolver's committed
     //    iteration offset so chunks behind it are dropped while the key being
-    //    read (which `read_range`s behind the scan frontier) stays resident.
+    //    read (which `read_range`s behind the scan position) stays resident.
     let mut state = ResolveState::resume(start, seg, hint, self.cache_enabled);
-    let floor = AtomicU64::new(start);
+    let min_reachable = AtomicU64::new(start);
     let result = self
-      .drive(window, &floor, doubling_burst(), |walker| {
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
         let r = resolve::resolve_step(walker, path, &mut state);
-        floor.store(state.floor(), Ordering::Relaxed);
+        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
         r
       })
       .await?;
-    // 3. Write the harvested child offsets back.
-    if let Some(harvest) = state.take_harvest() {
+    // 3. Write the collected child offsets back.
+    if let Some(scan_record) = state.take_scan_record() {
       let mut cache = self.cache.lock().unwrap();
-      write_back(&mut cache, anchor_start, path, &harvest);
+      write_back(&mut cache, anchor_start, path, &scan_record);
     }
     Ok(result)
   }
@@ -311,7 +312,7 @@ impl Session {
     &self,
     path: &[Segment],
     anchor_start: u64,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<Option<ValueLocation>, SessionError> {
     let Some(start) = self.run_locate(path, anchor_start, window).await? else {
       return Ok(None);
@@ -333,7 +334,7 @@ impl Session {
     let kind = self.peek_container_kind(start, window).await?;
     let end = self.skip_value_at(start, window).await?;
     if let Some(kind) = kind {
-      self.record_close(anchor_start, path, kind, start, end);
+      self.store_close(anchor_start, path, kind, start, end);
     }
     Ok(Some(ValueLocation { start, end }))
   }
@@ -343,13 +344,13 @@ impl Session {
   async fn peek_container_kind(
     &self,
     from: u64,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<Option<ContainerKind>, SessionError> {
-    let floor = AtomicU64::new(from);
+    let min_reachable = AtomicU64::new(from);
     self
       .drive(
         window,
-        &floor,
+        &min_reachable,
         |_| 1,
         |walker| {
           let s = walker.skip_whitespace(from)?;
@@ -367,16 +368,16 @@ impl Session {
   pub(crate) async fn skip_value_at(
     &self,
     from: u64,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<u64, SessionError> {
-    // Resumable: the SkipState commits at block boundaries, so the floor tracks
+    // Resumable: the SkipState commits at block boundaries, so the min_reachable tracks
     // the skip position and the window stays bounded even for a large value.
     let mut state = SkipState::start(from);
-    let floor = AtomicU64::new(from);
+    let min_reachable = AtomicU64::new(from);
     self
-      .drive(window, &floor, doubling_burst(), |walker| {
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
         let r = walker::skip_value_step(walker, &mut state);
-        floor.store(state.floor(), Ordering::Relaxed);
+        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
         r
       })
       .await
@@ -386,18 +387,18 @@ impl Session {
     &self,
     from: u64,
     to: u64,
-    window: &mut ByteWindow,
+    window: &mut ChunkWindow,
   ) -> Result<Vec<u8>, SessionError> {
-    let chunk_size = self.chunk_size;
+    let chunk_bytes = self.chunk_bytes;
     // The full byte range is known, so fetch the rest in one shot on a miss.
-    // `read_range` isn't resumable (it restarts from `from`), so the floor is
+    // `read_range` isn't resumable (it restarts from `from`), so the min_reachable is
     // `from`: the value's chunks must all be resident together to copy them out.
-    let floor = AtomicU64::new(from);
+    let min_reachable = AtomicU64::new(from);
     self
       .drive(
         window,
-        &floor,
-        move |off| to.saturating_sub(off).div_ceil(chunk_size).max(1),
+        &min_reachable,
+        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
         |walker| walker.read_range(from, to).map_err(TraverseError::from),
       )
       .await
@@ -405,16 +406,16 @@ impl Session {
 
   /// The shared retry loop: build a fresh [`Walker`] over the window, run a sync
   /// `step`, and on `ChunkMiss(off)` read a burst of chunks (sized by
-  /// `burst_for`) into the window, drop everything below `floor`, and retry.
+  /// `burst_for`) into the window, drop everything below `min_reachable`, and retry.
   ///
-  /// `floor` is the lowest offset the step might still read; the step updates it
+  /// `min_reachable` is the lowest offset the step might still read; the step updates it
   /// as it commits forward progress. Dropping below it keeps the window bounded
   /// while never evicting a chunk a behind-frontier `read_range` (object keys)
-  /// still needs - the floor sits at or below the current iteration's start.
+  /// still needs - the min_reachable sits at or below the current iteration's start.
   pub(crate) async fn drive<T>(
     &self,
-    window: &mut ByteWindow,
-    floor: &AtomicU64,
+    window: &mut ChunkWindow,
+    min_reachable: &AtomicU64,
     mut burst_for: impl FnMut(u64) -> u64,
     mut step: impl FnMut(&mut Walker) -> Result<T, TraverseError>,
   ) -> Result<T, SessionError> {
@@ -430,7 +431,7 @@ impl Session {
           for (o, b) in self.reader.read_chunks(off, n).await? {
             window.insert(o, b);
           }
-          window.drop_below(floor.load(Ordering::Relaxed));
+          window.drop_below(min_reachable.load(Ordering::Relaxed));
         }
         Err(e) => return Err(e.into()),
       }
@@ -441,25 +442,25 @@ impl Session {
 /// Walk cached container hops from `anchor` along `path`, returning the deepest
 /// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
 /// member is an O(1) hop; the first uncached level returns the container's start
-/// plus a frontier hint (object high-water, or array landmark at/under the
+/// plus a resume point (object high-water, or array landmark at/under the
 /// target) so the resolver resumes near the target instead of at the open.
 fn chain_hops(
-  cache: &mut IndexCache,
+  cache: &mut StructuralIndex,
   anchor: u64,
   path: &[Segment],
-) -> (u64, usize, Option<ResumeHint>) {
+) -> (u64, usize, Option<ResumePoint>) {
   let mut start = anchor;
   let mut seg = 0;
   while seg < path.len() {
     let prefix = &path[..seg];
     // Read the node's fields into owned values (ending the borrow) before the
     // recency bump.
-    let Some((kind, frontier, member_vs)) = cache.get(anchor, prefix).map(|n| {
+    let Some((kind, resume_point, member_vs)) = cache.get(anchor, prefix).map(|n| {
       let mvs = match &path[seg] {
         Segment::Member(name) => n.member(name),
         Segment::Element(_) => None,
       };
-      (n.kind(), n.frontier(), mvs)
+      (n.kind(), n.resume_point(), mvs)
     }) else {
       return (start, seg, None);
     };
@@ -471,20 +472,15 @@ fn chain_hops(
           seg += 1;
           continue; // O(1) hop into a tabled member
         }
-        let hint = match frontier {
-          Frontier::Object { offset } => Some(ResumeHint::ObjectFrontier { offset }),
-          Frontier::Array { .. } => None,
-        };
-        return (start, seg, hint);
+        // Seed the resolver with the object's high-water resume point.
+        return (start, seg, Some(resume_point));
       }
       (Segment::Element(idx), ContainerKind::Array) => {
-        let hint = match frontier {
-          Frontier::Array { index, offset } if index <= *idx => {
-            Some(ResumeHint::ArrayFrontier { index, offset })
-          }
-          _ => None, // frontier past the target: scan from the open
-        };
-        return (start, seg, hint);
+        // Seed only if the landmark is at or before the target; a resume point
+        // past the target would skip elements, so scan from the open instead.
+        let seed = matches!(resume_point, ResumePoint::Array { index, .. } if index <= *idx)
+          .then_some(resume_point);
+        return (start, seg, seed);
       }
       // Kind/segment mismatch: resolve will return None; seed at the container
       // start with no hint.
@@ -494,34 +490,34 @@ fn chain_hops(
   (start, seg, None) // whole path hopped: `start` is the resolved value
 }
 
-/// Drain a scan's harvested child offsets into the cache, one node per entered
+/// Drain a scan's collected child offsets into the cache, one node per entered
 /// container.
-fn write_back(cache: &mut IndexCache, anchor: u64, path: &[Segment], harvest: &ScanHarvest) {
-  for cs in &harvest.containers {
+fn write_back(cache: &mut StructuralIndex, anchor: u64, path: &[Segment], scan_record: &ScanRecord) {
+  for cs in &scan_record.containers {
     let prefix = &path[..cs.seg];
     match cs.kind {
-      ContainerKind::Object => cache.record_object_scan(
+      ContainerKind::Object => cache.merge_object_scan(
         anchor,
         prefix,
         cs.value_start,
         &cs.members,
-        cs.object_terminal,
+        cs.object_resume,
       ),
       ContainerKind::Array => {
-        cache.record_array_scan(anchor, prefix, cs.value_start, cs.array_frontier)
+        cache.merge_array_scan(anchor, prefix, cs.value_start, cs.array_resume)
       }
     }
   }
 }
 
 /// RAII scope for a one-shot query (`locate_at` / `get_at` / `count_at`): owns
-/// the transient [`ByteWindow`] so its chunks are released when the query
+/// the transient [`ChunkWindow`] so its chunks are released when the query
 /// returns, including on early-`?` and early-`return` paths.
 ///
 /// The iterators in `cursor.rs` don't use this: they keep a long-lived window
-/// across yields and prune the frontier explicitly via [`Session::prune_window`].
+/// across yields and prune to the scan frontier explicitly via [`Session::prune_window`].
 pub(crate) struct Query {
-  pub(crate) window: ByteWindow,
+  pub(crate) window: ChunkWindow,
 }
 
 impl Query {
@@ -535,7 +531,7 @@ impl Query {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::source::InMemorySource;
+  use crate::source::InMemoryStream;
 
   #[test]
   fn burst_doubling_schedule_caps_at_max_burst() {
@@ -565,7 +561,7 @@ mod tests {
       i += 1;
     }
     doc.push_str("]}");
-    let source: Arc<dyn Source> = Arc::new(InMemorySource::new(doc.into_bytes()));
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
     let session = Session::new(source, 4096, DEFAULT_INDEX_CACHE_ENTRIES).unwrap();
 
     let start = session
@@ -575,16 +571,16 @@ mod tests {
       .expect("items resolves");
 
     let mut window = session.new_window();
-    let mut cw = session
+    let mut cursor = session
       .enter_container(start, &mut window)
       .await
       .unwrap()
       .expect("array");
     let bound = (MAX_BURST as usize) + 4; // one burst + small slack
     let mut seen = 0;
-    while let Some(_child) = session.next_child(&mut cw, &mut window).await.unwrap() {
+    while let Some(_child) = session.next_child(&mut cursor, &mut window).await.unwrap() {
       seen += 1;
-      session.prune_window(&mut window, cw.next_offset);
+      session.prune_window(&mut window, cursor.next_offset);
       assert!(
         window.len() <= bound,
         "window held {} chunks at element {seen} (bound {bound})",
@@ -601,15 +597,15 @@ mod tests {
 
   use crate::source::SourceError;
 
-  /// Wraps an [`InMemorySource`] and counts its `read` calls, so the cache's
+  /// Wraps an [`InMemoryStream`] and counts its `read` calls, so the cache's
   /// effect on chunk faulting is directly observable.
   struct CountingSource {
-    inner: InMemorySource,
+    inner: InMemoryStream,
     reads: Arc<AtomicUsize>,
   }
 
   #[async_trait]
-  impl Source for CountingSource {
+  impl ByteStream for CountingSource {
     fn size(&self) -> u64 {
       self.inner.size()
     }
@@ -625,8 +621,8 @@ mod tests {
     budget: usize,
   ) -> (Arc<Session>, Arc<AtomicUsize>) {
     let reads = Arc::new(AtomicUsize::new(0));
-    let source: Arc<dyn Source> = Arc::new(CountingSource {
-      inner: InMemorySource::new(doc.into_bytes()),
+    let source: Arc<dyn ByteStream> = Arc::new(CountingSource {
+      inner: InMemoryStream::new(doc.into_bytes()),
       reads: reads.clone(),
     });
     (Session::new(source, chunk, budget).unwrap(), reads)
@@ -653,7 +649,7 @@ mod tests {
     let path_d = [member("a"), member("b"), member("d")];
 
     // Warm: resolve c (populates the chain + b's member table), then d resumes
-    // from c's frontier - a one-member scan.
+    // from c's resume_point - a one-member scan.
     let (warm, warm_reads) = counting_session(deep_object_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
     let mut w = warm.new_window();
     warm.run_locate(&path_c, 0, &mut w).await.unwrap().unwrap();
@@ -694,7 +690,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn array_frontier_resume_faults_fewer_chunks() {
+  async fn array_resume_faults_fewer_chunks() {
     let at = |i: usize| [member("arr"), Segment::Element(i)];
 
     let (warm, warm_reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
@@ -800,7 +796,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn cache_state_array_frontier_advances() {
+  async fn cache_state_array_resume_advances() {
     let (s, _reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
     let arr = [member("arr")];
 
@@ -809,18 +805,18 @@ mod tests {
       .await
       .unwrap()
       .expect("element 40 resolves");
-    let frontier = s
+    let resume_point = s
       .cache
       .lock()
       .unwrap()
       .get(0, &arr)
       .expect("arr node")
-      .frontier();
-    match frontier {
-      Frontier::Array { index, .. } => {
-        assert_eq!(index, 40, "frontier landmark at the resolved index")
+      .resume_point();
+    match resume_point {
+      ResumePoint::Array { index, .. } => {
+        assert_eq!(index, 40, "resume_point landmark at the resolved index")
       }
-      other => panic!("expected an array frontier, got {other:?}"),
+      other => panic!("expected an array resume_point, got {other:?}"),
     }
   }
 

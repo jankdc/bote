@@ -4,7 +4,7 @@ use std::simd::cmp::SimdPartialEq;
 use std::simd::Simd;
 
 /// Width of one scan window, in bytes. One window produces 64 bitmap bits.
-pub const WINDOW: usize = 64;
+pub const BLOCK_BYTES: usize = 64;
 
 /// Carry state propagated between consecutive 64-byte blocks.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,8 +22,8 @@ pub struct ScanCarry {
 /// bytes inside a string literal, including the opening `"` but excluding
 /// the closing `"`. Use `!in_string` to mask string contents out of
 /// structural-character bitmaps.
-pub fn scan_block(block: &[u8; WINDOW], carry: ScanCarry) -> (u64, ScanCarry) {
-  let v: Simd<u8, WINDOW> = Simd::from_array(*block);
+pub fn scan_block(block: &[u8; BLOCK_BYTES], carry: ScanCarry) -> (u64, ScanCarry) {
+  let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
   let quote = v.simd_eq(Simd::splat(b'"')).to_bitmask();
   let backslash = v.simd_eq(Simd::splat(b'\\')).to_bitmask();
 
@@ -72,7 +72,7 @@ mod tests {
   use super::*;
 
   /// Scalar reference implementation that mirrors the SIMD algorithm exactly.
-  fn scalar_reference(bytes: &[u8; WINDOW], carry: ScanCarry) -> (u64, ScanCarry) {
+  fn scalar_reference(bytes: &[u8; BLOCK_BYTES], carry: ScanCarry) -> (u64, ScanCarry) {
     let mut quote = 0u64;
     let mut escaped = 0u64;
 
@@ -97,7 +97,8 @@ mod tests {
 
     // Next block's bit 0 is escaped iff the run ending at bit 63 has odd
     // length (and therefore bit 63 was a `\`).
-    let prev_escaped_out = u64::from(bytes[WINDOW - 1] == b'\\' && !run_length.is_multiple_of(2));
+    let prev_escaped_out =
+      u64::from(bytes[BLOCK_BYTES - 1] == b'\\' && !run_length.is_multiple_of(2));
 
     let new_carry = ScanCarry {
       prev_escaped: prev_escaped_out,
@@ -107,13 +108,13 @@ mod tests {
     (in_string, new_carry)
   }
 
-  fn pad_to_window(s: &[u8]) -> [u8; WINDOW] {
-    let mut out = [b' '; WINDOW];
+  fn pad_to_window(s: &[u8]) -> [u8; BLOCK_BYTES] {
+    let mut out = [b' '; BLOCK_BYTES];
     out[..s.len()].copy_from_slice(s);
     out
   }
 
-  fn assert_matches_reference(bytes: &[u8; WINDOW], carry: ScanCarry) {
+  fn assert_matches_reference(bytes: &[u8; BLOCK_BYTES], carry: ScanCarry) {
     let (in_string, out_carry) = scan_block(bytes, carry);
     let (ref_in_string, ref_carry) = scalar_reference(bytes, carry);
     assert_eq!(in_string, ref_in_string, "in_string bitmap");
@@ -122,8 +123,8 @@ mod tests {
 
   /// Advance the LCG `state` and fill one 64-byte block from `alphabet`.
   /// Shared by the fuzz tests so the generator constants live in one place.
-  fn fill_block(state: &mut u64, alphabet: &[u8]) -> [u8; WINDOW] {
-    let mut block = [0u8; WINDOW];
+  fn fill_block(state: &mut u64, alphabet: &[u8]) -> [u8; BLOCK_BYTES] {
+    let mut block = [0u8; BLOCK_BYTES];
     for slot in &mut block {
       *state = state
         .wrapping_mul(6364136223846793005)
@@ -135,7 +136,7 @@ mod tests {
 
   #[test]
   fn scan_empty_block_has_zero_bitmaps() {
-    let block = [b' '; WINDOW];
+    let block = [b' '; BLOCK_BYTES];
     let (in_string, c) = scan_block(&block, ScanCarry::default());
     assert_eq!(in_string, 0);
     assert_eq!(c, ScanCarry::default());
@@ -217,7 +218,7 @@ mod tests {
   #[test]
   fn carry_out_set_when_ends_inside_string() {
     // String starts in this block and is not closed by end-of-block.
-    let mut block = [b'x'; WINDOW];
+    let mut block = [b'x'; BLOCK_BYTES];
     block[0] = b'"';
     // bytes 1..63 are all 'x' (inside string), no closing quote.
     let (in_string, out_carry) = scan_block(&block, ScanCarry::default());
@@ -229,7 +230,7 @@ mod tests {
   fn carry_escape_across_blocks() {
     // Block 1 ends with a single `\`; block 2 starts with `"`. The quote
     // in block 2 must be marked escaped via the carry.
-    let mut b1 = [b' '; WINDOW];
+    let mut b1 = [b' '; BLOCK_BYTES];
     b1[0] = b'"'; // open a string
     b1[63] = b'\\'; // trailing backslash, no escape carry-in
     let (_, carry1) = scan_block(&b1, ScanCarry::default());
@@ -237,7 +238,7 @@ mod tests {
     assert_eq!(carry1.prev_escaped, 1);
     assert_eq!(carry1.inside_string, !0);
 
-    let mut b2 = [b' '; WINDOW];
+    let mut b2 = [b' '; BLOCK_BYTES];
     b2[0] = b'"'; // would close the string, but it's escaped
     b2[5] = b'"'; // this one closes
     let (in_string2, _carry2) = scan_block(&b2, carry1);

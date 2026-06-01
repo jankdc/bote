@@ -1,9 +1,13 @@
-//! The `Source` abstraction: a seekable, async byte stream.
+//! The `ByteStream` abstraction: a seekable, async byte stream.
 //!
-//! Every source advertises its total `size` and serves arbitrary byte ranges
+//! Every stream advertises its total `size` and serves arbitrary byte ranges
 //! via `read(offset, length)`. The parser only ever asks for chunk-aligned
 //! ranges of a fixed length (typically 64 KiB); the final chunk may return
 //! fewer bytes than requested when the range straddles end-of-source.
+//!
+//! `ByteStream` corresponds to the TS `SourceReader` (the live stream), not the
+//! TS `Source` (a factory that `open()`s a reader). The facade opens its
+//! `Source`, then hands the resulting reader to `open()` as a `JsByteStream`.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,7 +25,7 @@ pub enum SourceError {
 }
 
 #[async_trait]
-pub trait Source: Send + Sync {
+pub trait ByteStream: Send + Sync {
   /// Total length of the underlying byte stream.
   fn size(&self) -> u64;
 
@@ -31,14 +35,14 @@ pub trait Source: Send + Sync {
 }
 
 /// In-memory source backed by an owned byte buffer. Test fixture only -
-/// production callers feed bytes in via [`JsSource`].
+/// production callers feed bytes in via [`JsByteStream`].
 #[cfg(test)]
-pub struct InMemorySource {
+pub struct InMemoryStream {
   data: Bytes,
 }
 
 #[cfg(test)]
-impl InMemorySource {
+impl InMemoryStream {
   pub fn new(data: impl Into<Bytes>) -> Self {
     Self { data: data.into() }
   }
@@ -46,7 +50,7 @@ impl InMemorySource {
 
 #[cfg(test)]
 #[async_trait]
-impl Source for InMemorySource {
+impl ByteStream for InMemoryStream {
   fn size(&self) -> u64 {
     self.data.len() as u64
   }
@@ -83,15 +87,15 @@ pub struct ReadArgs {
 pub type ReadFn =
   ThreadsafeFunction<ReadArgs, Promise<Uint8Array>, ReadArgs, napi::Status, false, true>;
 
-/// Source backed by a JavaScript object exposing `size: number` and
+/// ByteStream backed by a JavaScript object exposing `size: number` and
 /// `read(args): Promise<number>`. The JS function is held as a
 /// [`ThreadsafeFunction`], which can be awaited from any tokio task.
-pub struct JsSource {
+pub struct JsByteStream {
   read_fn: Option<ReadFn>,
   size: u64,
 }
 
-impl JsSource {
+impl JsByteStream {
   pub fn new(read_fn: ReadFn, size: u64) -> Self {
     Self {
       read_fn: Some(read_fn),
@@ -100,14 +104,14 @@ impl JsSource {
   }
 }
 
-impl Drop for JsSource {
+impl Drop for JsByteStream {
   fn drop(&mut self) {
     drop(self.read_fn.take());
   }
 }
 
 #[async_trait]
-impl Source for JsSource {
+impl ByteStream for JsByteStream {
   fn size(&self) -> u64 {
     self.size
   }
@@ -162,7 +166,7 @@ mod tests {
 
   #[tokio::test]
   async fn in_memory_basic_read() {
-    let src = InMemorySource::new(b"hello, world".to_vec());
+    let src = InMemoryStream::new(b"hello, world".to_vec());
     assert_eq!(src.size(), 12);
     let chunk = src.read(0, 5).await.unwrap();
     assert_eq!(&chunk[..], b"hello");
@@ -170,21 +174,21 @@ mod tests {
 
   #[tokio::test]
   async fn in_memory_read_clipped_to_size() {
-    let src = InMemorySource::new(b"abc".to_vec());
+    let src = InMemoryStream::new(b"abc".to_vec());
     let chunk = src.read(1, 100).await.unwrap();
     assert_eq!(&chunk[..], b"bc");
   }
 
   #[tokio::test]
   async fn in_memory_read_at_exact_end_returns_empty() {
-    let src = InMemorySource::new(b"abc".to_vec());
+    let src = InMemoryStream::new(b"abc".to_vec());
     let chunk = src.read(3, 16).await.unwrap();
     assert!(chunk.is_empty());
   }
 
   #[tokio::test]
   async fn in_memory_read_past_end_is_error() {
-    let src = InMemorySource::new(b"abc".to_vec());
+    let src = InMemoryStream::new(b"abc".to_vec());
     let err = src.read(4, 1).await.unwrap_err();
     assert!(matches!(
       err,

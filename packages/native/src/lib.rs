@@ -18,7 +18,7 @@ mod resolve;
 mod select;
 
 // structural-index cache (above resolve, below session)
-mod index_cache;
+mod cache;
 
 // async orchestration
 mod session;
@@ -36,7 +36,7 @@ use napi_derive::napi;
 
 use crate::cursor::Cursor;
 use crate::session::Session;
-use crate::source::{JsSource, ReadArgs};
+use crate::source::{JsByteStream, ReadArgs};
 
 #[cfg(feature = "heap-profile")]
 #[global_allocator]
@@ -75,7 +75,7 @@ pub fn open(
   // else outright rather than truncating (e.g. `0.5 as usize == 0`). The non-zero
   // multiple-of-64 rule is enforced by `ChunkReader::new`. The core facade fills
   // in the per-source default before calling, so there is no default here.
-  let chunk_size = match source.get_named_property::<Option<f64>>("chunkBytes") {
+  let chunk_bytes = match source.get_named_property::<Option<f64>>("chunkBytes") {
     Ok(Some(n)) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
       n as usize
     }
@@ -107,8 +107,8 @@ pub fn open(
   };
 
   let session = Session::new(
-    Arc::new(JsSource::new(ts_read_fn, size as u64)),
-    chunk_size,
+    Arc::new(JsByteStream::new(ts_read_fn, size as u64)),
+    chunk_bytes,
     index_cache_budget,
   )
   .map_err(|e| napi::Error::from_reason(e.to_string()))?;

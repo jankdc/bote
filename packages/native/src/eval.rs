@@ -4,7 +4,7 @@
 //! a compiled [`CompiledSelect`] (projection) to one child at `child_start`.
 //! Kept out of the IR module (`select`) so it stays pure data below the session.
 
-use crate::chunks::ByteWindow;
+use crate::chunks::ChunkWindow;
 use crate::path::Segment;
 use crate::resolve::{ChildEntry, ValueLocation};
 use crate::select::CompiledSelect;
@@ -19,7 +19,7 @@ pub async fn project(
   session: &Session,
   select: &CompiledSelect,
   child_start: u64,
-  window: &mut ByteWindow,
+  window: &mut ChunkWindow,
 ) -> Result<serde_json::Value, SessionError> {
   match select {
     CompiledSelect::One(path) => project_one(session, path, child_start, window).await,
@@ -31,15 +31,15 @@ async fn project_map(
   session: &Session,
   fields: &[(String, Vec<Segment>)],
   child_start: u64,
-  window: &mut ByteWindow,
+  window: &mut ChunkWindow,
 ) -> Result<serde_json::Value, SessionError> {
   let mut matched: Vec<Option<ValueLocation>> = vec![None; fields.len()];
   let mut remaining = fields.iter().filter(|(_, p)| !p.is_empty()).count();
 
   if remaining > 0 {
-    if let Some(mut cw) = session.enter_container(child_start, window).await? {
+    if let Some(mut cursor) = session.enter_container(child_start, window).await? {
       while remaining > 0 {
-        let Some(entry) = session.next_child(&mut cw, window).await? else {
+        let Some(entry) = session.next_child(&mut cursor, window).await? else {
           break; // container exhausted; any still-unmatched fields stay null
         };
         for (slot, (_, path)) in matched.iter_mut().zip(fields) {
@@ -48,7 +48,7 @@ async fn project_map(
             remaining -= 1;
           }
         }
-        session.prune_window(window, cw.next_offset);
+        session.prune_window(window, cursor.next_offset);
       }
     }
   }
@@ -73,7 +73,7 @@ async fn project_one(
   session: &Session,
   path: &[Segment],
   child_start: u64,
-  window: &mut ByteWindow,
+  window: &mut ChunkWindow,
 ) -> Result<serde_json::Value, SessionError> {
   match session.run_resolve(path, child_start, window).await? {
     None => Ok(serde_json::Value::Null),

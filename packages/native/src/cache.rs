@@ -4,12 +4,12 @@
 //! Caches the *containers* a scan has walked - not whole resolved paths - so a
 //! later query that lands in a container we've already entered starts near the
 //! target instead of at the container's open. Each [`ContainerNode`] holds an
-//! object child-table (`name -> value_start`) plus a resume frontier; arrays
+//! object child-table (`name -> value_start`) plus a resume point; arrays
 //! keep a single `(index, offset)` landmark. Nothing here stores source bytes:
 //! the burst-window resident bound is untouched.
 //!
 //! Pure memoization over an immutable source - entries are never invalidated,
-//! only evicted for memory (whole-node LRU under a children budget). Depends
+//! only evicted for memory (whole-node LRU under a children slot_budget). Depends
 //! only on `path` (keys) and `resolve` (`ContainerKind`/`ValueLocation`); never
 //! on `session`/`walker`. All reads/writes are driven from `session`, which
 //! sits above it.
@@ -17,22 +17,12 @@
 use std::collections::HashMap;
 
 use crate::path::Segment;
-use crate::resolve::{ContainerKind, ValueLocation};
+use crate::resolve::{ContainerKind, ResumePoint, ValueLocation};
 
 /// Per-container cap on tabled object members. A huge object doesn't get an
-/// unbounded table; past the cap it stops tabling and keeps only the frontier,
-/// so one giant container can't exhaust the global budget on its own.
+/// unbounded table; past the cap it stops tabling and keeps only the resume
+/// point, so one giant container can't exhaust the global slot_budget on its own.
 const PER_CONTAINER_MEMBERS: usize = 256;
-
-/// Resume landmark for a container: where a scan that re-enters it should pick
-/// up. Object frontiers carry only the high-water member-start offset (member
-/// scanning threads no carry); array frontiers carry the `(index, offset)` of
-/// the furthest resolved element, to seed the comma popcount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Frontier {
-  Object { offset: u64 },
-  Array { index: usize, offset: u64 },
-}
 
 /// A walked container: the offsets of the children seen so far, the scalars
 /// learned about it, and a resume point. `members` is empty for arrays.
@@ -42,11 +32,11 @@ pub struct ContainerNode {
   value_start: u64,
   close: Option<u64>,
   child_count: Option<u64>,
-  /// Object members `name -> value_start`, for every member in `[open, frontier]`
+  /// Object members `name -> value_start`, for every member in `[open, resume_point]`
   /// up to the per-container cap. A flat vec: containers are small or capped, so
   /// linear lookup is cheaper than a hash map's per-entry overhead.
   members: Vec<(Box<str>, u64)>,
-  frontier: Frontier,
+  resume_point: ResumePoint,
   last_used: u64,
 }
 
@@ -59,8 +49,8 @@ impl ContainerNode {
     self.child_count
   }
 
-  pub fn frontier(&self) -> Frontier {
-    self.frontier
+  pub fn resume_point(&self) -> ResumePoint {
+    self.resume_point
   }
 
   /// `value_start` of a tabled member, or `None` if not in the table.
@@ -80,9 +70,9 @@ impl ContainerNode {
     })
   }
 
-  /// Weight toward the global budget: one slot for the node itself plus one per
+  /// Weight toward the global slot_budget: one slot for the node itself plus one per
   /// tabled child offset.
-  fn weight(&self) -> usize {
+  fn slot_cost(&self) -> usize {
     1 + self.members.len()
   }
 }
@@ -90,12 +80,12 @@ impl ContainerNode {
 /// Default resume point for a freshly-created node with no scan history: just
 /// past the open `{`/`[`. Equivalent to scanning from the container's start
 /// (member scans `skip_whitespace` first, comma popcounts start at depth 0).
-fn fresh_frontier(kind: ContainerKind, value_start: u64) -> Frontier {
+fn fresh_resume_point(kind: ContainerKind, value_start: u64) -> ResumePoint {
   match kind {
-    ContainerKind::Object => Frontier::Object {
+    ContainerKind::Object => ResumePoint::Object {
       offset: value_start + 1,
     },
-    ContainerKind::Array => Frontier::Array {
+    ContainerKind::Array => ResumePoint::Array {
       index: 0,
       offset: value_start + 1,
     },
@@ -119,28 +109,28 @@ impl NodeKey {
 
 /// A flat map of container nodes keyed by `(anchor, path)`, so eviction is
 /// per-container with no tree-orphaning.
-pub struct IndexCache {
-  /// Max combined slots (`held`); `0` disables the cache entirely.
-  budget: usize,
+pub struct StructuralIndex {
+  /// Max combined slots (`slots_used`); `0` disables the cache entirely.
+  slot_budget: usize,
   /// Current combined slots across all nodes (`sum(1 + members.len())`).
-  held: usize,
+  slots_used: usize,
   /// Monotonic recency clock; the largest value is the most-recently-used.
   tick: u64,
   nodes: HashMap<NodeKey, ContainerNode>,
 }
 
-impl IndexCache {
-  pub fn new(budget: usize) -> Self {
+impl StructuralIndex {
+  pub fn new(slot_budget: usize) -> Self {
     Self {
-      budget,
-      held: 0,
+      slot_budget,
+      slots_used: 0,
       tick: 0,
       nodes: HashMap::new(),
     }
   }
 
   pub fn is_enabled(&self) -> bool {
-    self.budget > 0
+    self.slot_budget > 0
   }
 
   pub fn get(&self, anchor: u64, path: &[Segment]) -> Option<&ContainerNode> {
@@ -156,97 +146,99 @@ impl IndexCache {
   }
 
   /// Write back an object scan: merge the members seen (in scan order) up to the
-  /// per-container cap, then advance the frontier to the high-water resume point
-  /// (`terminal` = the matched member's start, or the close position). If the
-  /// cap is hit, the frontier freezes at the first un-tabled member so every
+  /// per-container cap, then advance the resume point to the high-water member boundary
+  /// (`resume` = the matched member's start, or the close position). If the
+  /// cap is hit, the resume_point freezes at the first un-tabled member so every
   /// member before it stays tabled - the resume-correctness invariant.
-  pub fn record_object_scan(
+  pub fn merge_object_scan(
     &mut self,
     anchor: u64,
     path: &[Segment],
     value_start: u64,
     members: &[(Box<str>, u64, u64)],
-    terminal: Option<u64>,
+    resume: Option<u64>,
   ) {
     if !self.is_enabled() {
       return;
     }
     let tick = self.next_tick();
-    let cap = PER_CONTAINER_MEMBERS.min(self.budget);
+    let cap = PER_CONTAINER_MEMBERS.min(self.slot_budget);
     {
-      let Self { nodes, held, .. } = self;
+      let Self {
+        nodes, slots_used, ..
+      } = self;
       let node = nodes.entry(NodeKey::new(anchor, path)).or_insert_with(|| {
-        *held += 1;
+        *slots_used += 1;
         ContainerNode::new(ContainerKind::Object, value_start, tick)
       });
       node.last_used = tick;
 
-      let mut frontier_off = match node.frontier {
-        Frontier::Object { offset } => offset,
-        Frontier::Array { .. } => value_start + 1,
+      let mut resume_off = match node.resume_point {
+        ResumePoint::Object { offset } => offset,
+        ResumePoint::Array { .. } => value_start + 1,
       };
       let mut capped = false;
-      for (name, member_start, member_value_start) in members {
+      for (name, key_start, value_start) in members {
         if node.member(name).is_some() {
           continue; // already tabled (a prior scan's prefix)
         }
         if node.members.len() >= cap {
-          frontier_off = frontier_off.max(*member_start);
+          resume_off = resume_off.max(*key_start);
           capped = true;
           break;
         }
-        node.members.push((name.clone(), *member_value_start));
-        *held += 1;
+        node.members.push((name.clone(), *value_start));
+        *slots_used += 1;
       }
       if !capped {
-        if let Some(t) = terminal {
-          frontier_off = frontier_off.max(t);
+        if let Some(t) = resume {
+          resume_off = resume_off.max(t);
         } else if let Some((_, last_start, _)) = members.last() {
-          frontier_off = frontier_off.max(*last_start);
+          resume_off = resume_off.max(*last_start);
         }
       }
-      node.frontier = Frontier::Object {
-        offset: frontier_off,
-      };
+      node.resume_point = ResumePoint::Object { offset: resume_off };
     }
-    self.evict_to_budget();
+    self.evict_to_slot_budget();
   }
 
-  /// Write back an array scan: advance the single `(index, offset)` frontier
+  /// Write back an array scan: advance the single `(index, offset)` resume_point
   /// landmark forward (a query for an earlier index never rewinds it).
-  pub fn record_array_scan(
+  pub fn merge_array_scan(
     &mut self,
     anchor: u64,
     path: &[Segment],
     value_start: u64,
-    frontier: Option<(usize, u64)>,
+    resume_point: Option<(usize, u64)>,
   ) {
     if !self.is_enabled() {
       return;
     }
     let tick = self.next_tick();
     {
-      let Self { nodes, held, .. } = self;
+      let Self {
+        nodes, slots_used, ..
+      } = self;
       let node = nodes.entry(NodeKey::new(anchor, path)).or_insert_with(|| {
-        *held += 1;
+        *slots_used += 1;
         ContainerNode::new(ContainerKind::Array, value_start, tick)
       });
       node.last_used = tick;
-      if let Some((index, offset)) = frontier {
-        let advance = match node.frontier {
-          Frontier::Array { index: cur, .. } => index >= cur,
-          Frontier::Object { .. } => true,
+      if let Some((index, offset)) = resume_point {
+        let advance = match node.resume_point {
+          ResumePoint::Array { index: cur, .. } => index >= cur,
+          ResumePoint::Object { .. } => true,
         };
         if advance {
-          node.frontier = Frontier::Array { index, offset };
+          node.resume_point = ResumePoint::Array { index, offset };
         }
       }
     }
-    self.evict_to_budget();
+    self.evict_to_slot_budget();
   }
 
   /// Record a container's matching-close offset (`}`/`]` + 1).
-  pub fn record_close(
+  pub fn store_close(
     &mut self,
     anchor: u64,
     path: &[Segment],
@@ -254,13 +246,13 @@ impl IndexCache {
     value_start: u64,
     close: u64,
   ) {
-    self.scalar(anchor, path, kind, value_start, |node| {
+    self.store_field(anchor, path, kind, value_start, |node| {
       node.close = Some(close)
     });
   }
 
   /// Record a container's child count.
-  pub fn record_child_count(
+  pub fn store_child_count(
     &mut self,
     anchor: u64,
     path: &[Segment],
@@ -268,12 +260,12 @@ impl IndexCache {
     value_start: u64,
     count: u64,
   ) {
-    self.scalar(anchor, path, kind, value_start, |node| {
+    self.store_field(anchor, path, kind, value_start, |node| {
       node.child_count = Some(count)
     });
   }
 
-  fn scalar(
+  fn store_field(
     &mut self,
     anchor: u64,
     path: &[Segment],
@@ -286,15 +278,17 @@ impl IndexCache {
     }
     let tick = self.next_tick();
     {
-      let Self { nodes, held, .. } = self;
+      let Self {
+        nodes, slots_used, ..
+      } = self;
       let node = nodes.entry(NodeKey::new(anchor, path)).or_insert_with(|| {
-        *held += 1;
+        *slots_used += 1;
         ContainerNode::new(kind, value_start, tick)
       });
       node.last_used = tick;
       set(node);
     }
-    self.evict_to_budget();
+    self.evict_to_slot_budget();
   }
 
   fn next_tick(&mut self) -> u64 {
@@ -302,11 +296,11 @@ impl IndexCache {
     self.tick
   }
 
-  /// Evict least-recently-used whole nodes until the budget holds. Children go
+  /// Evict least-recently-used whole nodes until the slot_budget holds. Children go
   /// with their node (no orphaning); freshly-written nodes carry the highest
   /// tick and survive over stale ones.
-  fn evict_to_budget(&mut self) {
-    while self.held > self.budget {
+  fn evict_to_slot_budget(&mut self) {
+    while self.slots_used > self.slot_budget {
       let Some(victim) = self
         .nodes
         .iter()
@@ -316,14 +310,14 @@ impl IndexCache {
         break;
       };
       if let Some(node) = self.nodes.remove(&victim) {
-        self.held -= node.weight();
+        self.slots_used -= node.slot_cost();
       }
     }
   }
 
   #[cfg(test)]
-  pub fn held(&self) -> usize {
-    self.held
+  pub fn slots_used(&self) -> usize {
+    self.slots_used
   }
 
   #[cfg(test)]
@@ -331,11 +325,11 @@ impl IndexCache {
     self.nodes.len()
   }
 
-  /// Recompute `held` from scratch; a test invariant that the incremental
+  /// Recompute `slots_used` from scratch; a test invariant that the incremental
   /// accounting matches the actual node weights.
   #[cfg(test)]
-  fn recomputed_held(&self) -> usize {
-    self.nodes.values().map(ContainerNode::weight).sum()
+  fn recomputed_slots_used(&self) -> usize {
+    self.nodes.values().map(ContainerNode::slot_cost).sum()
   }
 }
 
@@ -347,7 +341,7 @@ impl ContainerNode {
       close: None,
       child_count: None,
       members: Vec::new(),
-      frontier: fresh_frontier(kind, value_start),
+      resume_point: fresh_resume_point(kind, value_start),
       last_used: tick,
     }
   }
@@ -367,43 +361,43 @@ mod tests {
 
   #[test]
   fn disabled_cache_records_nothing() {
-    let mut c = IndexCache::new(0);
+    let mut c = StructuralIndex::new(0);
     assert!(!c.is_enabled());
-    c.record_object_scan(0, &[], 0, &[member("a", 1, 4)], Some(1));
-    c.record_close(0, &[], ContainerKind::Object, 0, 10);
+    c.merge_object_scan(0, &[], 0, &[member("a", 1, 4)], Some(1));
+    c.store_close(0, &[], ContainerKind::Object, 0, 10);
     assert!(c.get(0, &[]).is_none());
-    assert_eq!(c.held(), 0);
+    assert_eq!(c.slots_used(), 0);
   }
 
   #[test]
   fn object_table_covers_open_to_high_water() {
-    let mut c = IndexCache::new(64);
+    let mut c = StructuralIndex::new(64);
     // {"a":1,"b":2,"c":3} - scan matched "c"; a,b skipped, c matched. Terminal is
     // c's member-start (the high-water).
     let members = [member("a", 1, 5), member("b", 7, 11), member("c", 13, 17)];
-    c.record_object_scan(0, &[], 0, &members, Some(13));
+    c.merge_object_scan(0, &[], 0, &members, Some(13));
     let node = c.get(0, &[]).expect("node");
     assert_eq!(node.member("a"), Some(5));
     assert_eq!(node.member("b"), Some(11));
     assert_eq!(node.member("c"), Some(17));
     assert_eq!(node.member("d"), None);
-    // Frontier sits at the matched member's start, so any un-tabled member is at
+    // ResumePoint sits at the matched member's start, so any un-tabled member is at
     // or after it and a resume from there finds it.
-    assert_eq!(node.frontier(), Frontier::Object { offset: 13 });
-    assert_eq!(c.held(), 1 + 3);
+    assert_eq!(node.resume_point(), ResumePoint::Object { offset: 13 });
+    assert_eq!(c.slots_used(), 1 + 3);
   }
 
   #[test]
   fn object_sibling_scans_extend_contiguously() {
-    let mut c = IndexCache::new(64);
-    // First scan tables a,b and matched b (terminal = b's start = 7).
-    c.record_object_scan(0, &[], 0, &[member("a", 1, 5), member("b", 7, 11)], Some(7));
+    let mut c = StructuralIndex::new(64);
+    // First scan tables a,b and matched b (resume = b's start = 7).
+    c.merge_object_scan(0, &[], 0, &[member("a", 1, 5), member("b", 7, 11)], Some(7));
     assert_eq!(
-      c.get(0, &[]).unwrap().frontier(),
-      Frontier::Object { offset: 7 }
+      c.get(0, &[]).unwrap().resume_point(),
+      ResumePoint::Object { offset: 7 }
     );
-    // Second scan resumes at 7, re-reads b, then c,d; matched d (terminal = d's start).
-    c.record_object_scan(
+    // Second scan resumes at 7, re-reads b, then c,d; matched d (resume = d's start).
+    c.merge_object_scan(
       0,
       &[],
       0,
@@ -413,60 +407,60 @@ mod tests {
     let node = c.get(0, &[]).unwrap();
     assert_eq!(node.member("c"), Some(17));
     assert_eq!(node.member("d"), Some(23));
-    assert_eq!(node.frontier(), Frontier::Object { offset: 19 });
+    assert_eq!(node.resume_point(), ResumePoint::Object { offset: 19 });
     // b not double-counted.
-    assert_eq!(c.held(), 1 + 4);
+    assert_eq!(c.slots_used(), 1 + 4);
   }
 
   #[test]
-  fn per_container_cap_spills_to_frontier() {
-    let budget = 1024;
-    let mut c = IndexCache::new(budget);
+  fn per_container_cap_spills_to_resume_point() {
+    let slot_budget = 1024;
+    let mut c = StructuralIndex::new(slot_budget);
     let members: Vec<_> = (0..PER_CONTAINER_MEMBERS + 10)
       .map(|i| member(&format!("k{i}"), (i * 10) as u64, (i * 10 + 4) as u64))
       .collect();
-    c.record_object_scan(0, &[], 0, &members, Some(99_999));
+    c.merge_object_scan(0, &[], 0, &members, Some(99_999));
     let node = c.get(0, &[]).unwrap();
     assert_eq!(
       node.members.len(),
       PER_CONTAINER_MEMBERS,
       "table capped at the per-container limit"
     );
-    // Frontier froze at the first un-tabled member's start, not the terminal.
+    // ResumePoint froze at the first un-tabled member's start, not the resume.
     let first_untabled_start = (PER_CONTAINER_MEMBERS * 10) as u64;
     assert_eq!(
-      node.frontier(),
-      Frontier::Object {
+      node.resume_point(),
+      ResumePoint::Object {
         offset: first_untabled_start
       }
     );
   }
 
   #[test]
-  fn array_frontier_advances_forward_only() {
-    let mut c = IndexCache::new(64);
-    c.record_array_scan(0, &[], 0, Some((5, 50)));
+  fn array_resume_advances_forward_only() {
+    let mut c = StructuralIndex::new(64);
+    c.merge_array_scan(0, &[], 0, Some((5, 50)));
     assert_eq!(
-      c.get(0, &[]).unwrap().frontier(),
-      Frontier::Array {
+      c.get(0, &[]).unwrap().resume_point(),
+      ResumePoint::Array {
         index: 5,
         offset: 50
       }
     );
     // A later, further index advances it.
-    c.record_array_scan(0, &[], 0, Some((9, 90)));
+    c.merge_array_scan(0, &[], 0, Some((9, 90)));
     assert_eq!(
-      c.get(0, &[]).unwrap().frontier(),
-      Frontier::Array {
+      c.get(0, &[]).unwrap().resume_point(),
+      ResumePoint::Array {
         index: 9,
         offset: 90
       }
     );
     // An earlier index does not rewind it.
-    c.record_array_scan(0, &[], 0, Some((3, 30)));
+    c.merge_array_scan(0, &[], 0, Some((3, 30)));
     assert_eq!(
-      c.get(0, &[]).unwrap().frontier(),
-      Frontier::Array {
+      c.get(0, &[]).unwrap().resume_point(),
+      ResumePoint::Array {
         index: 9,
         offset: 90
       }
@@ -475,9 +469,9 @@ mod tests {
 
   #[test]
   fn scalars_close_and_count_and_location() {
-    let mut c = IndexCache::new(64);
-    c.record_close(0, &[], ContainerKind::Array, 0, 42);
-    c.record_child_count(0, &[], ContainerKind::Array, 0, 7);
+    let mut c = StructuralIndex::new(64);
+    c.store_close(0, &[], ContainerKind::Array, 0, 42);
+    c.store_child_count(0, &[], ContainerKind::Array, 0, 7);
     let node = c.get(0, &[]).unwrap();
     assert_eq!(node.child_count(), Some(7));
     // `location` exposes the recorded close as a full `[start, end)`.
@@ -486,8 +480,8 @@ mod tests {
 
   #[test]
   fn whole_node_lru_keeps_held_within_budget() {
-    let budget = 50;
-    let mut c = IndexCache::new(budget);
+    let slot_budget = 50;
+    let mut c = StructuralIndex::new(slot_budget);
     // Insert many distinct object nodes, each with a few members.
     for i in 0..200u64 {
       let p = obj_path(&format!("path{i}"));
@@ -495,14 +489,18 @@ mod tests {
         member("x", i * 100, i * 100 + 4),
         member("y", i * 100 + 6, i * 100 + 10),
       ];
-      c.record_object_scan(i, &p, i * 100, &members, Some(i * 100));
+      c.merge_object_scan(i, &p, i * 100, &members, Some(i * 100));
       assert!(
-        c.held() <= budget,
-        "held {} exceeded budget {budget} at i={i}",
-        c.held()
+        c.slots_used() <= slot_budget,
+        "slots_used {} exceeded slot_budget {slot_budget} at i={i}",
+        c.slots_used()
       );
     }
-    assert_eq!(c.held(), c.recomputed_held(), "held accounting drifted");
+    assert_eq!(
+      c.slots_used(),
+      c.recomputed_slots_used(),
+      "slots_used accounting drifted"
+    );
     // The most-recently-written node survives.
     let last = obj_path("path199");
     assert!(c.get(199, &last).is_some());
@@ -510,23 +508,27 @@ mod tests {
 
   #[test]
   fn cache_stays_bounded_under_many_queries() {
-    let budget = 128;
-    let mut c = IndexCache::new(budget);
+    let slot_budget = 128;
+    let mut c = StructuralIndex::new(slot_budget);
     for round in 0..50u64 {
       for i in 0..64u64 {
         let p = obj_path(&format!("c{i}"));
-        c.record_object_scan(
+        c.merge_object_scan(
           0,
           &p,
           i * 1000,
           &[member("f", i * 1000, i * 1000 + 4)],
           Some(i * 1000),
         );
-        c.record_array_scan(round, &p, i * 7, Some((round as usize, i * 7)));
+        c.merge_array_scan(round, &p, i * 7, Some((round as usize, i * 7)));
       }
-      assert!(c.held() <= budget, "held {} over budget", c.held());
-      assert!(c.node_count() <= budget, "node_count over budget");
+      assert!(
+        c.slots_used() <= slot_budget,
+        "slots_used {} over slot_budget",
+        c.slots_used()
+      );
+      assert!(c.node_count() <= slot_budget, "node_count over slot_budget");
     }
-    assert_eq!(c.held(), c.recomputed_held());
+    assert_eq!(c.slots_used(), c.recomputed_slots_used());
   }
 }

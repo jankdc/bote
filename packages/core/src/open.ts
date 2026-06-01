@@ -18,12 +18,12 @@ export const DEFAULT_ITER_BATCH = 1000
 
 export interface OpenOptions {
   /**
-   * Children budget for the structural-index cache: the maximum number of
-   * cached container child offsets (object members plus per-container
-   * landmarks). The cache restores cross-query warmth - a later query that
-   * lands in an already-walked container starts its scan near the target - and
-   * caches no source bytes, so the resident-memory bound is untouched. `0`
-   * disables it entirely. Omit to use the native default (1024).
+   * Capacity of the structural-index cache, in slots: one slot per cached
+   * container plus one per tabled object member. The cache restores cross-query
+   * warmth - a later query that lands in an already-walked container starts its
+   * scan near the target - and caches no source bytes, so the resident-memory
+   * bound is untouched. `0` disables it entirely. Omit to use the native
+   * default (1024).
    */
   indexCacheEntries?: number
 }

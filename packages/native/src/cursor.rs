@@ -16,9 +16,9 @@ use napi::bindgen_prelude::{Either, Error as NapiError};
 use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
-use crate::chunks::ByteWindow;
+use crate::chunks::ChunkWindow;
 use crate::path::{self, Segment};
-use crate::resolve::{ChildEntry, Children, ContainerKind, ValueLocation};
+use crate::resolve::{ChildEntry, ContainerCursor, ContainerKind, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
@@ -43,15 +43,9 @@ pub struct IterArgs {
 pub struct Cursor {
   session: Arc<Session>,
   anchor: Option<ValueLocation>,
-  /// For sub-cursors yielded by `walk`: the key (for object members) or
-  /// stringified index (for array elements). `None` for the root cursor.
-  key: Option<CursorKey>,
-}
-
-#[derive(Clone)]
-enum CursorKey {
-  Member(String),
-  Element(usize),
+  /// The child entry this cursor was yielded as by `walk` (member key or array
+  /// element index, plus its location). `None` for the root cursor.
+  entry: Option<ChildEntry>,
 }
 
 impl Cursor {
@@ -59,15 +53,15 @@ impl Cursor {
     Self {
       session,
       anchor: None,
-      key: None,
+      entry: None,
     }
   }
 
-  fn child(session: Arc<Session>, location: ValueLocation, key: CursorKey) -> Self {
+  fn child(session: Arc<Session>, entry: ChildEntry) -> Self {
     Self {
       session,
-      anchor: Some(location),
-      key: Some(key),
+      anchor: Some(entry.location()),
+      entry: Some(entry),
     }
   }
 
@@ -116,10 +110,10 @@ impl Cursor {
 
   #[napi(getter)]
   pub fn key(&self) -> Option<Either<String, u32>> {
-    match &self.key {
+    match &self.entry {
       None => None,
-      Some(CursorKey::Member(k)) => Some(Either::A(k.clone())),
-      Some(CursorKey::Element(i)) => Some(Either::B(*i as u32)),
+      Some(ChildEntry::Member { key, .. }) => Some(Either::A(key.clone())),
+      Some(ChildEntry::Element { index, .. }) => Some(Either::B(*index as u32)),
     }
   }
 
@@ -145,7 +139,7 @@ impl Cursor {
   }
 }
 
-/// State shared by `iter` and `walk`: the lazily-resolved container walker plus
+/// State shared by `iter` and `walk`: the lazily-resolved container cursor plus
 /// the byte window carried across yields. Each `next()` call locks this briefly
 /// to snapshot or update; awaits happen with the lock held (tokio Mutex).
 struct StreamCore {
@@ -154,17 +148,17 @@ struct StreamCore {
   initialized: bool,
   /// Set after first `next()` finishes initialization. `None` if the path didn't
   /// resolve, or resolved to a non-container (iteration yields nothing).
-  walker: Option<Children>,
+  child_cursor: Option<ContainerCursor>,
   /// `value_start` of the base container (`{`/`[`), once resolved. Lets the
-  /// stream record `close`/`child_count`/frontier landmarks on the base node.
+  /// stream record `close`/`child_count`/resume-point landmarks on the base node.
   base_value_start: Option<u64>,
   /// Children yielded so far - the child count once iteration runs to the end.
   yielded: u64,
   /// Byte window reused across yields. At rest it holds at most the single chunk
-  /// covering the walker's `next_offset`, so the next yield's first read is a
+  /// covering the child_cursor's `next_offset`, so the next yield's first read is a
   /// hit; everything else is pruned after each yield, bounding resident chunks
   /// to ~1 between yields.
-  window: ByteWindow,
+  window: ChunkWindow,
 }
 
 impl StreamCore {
@@ -173,7 +167,7 @@ impl StreamCore {
       path,
       anchor_start,
       initialized: false,
-      walker: None,
+      child_cursor: None,
       base_value_start: None,
       yielded: 0,
       window: session.new_window(),
@@ -214,14 +208,14 @@ impl IterState {
   }
 }
 
-/// Resolve the path and open its container walker, pruning to the frontier so
+/// Resolve the path and open its container cursor, pruning to the scan position so
 /// the first yield's read is hot. Shared by `iter` and `walk`; `select`
 /// compilation (iter-only) happens in the caller before this runs.
 async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
   if let Some(start) = session.locate_at(&core.path, core.anchor_start).await? {
     core.base_value_start = Some(start);
-    core.walker = session.enter_container(start, &mut core.window).await?;
-    if let Some(w) = &core.walker {
+    core.child_cursor = session.enter_container(start, &mut core.window).await?;
+    if let Some(w) = &core.child_cursor {
       session.prune_window(&mut core.window, w.next_offset);
     } else {
       core.window.clear();
@@ -231,14 +225,14 @@ async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<()
   Ok(())
 }
 
-/// Record an array frontier landmark on early termination (`complete`) so a
+/// Record an array resume point on early termination (`complete`) so a
 /// later random `get([base, N])` resumes near the stop point. Only arrays: an
-/// object frontier would claim its prefix members are tabled, but the streaming
+/// object resume_point would claim its prefix members are tabled, but the streaming
 /// path doesn't table them. A no-op before any element boundary is passed.
 fn record_early_break(session: &Session, core: &StreamCore) {
-  if let (Some(w), Some(vs)) = (core.walker.as_ref(), core.base_value_start) {
+  if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
     if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
-      session.record_array_frontier(core.anchor_start, &core.path, vs, w.index, w.next_offset);
+      session.store_array_resume_point(core.anchor_start, &core.path, vs, w.index, w.next_offset);
     }
   }
 }
@@ -246,7 +240,7 @@ fn record_early_break(session: &Session, core: &StreamCore) {
 /// Release the window held by an iterator on early termination (`complete`).
 fn release_core(core: &mut StreamCore) {
   core.window.clear();
-  core.walker = None;
+  core.child_cursor = None;
 }
 
 #[napi(async_iterator)]
@@ -303,7 +297,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         locate_and_enter(&session, &mut guard.core)
           .await
           .map_err(map_err)?;
-        if let Some(w) = guard.core.walker.as_ref() {
+        if let Some(w) = guard.core.child_cursor.as_ref() {
           if w.kind == ContainerKind::Object {
             release_core(&mut guard.core);
             return Err(NapiError::from_reason(
@@ -323,7 +317,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       let batch = *batch;
       let with_key = *with_key;
       let StreamCore {
-        walker,
+        child_cursor,
         window,
         path,
         anchor_start,
@@ -331,7 +325,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         yielded,
         ..
       } = core;
-      let Some(walker) = walker.as_mut() else {
+      let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
       // Items are materialized eagerly and accumulated here; the window is
@@ -341,18 +335,18 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       let result: Result<Option<serde_json::Value>, SessionError> = async {
         let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
         loop {
-          let Some(child) = session.next_child(walker, window).await? else {
-            // Exhausted: the walker sits AT the close. Record the array's
+          let Some(child) = session.next_child(child_cursor, window).await? else {
+            // Exhausted: the child_cursor sits AT the close. Record the array's
             // child count + close on the base node (a one-time exit scalar).
             // iter only ever runs over arrays (objects are gated above).
             if let Some(vs) = *base_value_start {
-              session.record_child_count(*anchor_start, path, ContainerKind::Array, vs, *yielded);
-              session.record_close(
+              session.store_child_count(*anchor_start, path, ContainerKind::Array, vs, *yielded);
+              session.store_close(
                 *anchor_start,
                 path,
                 ContainerKind::Array,
                 vs,
-                walker.next_offset + 1,
+                child_cursor.next_offset + 1,
               );
             }
             if buf.is_empty() {
@@ -372,7 +366,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
             }
             None => session.materialize(child.location(), window).await?,
           };
-          session.prune_window(window, walker.next_offset);
+          session.prune_window(window, child_cursor.next_offset);
           let item = match key {
             Some(k) => serde_json::Value::Array(vec![k, value]),
             None => value,
@@ -385,8 +379,8 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       }
       .await;
       // End-of-next defensive prune: any error path also lands here so abandoned
-      // iterators don't retain chunks past the frontier.
-      session.prune_window(window, walker.next_offset);
+      // iterators don't retain chunks past the scan position.
+      session.prune_window(window, child_cursor.next_offset);
       result.map_err(map_err)
     }
   }
@@ -444,7 +438,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
           .map_err(map_err)?;
       }
       let StreamCore {
-        walker,
+        child_cursor,
         window,
         path,
         anchor_start,
@@ -452,26 +446,31 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         yielded,
         ..
       } = &mut *guard;
-      let Some(walker) = walker.as_mut() else {
+      let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
-      let entry = session.next_child(walker, window).await.map_err(map_err)?;
-      session.prune_window(window, walker.next_offset);
+      let entry = session
+        .next_child(child_cursor, window)
+        .await
+        .map_err(map_err)?;
+      session.prune_window(window, child_cursor.next_offset);
       let Some(child) = entry else {
-        // Exhausted: the walker sits AT the close. Record child count + close on
+        // Exhausted: the child_cursor sits AT the close. Record child count + close on
         // the base node - works for both object and array bases.
         if let Some(vs) = *base_value_start {
-          session.record_child_count(*anchor_start, path, walker.kind, vs, *yielded);
-          session.record_close(*anchor_start, path, walker.kind, vs, walker.next_offset + 1);
+          session.store_child_count(*anchor_start, path, child_cursor.kind, vs, *yielded);
+          session.store_close(
+            *anchor_start,
+            path,
+            child_cursor.kind,
+            vs,
+            child_cursor.next_offset + 1,
+          );
         }
         return Ok(None);
       };
       *yielded += 1;
-      let key = match &child {
-        ChildEntry::Member { key, .. } => CursorKey::Member(key.clone()),
-        ChildEntry::Element { index, .. } => CursorKey::Element(*index),
-      };
-      Ok(Some(Cursor::child(session.clone(), child.location(), key)))
+      Ok(Some(Cursor::child(session.clone(), child)))
     }
   }
 
@@ -494,7 +493,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
 mod tests {
   use super::*;
   use crate::session::MAX_BURST;
-  use crate::source::{InMemorySource, Source};
+  use crate::source::{ByteStream, InMemoryStream};
   use napi::bindgen_prelude::AsyncGenerator;
 
   fn items_path() -> Vec<Segment> {
@@ -515,11 +514,11 @@ mod tests {
     doc.into_bytes()
   }
 
-  fn session(items: usize, chunk_size: usize) -> Arc<Session> {
-    let source: Arc<dyn Source> = Arc::new(InMemorySource::new(array_doc(items)));
+  fn session(items: usize, chunk_bytes: usize) -> Arc<Session> {
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(array_doc(items)));
     Session::new(
       source,
-      chunk_size,
+      chunk_bytes,
       crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
     )
     .unwrap()
@@ -539,7 +538,7 @@ mod tests {
     }
     assert!(
       !w.state.lock().await.window.is_empty(),
-      "walk should hold a frontier chunk between yields"
+      "walk should hold a resume_point chunk between yields"
     );
 
     w.complete(None).await.unwrap();
@@ -547,7 +546,10 @@ mod tests {
     {
       let guard = w.state.lock().await;
       assert!(guard.window.is_empty(), "complete() must clear the window");
-      assert!(guard.walker.is_none(), "complete() must drop the walker");
+      assert!(
+        guard.child_cursor.is_none(),
+        "complete() must drop the child_cursor"
+      );
     }
     assert!(w.next(None).await.unwrap().is_none());
   }
@@ -599,7 +601,7 @@ mod tests {
     {
       let guard = it.state.lock().await;
       assert!(guard.core.window.is_empty());
-      assert!(guard.core.walker.is_none());
+      assert!(guard.core.child_cursor.is_none());
     }
     assert!(it.next(None).await.unwrap().is_none());
   }
@@ -615,7 +617,7 @@ mod tests {
       guard.core.window.is_empty(),
       "complete() must clear the window after a batch"
     );
-    assert!(guard.core.walker.is_none());
+    assert!(guard.core.child_cursor.is_none());
   }
 
   #[tokio::test]
@@ -652,6 +654,9 @@ mod tests {
     );
     let guard = it.state.lock().await;
     assert!(guard.core.window.is_empty(), "gate must release the window");
-    assert!(guard.core.walker.is_none(), "gate must drop the walker");
+    assert!(
+      guard.core.child_cursor.is_none(),
+      "gate must drop the child_cursor"
+    );
   }
 }

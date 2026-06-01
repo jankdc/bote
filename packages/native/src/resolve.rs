@@ -7,7 +7,7 @@
 
 use crate::path::Segment;
 use crate::simd::ScanCarry;
-use crate::walker::{AdvanceCommas, TraverseError, Walker};
+use crate::walker::{CommaStop, TraverseError, Walker};
 
 /// Byte range `[start, end)` covering a JSON value in the source document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,41 +16,42 @@ pub struct ValueLocation {
   pub end: u64,
 }
 
-/// Seed for resuming a scan inside a container the cache has already walked
-/// (see `index_cache`). The resolver enters the container directly at this
-/// landmark instead of reading the open byte and scanning from the start.
-#[derive(Debug, Clone, Copy)]
-pub enum ResumeHint {
+/// A saved position inside a container that a re-entering scan jumps to,
+/// instead of rescanning from the container's open. Stored in the structural-
+/// index cache (`index_cache`) and consumed by the resolver as a seed. Shared
+/// by both: the cache stores one, the resolver resumes from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumePoint {
   /// Object: resume the member scan from this high-water offset.
-  ObjectFrontier { offset: u64 },
+  Object { offset: u64 },
   /// Array: resume the comma popcount from element `index` at `offset`.
-  ArrayFrontier { index: usize, offset: u64 },
+  Array { index: usize, offset: u64 },
 }
 
 /// Child offsets a scan passed over, collected for the structural-index cache.
-/// One [`ContainerScan`] per container the resolver entered; `session` drains
+/// One [`ContainerRecord`] per container the resolver entered; `session` drains
 /// these into `index_cache` after the drive. Plain data - no cache dependency.
 #[derive(Debug, Clone, Default)]
-pub struct ScanHarvest {
-  pub containers: Vec<ContainerScan>,
+pub struct ScanRecord {
+  pub containers: Vec<ContainerRecord>,
 }
 
 /// What one entered container yielded during a scan.
 #[derive(Debug, Clone)]
-pub struct ContainerScan {
+pub struct ContainerRecord {
   /// The container is `path[..seg]` from the scan's anchor.
   pub seg: usize,
   pub kind: ContainerKind,
   /// Offset of the container's `{`/`[`.
   pub value_start: u64,
-  /// Object members seen, in scan order: `(name, member_start, value_start)`.
+  /// Object members seen, in scan order: `(name, key_start, value_start)`.
   /// Empty for arrays.
   pub members: Vec<(Box<str>, u64, u64)>,
   /// Object only: the resume offset where the scan ended - the matched member's
   /// start, or the close `}` position. The high-water member boundary.
-  pub object_terminal: Option<u64>,
+  pub object_resume: Option<u64>,
   /// Array only: `(resolved_index, element_offset)` of the furthest element.
-  pub array_frontier: Option<(usize, u64)>,
+  pub array_resume: Option<(usize, u64)>,
 }
 
 /// Per-query resolver state. Persisted across `ChunkMiss` retries so a long
@@ -65,13 +66,13 @@ pub struct ResolveState {
   start: u64,
   /// Per-segment scan state. `None` before descending into a container or after
   /// a segment has been fully resolved.
-  loop_state: Option<LoopState>,
-  /// Cache seed for the first container entered; consumed when its `loop_state`
+  segment_scan: Option<SegmentScan>,
+  /// Cache seed for the first container entered; consumed when its `segment_scan`
   /// is created. `None` for a cold resolve.
-  seed_hint: Option<ResumeHint>,
-  /// Child offsets harvested for the cache, or `None` when caching is disabled
+  seed: Option<ResumePoint>,
+  /// Child offsets collected for the cache, or `None` when caching is disabled
   /// (no per-member decode/alloc on the hot path).
-  harvest: Option<ScanHarvest>,
+  scan_record: Option<ScanRecord>,
 }
 
 /// Per-iteration scan state for `step_object` / `step_array`. Flattened across
@@ -79,7 +80,7 @@ pub struct ResolveState {
 /// fields (the comma-bitmap fast path needs `index`, `depth`, and `carry` so a
 /// `ChunkMiss` mid-scan can resume without losing them).
 #[derive(Debug, Clone)]
-struct LoopState {
+struct SegmentScan {
   kind: ContainerKind,
   /// Byte offset where the next iteration begins.
   offset: u64,
@@ -97,35 +98,30 @@ struct LoopState {
 impl ResolveState {
   /// Start resolving `path` from segment `segment_idx` at `start` (the value
   /// start of the container `path[..segment_idx]`), optionally seeded at a cache
-  /// landmark and optionally harvesting child offsets for the cache.
-  pub fn resume(
-    start: u64,
-    segment_idx: usize,
-    seed_hint: Option<ResumeHint>,
-    harvest: bool,
-  ) -> Self {
+  /// landmark and optionally collecting child offsets for the cache.
+  pub fn resume(start: u64, segment_idx: usize, seed: Option<ResumePoint>, collect: bool) -> Self {
     Self {
       segment_idx,
       start,
-      loop_state: None,
-      seed_hint,
-      harvest: harvest.then(ScanHarvest::default),
+      segment_scan: None,
+      seed,
+      scan_record: collect.then(ScanRecord::default),
     }
   }
 
   /// Lowest offset a resumed step might still read, including the key
-  /// `read_range` (which reads behind the scan frontier but never behind the
-  /// current iteration's start). The retention floor for the byte window.
-  pub fn floor(&self) -> u64 {
-    match &self.loop_state {
+  /// `read_range` (which reads behind the scan position but never behind the
+  /// current iteration's start). The retention bound for the byte window.
+  pub fn min_reachable(&self) -> u64 {
+    match &self.segment_scan {
       Some(ls) => ls.offset,
       None => self.start,
     }
   }
 
-  /// Take the harvested child offsets (if caching was enabled) for write-back.
-  pub fn take_harvest(&mut self) -> Option<ScanHarvest> {
-    self.harvest.take()
+  /// Take the collected child offsets (if caching was enabled) for write-back.
+  pub fn take_scan_record(&mut self) -> Option<ScanRecord> {
+    self.scan_record.take()
   }
 }
 
@@ -135,30 +131,30 @@ pub fn resolve_step(
   path: &[Segment],
   state: &mut ResolveState,
 ) -> Result<Option<u64>, TraverseError> {
-  // Disjoint field borrows: `loop_state` and `harvest` are mutated together
+  // Disjoint field borrows: `segment_scan` and `scan_record` are mutated together
   // below, which a single `&mut state` couldn't express.
   let ResolveState {
     segment_idx,
     start,
-    loop_state,
-    seed_hint,
-    harvest,
+    segment_scan,
+    seed,
+    scan_record,
   } = state;
   while *segment_idx < path.len() {
-    if loop_state.is_none() {
-      let (kind, value_start, ls) = if let Some(hint) = seed_hint.take() {
+    if segment_scan.is_none() {
+      let (kind, value_start, ls) = if let Some(hint) = seed.take() {
         // Seeded resume: kind and scan position come from the cache landmark; the
         // open byte is never read (no I/O for a cached level). Only ever consumed
         // on the first container entered.
         let ls = match hint {
-          ResumeHint::ObjectFrontier { offset } => LoopState {
+          ResumePoint::Object { offset } => SegmentScan {
             kind: ContainerKind::Object,
             offset,
             index: 0,
             depth: 0,
             carry: ScanCarry::default(),
           },
-          ResumeHint::ArrayFrontier { index, offset } => LoopState {
+          ResumePoint::Array { index, offset } => SegmentScan {
             kind: ContainerKind::Array,
             offset,
             index,
@@ -179,7 +175,7 @@ pub fn resolve_step(
           b'[' => ContainerKind::Array,
           _ => return Ok(None),
         };
-        let ls = LoopState {
+        let ls = SegmentScan {
           kind,
           offset: s + 1,
           index: 0,
@@ -188,21 +184,21 @@ pub fn resolve_step(
         };
         (kind, s, ls)
       };
-      if let Some(h) = harvest.as_mut() {
-        h.containers.push(ContainerScan {
+      if let Some(h) = scan_record.as_mut() {
+        h.containers.push(ContainerRecord {
           seg: *segment_idx,
           kind,
           value_start,
           members: Vec::new(),
-          object_terminal: None,
-          array_frontier: None,
+          object_resume: None,
+          array_resume: None,
         });
       }
-      *loop_state = Some(ls);
+      *segment_scan = Some(ls);
     }
     let segment = &path[*segment_idx];
-    let ls = loop_state.as_mut().expect("set just above");
-    let cs = harvest.as_mut().and_then(|h| h.containers.last_mut());
+    let ls = segment_scan.as_mut().expect("set just above");
+    let cs = scan_record.as_mut().and_then(|h| h.containers.last_mut());
     let descend = match (ls.kind, segment) {
       (ContainerKind::Object, Segment::Member(name)) => step_object(walker, name, ls, cs)?,
       (ContainerKind::Array, Segment::Element(idx)) => step_array(walker, *idx, ls, cs)?,
@@ -215,7 +211,7 @@ pub fn resolve_step(
       Some(vs) => {
         *start = vs;
         *segment_idx += 1;
-        *loop_state = None;
+        *segment_scan = None;
       }
       None => return Ok(None),
     }
@@ -240,10 +236,10 @@ fn member_value_start(walker: &mut Walker, key_close: u64) -> Result<u64, Traver
 fn step_object(
   walker: &mut Walker,
   target: &str,
-  state: &mut LoopState,
-  mut cs: Option<&mut ContainerScan>,
+  state: &mut SegmentScan,
+  mut cs: Option<&mut ContainerRecord>,
 ) -> Result<Option<u64>, TraverseError> {
-  let harvesting = cs.is_some();
+  let collecting = cs.is_some();
   loop {
     let iter_offset = state.offset;
     let offset = walker.skip_whitespace(iter_offset)?;
@@ -251,7 +247,7 @@ fn step_object(
       None => return Err(TraverseError::UnexpectedEof(offset)),
       Some(b'}') => {
         if let Some(cs) = cs.as_deref_mut() {
-          cs.object_terminal = Some(offset);
+          cs.object_resume = Some(offset);
         }
         return Ok(None);
       }
@@ -264,12 +260,12 @@ fn step_object(
 
     let target_bytes = target.as_bytes();
     let raw_len = (key_close - offset).saturating_sub(1) as usize;
-    // When harvesting we need the decoded key for the cache table, so every
+    // When collecting we need the decoded key for the cache table, so every
     // scanned key is decoded. Otherwise the fast path holds: JSON escapes only
     // shrink a string's byte count, so a raw span shorter than the target can't
     // match, skipping the `read_range` allocation entirely.
     let mut decoded: Option<String> = None;
-    let matches = if !harvesting {
+    let matches = if !collecting {
       if raw_len < target_bytes.len() {
         false
       } else {
@@ -292,7 +288,7 @@ fn step_object(
         if let Some(name) = decoded.take() {
           cs.members.push((name.into(), iter_offset, value_start));
         }
-        cs.object_terminal = Some(iter_offset);
+        cs.object_resume = Some(iter_offset);
       }
       return Ok(Some(value_start));
     }
@@ -312,13 +308,13 @@ fn step_object(
       }
       Some(b'}') => {
         // Last member of the object (no trailing comma). It was fully scanned,
-        // so it must be recorded before the terminal advances the frontier to
-        // the close - otherwise the frontier would claim a member it skipped.
+        // so it must be recorded before the resume point advances to
+        // the close - otherwise the resume_point would claim a member it skipped.
         if let Some(cs) = cs.as_deref_mut() {
           if let Some(name) = decoded.take() {
             cs.members.push((name.into(), iter_offset, value_start));
           }
-          cs.object_terminal = Some(after);
+          cs.object_resume = Some(after);
         }
         return Ok(None);
       }
@@ -350,8 +346,8 @@ fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
 fn step_array(
   walker: &mut Walker,
   target_index: usize,
-  state: &mut LoopState,
-  mut cs: Option<&mut ContainerScan>,
+  state: &mut SegmentScan,
+  mut cs: Option<&mut ContainerRecord>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
   // per-element skip_value calls. Intermediate positions aren't cached (only the
@@ -359,7 +355,7 @@ fn step_array(
   while state.index < target_index {
     let needed = target_index - state.index;
     match walker.advance_top_level_commas(state.offset, state.depth, needed, state.carry)? {
-      AdvanceCommas::Found {
+      CommaStop::Found {
         offset_after_comma,
         consumed,
       } => {
@@ -369,11 +365,11 @@ fn step_array(
         // Just past a depth-0 comma is an element boundary - outside any string.
         state.carry = ScanCarry::default();
       }
-      AdvanceCommas::ArrayClosed { consumed: _ } => {
+      CommaStop::ArrayClosed { consumed: _ } => {
         // The array ended before the target index existed.
         return Ok(None);
       }
-      AdvanceCommas::Partial {
+      CommaStop::Partial {
         offset,
         depth,
         consumed,
@@ -384,7 +380,7 @@ fn step_array(
         state.depth = depth;
         state.carry = carry;
         // Loop: the next iteration re-enters the fast path and faults the
-        // now-needed chunk via `window64`.
+        // now-needed chunk via `block_at`.
       }
     }
   }
@@ -399,7 +395,7 @@ fn step_array(
     }
     if iter_index == target_index {
       if let Some(cs) = cs.as_deref_mut() {
-        cs.array_frontier = Some((target_index, offset));
+        cs.array_resume = Some((target_index, offset));
       }
       return Ok(Some(offset));
     }
@@ -432,7 +428,7 @@ pub enum ContainerKind {
 /// so repeated `next_child` calls re-run `skip_whitespace` -> `byte_at` -> see
 /// the close byte -> return `None` idempotently.
 #[derive(Debug, Clone)]
-pub struct Children {
+pub struct ContainerCursor {
   pub kind: ContainerKind,
   pub next_offset: u64,
   pub index: usize,
@@ -461,12 +457,12 @@ impl ChildEntry {
   }
 }
 
-/// Position a [`Children`] at the first child of the container that begins at
+/// Position a [`ContainerCursor`] at the first child of the container that begins at
 /// `value_start`. Returns `Ok(None)` if the value isn't a container.
 pub fn enter_container(
   walker: &mut Walker,
   value_start: u64,
-) -> Result<Option<Children>, TraverseError> {
+) -> Result<Option<ContainerCursor>, TraverseError> {
   let open = walker.skip_whitespace(value_start)?;
   let byte = walker
     .byte_at(open)?
@@ -476,35 +472,35 @@ pub fn enter_container(
     b'[' => ContainerKind::Array,
     _ => return Ok(None),
   };
-  Ok(Some(Children {
+  Ok(Some(ContainerCursor {
     kind,
     next_offset: open + 1,
     index: 0,
   }))
 }
 
-/// Advance `cw` to the next child entry. Returns `Ok(None)` when the container
-/// is exhausted. Idempotent: after exhaustion `cw.next_offset` is left AT the
+/// Advance `cursor` to the next child entry. Returns `Ok(None)` when the container
+/// is exhausted. Idempotent: after exhaustion `cursor.next_offset` is left AT the
 /// close byte, so subsequent calls re-detect it and keep returning `None`.
 pub fn next_child(
   walker: &mut Walker,
-  cw: &mut Children,
+  cursor: &mut ContainerCursor,
 ) -> Result<Option<ChildEntry>, TraverseError> {
-  match cw.kind {
-    ContainerKind::Object => next_object_member(walker, cw),
-    ContainerKind::Array => next_array_element(walker, cw),
+  match cursor.kind {
+    ContainerKind::Object => next_object_member(walker, cursor),
+    ContainerKind::Array => next_array_element(walker, cursor),
   }
 }
 
 fn next_object_member(
   walker: &mut Walker,
-  cw: &mut Children,
+  cursor: &mut ContainerCursor,
 ) -> Result<Option<ChildEntry>, TraverseError> {
-  let offset = walker.skip_whitespace(cw.next_offset)?;
+  let offset = walker.skip_whitespace(cursor.next_offset)?;
   match walker.byte_at(offset)? {
     None => return Err(TraverseError::UnexpectedEof(offset)),
     Some(b'}') => {
-      cw.next_offset = offset;
+      cursor.next_offset = offset;
       return Ok(None);
     }
     Some(b'"') => {}
@@ -518,7 +514,7 @@ fn next_object_member(
   let value_start = member_value_start(walker, key_close)?;
   let value_end = walker.skip_value(value_start)?;
   let after = walker.skip_whitespace(value_end)?;
-  cw.next_offset = match walker.byte_at(after)? {
+  cursor.next_offset = match walker.byte_at(after)? {
     Some(b',') => after + 1,
     Some(b'}') => after,
     Some(_) | None => return Err(TraverseError::Malformed(after)),
@@ -534,13 +530,13 @@ fn next_object_member(
 
 fn next_array_element(
   walker: &mut Walker,
-  cw: &mut Children,
+  cursor: &mut ContainerCursor,
 ) -> Result<Option<ChildEntry>, TraverseError> {
-  let offset = walker.skip_whitespace(cw.next_offset)?;
+  let offset = walker.skip_whitespace(cursor.next_offset)?;
   match walker.byte_at(offset)? {
     None => return Err(TraverseError::UnexpectedEof(offset)),
     Some(b']') => {
-      cw.next_offset = offset;
+      cursor.next_offset = offset;
       return Ok(None);
     }
     _ => {}
@@ -548,13 +544,13 @@ fn next_array_element(
   let value_start = offset;
   let value_end = walker.skip_value(value_start)?;
   let after = walker.skip_whitespace(value_end)?;
-  cw.next_offset = match walker.byte_at(after)? {
+  cursor.next_offset = match walker.byte_at(after)? {
     Some(b',') => after + 1,
     Some(b']') => after,
     Some(_) | None => return Err(TraverseError::Malformed(after)),
   };
-  let index = cw.index;
-  cw.index += 1;
+  let index = cursor.index;
+  cursor.index += 1;
   Ok(Some(ChildEntry::Element {
     index,
     location: ValueLocation {
@@ -567,14 +563,14 @@ fn next_array_element(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::chunks::ByteWindow;
+  use crate::chunks::ChunkWindow;
   use bytes::Bytes;
 
-  /// A [`ByteWindow`] holding every chunk of `source`, so a single
+  /// A [`ChunkWindow`] holding every chunk of `source`, so a single
   /// [`resolve_step`] resolves without faulting.
-  fn full_window(source: &[u8]) -> ByteWindow {
+  fn full_window(source: &[u8]) -> ChunkWindow {
     let cs = 64u64;
-    let mut w = ByteWindow::new(cs, source.len() as u64);
+    let mut w = ChunkWindow::new(cs, source.len() as u64);
     let mut off = 0u64;
     while (off as usize) < source.len() {
       let end = (off as usize + cs as usize).min(source.len());
@@ -584,7 +580,7 @@ mod tests {
     w
   }
 
-  fn resolve_once(win: &ByteWindow, path: &[Segment], state: &mut ResolveState) -> Option<u64> {
+  fn resolve_once(win: &ChunkWindow, path: &[Segment], state: &mut ResolveState) -> Option<u64> {
     let mut w = Walker::new(win);
     resolve_step(&mut w, path, state).expect("all chunks resident: no miss, no error")
   }
@@ -602,8 +598,7 @@ mod tests {
     let mut cold = ResolveState::resume(0, 0, None, false);
     let cold_c = resolve_once(&win, &[member("c")], &mut cold);
 
-    let mut seeded =
-      ResolveState::resume(0, 0, Some(ResumeHint::ObjectFrontier { offset: 7 }), false);
+    let mut seeded = ResolveState::resume(0, 0, Some(ResumePoint::Object { offset: 7 }), false);
     let seeded_c = resolve_once(&win, &[member("c")], &mut seeded);
 
     assert_eq!(cold_c, seeded_c);
@@ -622,7 +617,7 @@ mod tests {
     let mut seeded = ResolveState::resume(
       0,
       0,
-      Some(ResumeHint::ArrayFrontier {
+      Some(ResumePoint::Array {
         index: 1,
         offset: 4,
       }),
@@ -635,13 +630,13 @@ mod tests {
   }
 
   #[test]
-  fn harvest_tables_every_scanned_member() {
+  fn records_every_scanned_member() {
     let src = br#"{"a":1,"b":2,"c":3}"#;
     let win = full_window(src);
     let mut st = ResolveState::resume(0, 0, None, true);
     resolve_once(&win, &[member("c")], &mut st);
 
-    let h = st.take_harvest().expect("harvesting");
+    let h = st.take_scan_record().expect("collecting");
     assert_eq!(h.containers.len(), 1);
     let cs = &h.containers[0];
     assert_eq!(cs.seg, 0);
@@ -649,11 +644,11 @@ mod tests {
     let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
     assert_eq!(names, vec!["a", "b", "c"]);
     // Matched "c" starts at offset 13 - the high-water resume point.
-    assert_eq!(cs.object_terminal, Some(13));
+    assert_eq!(cs.object_resume, Some(13));
   }
 
   #[test]
-  fn harvest_tables_last_member_on_miss() {
+  fn records_last_member_on_miss() {
     // Target absent: the scan runs to the close. Every member - including the
     // last, which ends with `}` not `,` - must be tabled, or a later lookup of
     // that member would resume past it and miss it.
@@ -662,29 +657,29 @@ mod tests {
     let mut st = ResolveState::resume(0, 0, None, true);
     assert_eq!(resolve_once(&win, &[member("zzz")], &mut st), None);
 
-    let h = st.take_harvest().unwrap();
+    let h = st.take_scan_record().unwrap();
     let cs = &h.containers[0];
     let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
     assert_eq!(names, vec!["a", "b"], "the last member must be tabled too");
-    assert_eq!(cs.object_terminal, Some(12)); // the closing `}`
+    assert_eq!(cs.object_resume, Some(12)); // the closing `}`
   }
 
   #[test]
-  fn harvest_records_array_landmark() {
+  fn records_array_resume() {
     let src = b"[10,20,30,40]";
     let win = full_window(src);
     let mut st = ResolveState::resume(0, 0, None, true);
     resolve_once(&win, &[Segment::Element(2)], &mut st);
 
-    let h = st.take_harvest().expect("harvesting");
+    let h = st.take_scan_record().expect("collecting");
     let cs = &h.containers[0];
     assert!(cs.members.is_empty());
     // Element 2 ("30") starts at offset 7.
-    assert_eq!(cs.array_frontier, Some((2, 7)));
+    assert_eq!(cs.array_resume, Some((2, 7)));
   }
 
   #[test]
-  fn harvest_spans_nested_containers() {
+  fn record_spans_nested_containers() {
     // Two container levels: object "users" -> array element 1 -> object "name".
     let src = br#"{"users":[{"id":1},{"id":2,"name":"bo"}]}"#;
     let win = full_window(src);
@@ -696,12 +691,12 @@ mod tests {
     );
     assert!(got.is_some());
 
-    let h = st.take_harvest().expect("harvesting");
-    // One ContainerScan per entered container: root object, users array, element object.
+    let h = st.take_scan_record().expect("collecting");
+    // One ContainerRecord per entered container: root object, users array, element object.
     assert_eq!(h.containers.len(), 3);
     assert_eq!(h.containers[0].seg, 0);
     assert_eq!(h.containers[1].seg, 1);
     assert_eq!(h.containers[2].seg, 2);
-    assert_eq!(h.containers[1].array_frontier.map(|(i, _)| i), Some(1));
+    assert_eq!(h.containers[1].array_resume.map(|(i, _)| i), Some(1));
   }
 }

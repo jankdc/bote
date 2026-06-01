@@ -8,11 +8,11 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::chunks::ByteWindow;
+use crate::chunks::ChunkWindow;
 use crate::path::Segment;
 use crate::session::{doubling_burst, Query, Session, SessionError};
 use crate::simd::ScanCarry;
-use crate::walker::{AdvanceCommas, TraverseError, Walker};
+use crate::walker::{CommaStop, TraverseError, Walker};
 
 /// Count the children of the container `path` resolves to, with no
 /// materialization. A missing path or a non-container value is `0` (total and
@@ -36,14 +36,14 @@ pub async fn at(
   else {
     return Ok(0); // missing path
   };
-  let Some(cw) = session.enter_container(start, &mut q.window).await? else {
+  let Some(cursor) = session.enter_container(start, &mut q.window).await? else {
     return Ok(0); // not an object or array
   };
-  let kind = cw.kind;
-  let count = children(session, cw.next_offset, &mut q.window).await?;
+  let kind = cursor.kind;
+  let count = children(session, cursor.next_offset, &mut q.window).await?;
   // Record the child count (not the close: the counting scan carries the comma
   // count, not the close offset - see index_cache / the design doc).
-  session.record_child_count(anchor_start, path, kind, start, count);
+  session.store_child_count(anchor_start, path, kind, start, count);
   Ok(count)
 }
 
@@ -52,14 +52,14 @@ pub async fn at(
 async fn children(
   session: &Session,
   start: u64,
-  window: &mut ByteWindow,
+  window: &mut ChunkWindow,
 ) -> Result<u64, SessionError> {
   let mut state = CountState::new(start);
-  let floor = AtomicU64::new(start);
+  let min_reachable = AtomicU64::new(start);
   session
-    .drive(window, &floor, doubling_burst(), |walker| {
+    .drive(window, &min_reachable, doubling_burst(), |walker| {
       let r = count_step(walker, &mut state);
-      floor.store(state.offset, Ordering::Relaxed);
+      min_reachable.store(state.offset, Ordering::Relaxed);
       r
     })
     .await
@@ -114,8 +114,8 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
   loop {
     match walker.advance_top_level_commas(state.offset, state.depth, usize::MAX, state.carry)? {
       // Non-empty container: child count is depth-0 commas + 1.
-      AdvanceCommas::ArrayClosed { consumed } => return Ok(state.consumed + consumed as u64 + 1),
-      AdvanceCommas::Partial {
+      CommaStop::ArrayClosed { consumed } => return Ok(state.consumed + consumed as u64 + 1),
+      CommaStop::Partial {
         offset,
         depth,
         consumed,
@@ -128,7 +128,7 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
       }
       // Unreachable with `needed == usize::MAX` (the count never bottoms out),
       // but stay total: keep scanning from past the comma.
-      AdvanceCommas::Found {
+      CommaStop::Found {
         offset_after_comma,
         consumed,
       } => {

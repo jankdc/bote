@@ -8,7 +8,7 @@
 use std::simd::cmp::SimdPartialEq;
 use std::simd::Simd;
 
-use crate::simd::WINDOW;
+use crate::simd::BLOCK_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Structural {
@@ -45,8 +45,8 @@ impl Structural {
 /// (the closing-quote-exclusive string mask from [`crate::simd::scan_block`]).
 /// Callers compute the one word they need for the block they're scanning, with
 /// no per-chunk storage.
-pub fn structural_word(window: &[u8; WINDOW], in_string: u64, kind: Structural) -> u64 {
-  let v: Simd<u8, WINDOW> = Simd::from_array(*window);
+pub fn structural_word(block: &[u8; BLOCK_BYTES], in_string: u64, kind: Structural) -> u64 {
+  let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
   let raw = v.simd_eq(Simd::splat(kind.byte())).to_bitmask();
   raw & !in_string
 }
@@ -66,8 +66,8 @@ mod tests {
     positions
   }
 
-  fn block(s: &[u8]) -> [u8; WINDOW] {
-    let mut b = [b' '; WINDOW];
+  fn block(s: &[u8]) -> [u8; BLOCK_BYTES] {
+    let mut b = [b' '; BLOCK_BYTES];
     b[..s.len()].copy_from_slice(s);
     b
   }
