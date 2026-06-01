@@ -22,6 +22,11 @@ pub async fn at(
   path: &[Segment],
   anchor_start: u64,
 ) -> Result<u64, SessionError> {
+  // A repeat count is O(1): the prior scan cached the child count, so no chunk
+  // is faulted.
+  if let Some(n) = session.cached_child_count(anchor_start, path) {
+    return Ok(n);
+  }
   let mut q = Query::new(session);
   // run_locate (not run_resolve): we only need the container's start; the child
   // count comes from a per-comma scan started at the opener.
@@ -34,7 +39,12 @@ pub async fn at(
   let Some(cw) = session.enter_container(start, &mut q.window).await? else {
     return Ok(0); // not an object or array
   };
-  children(session, cw.next_offset, &mut q.window).await
+  let kind = cw.kind;
+  let count = children(session, cw.next_offset, &mut q.window).await?;
+  // Record the child count (not the close: the counting scan carries the comma
+  // count, not the close offset - see index_cache / the design doc).
+  session.record_child_count(anchor_start, path, kind, start, count);
+  Ok(count)
 }
 
 /// Count the children of the container whose body starts at `start` (the byte

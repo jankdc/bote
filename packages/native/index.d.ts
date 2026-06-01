@@ -63,7 +63,7 @@ export interface IterArgs {
  *                                    Required: the `@botejs/core` facade resolves the
  *                                    per-source default before calling in.
  */
-export declare function open(source: { size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
+export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

@@ -16,8 +16,8 @@ const User = z.object({
   name: z.string(),
   email: z.string(),
   details: z.object({
-    lastLoggedIn: z.number()
-  })
+    lastLoggedIn: z.number(),
+  }),
 })
 
 type User = z.infer<typeof User>
@@ -38,15 +38,15 @@ for await (const batch of cursor.iter('users', User)) {
 }
 
 // pick several fields into a named object to avoid resolving big items
-for await (const batch of cursor.iter('users', { 
-  select: { 
-    id: 'id', 
-    logged: ['details', 'lastLoggedIn']
+for await (const batch of cursor.iter('users', {
+  select: {
+    id: 'id',
+    logged: ['details', 'lastLoggedIn'],
   },
   schema: z.object({
     id: User.shape.id,
-    logged: User.shape.details.lastLoggedIn
-  })
+    logged: User.shape.details.lastLoggedIn,
+  }),
 })) {
   // batch: { id: string, logged: number }[]
   for (const userLog of batch) {
@@ -55,10 +55,10 @@ for await (const batch of cursor.iter('users', {
 }
 
 // or pick a single field
-for await (const batch of cursor.iter('users', { 
+for await (const batch of cursor.iter('users', {
   select: 'name',
-  schema: User.shape.name
-})) { 
+  schema: User.shape.name,
+})) {
   // batch: string[]
   for (const name of batch) {
     console.log({ name })
@@ -68,7 +68,7 @@ for await (const batch of cursor.iter('users', {
 // for open-ended per-child work (e.g. conditional reads, recursive descent, nested
 // iters), `walk` yields a subcursor positioned at each child:
 for await (const metaCursor of cursor.walk('meta')) {
-  if (metaCursor.key === "details") {
+  if (metaCursor.key === 'details') {
     const detailsValue = await metaCursor.get()
     console.log(detailsValue)
   }

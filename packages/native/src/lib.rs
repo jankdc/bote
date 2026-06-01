@@ -17,6 +17,9 @@ mod path;
 mod resolve;
 mod select;
 
+// structural-index cache (above resolve, below session)
+mod index_cache;
+
 // async orchestration
 mod session;
 
@@ -55,7 +58,7 @@ static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::ne
 #[napi]
 pub fn open(
   #[napi(
-    ts_arg_type = "{ size: number; chunkBytes: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
+    ts_arg_type = "{ size: number; chunkBytes: number; indexCacheEntries?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
   )]
   source: Object<'_>,
 ) -> napi::Result<Cursor> {
@@ -88,8 +91,27 @@ pub fn open(
     }
   };
 
-  let session = Session::new(Arc::new(JsSource::new(ts_read_fn, size as u64)), chunk_size)
-    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+  // indexCacheEntries is the structural-index cache's children budget. Optional;
+  // unlike chunkBytes it permits 0 (which disables the cache). Missing => the
+  // default. The core facade also validates, but enforce the same hygiene here.
+  let index_cache_budget = match source.get_named_property::<Option<f64>>("indexCacheEntries") {
+    Ok(Some(n)) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
+      n as usize
+    }
+    Ok(Some(n)) => {
+      return Err(napi::Error::from_reason(format!(
+        "indexCacheEntries must be a whole non-negative number of entries, got {n}"
+      )));
+    }
+    _ => crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
+  };
+
+  let session = Session::new(
+    Arc::new(JsSource::new(ts_read_fn, size as u64)),
+    chunk_size,
+    index_cache_budget,
+  )
+  .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
   Ok(Cursor::root(session))
 }

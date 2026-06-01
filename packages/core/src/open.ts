@@ -4,13 +4,7 @@ import { validatePath } from './path.ts'
 import type { Source, SourceReader } from './sources.ts'
 import { runStandardSchema, validateItem, type Path, type Segment, type StandardSchemaV1 } from './validate.ts'
 
-import {
-  splitArgs,
-  serializeSelect,
-  normalizeIterTail,
-  type IterOptions,
-  type VariadicPathArgs,
-} from './args.ts'
+import { splitArgs, serializeSelect, normalizeIterTail, type IterOptions, type VariadicPathArgs } from './args.ts'
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
@@ -21,6 +15,18 @@ export type IterIndex = number
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
+
+export interface OpenOptions {
+  /**
+   * Children budget for the structural-index cache: the maximum number of
+   * cached container child offsets (object members plus per-container
+   * landmarks). The cache restores cross-query warmth - a later query that
+   * lands in an already-walked container starts its scan near the target - and
+   * caches no source bytes, so the resident-memory bound is untouched. `0`
+   * disables it entirely. Omit to use the native default (1024).
+   */
+  indexCacheEntries?: number
+}
 
 export interface Cursor {
   /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
@@ -64,7 +70,13 @@ export interface RootCursor extends Cursor, AsyncDisposable {
  * The returned `RootCursor` owns the reader: `close()` (or `await using`)
  * drives the reader's own `close()` exactly once.
  */
-export async function open(source: Source): Promise<RootCursor> {
+export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
+  const indexCacheEntries = options?.indexCacheEntries
+  if (indexCacheEntries !== undefined && (!Number.isInteger(indexCacheEntries) || indexCacheEntries < 0)) {
+    throw new RangeError(
+      `open: indexCacheEntries must be a non-negative integer (0 disables), got ${indexCacheEntries}`,
+    )
+  }
   const reader = await source.open()
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
   let native: NativeCursor
@@ -72,6 +84,7 @@ export async function open(source: Source): Promise<RootCursor> {
     native = openNative({
       size: reader.size,
       chunkBytes,
+      indexCacheEntries,
       read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
     })
   } catch (err) {

@@ -16,6 +16,43 @@ pub struct ValueLocation {
   pub end: u64,
 }
 
+/// Seed for resuming a scan inside a container the cache has already walked
+/// (see `index_cache`). The resolver enters the container directly at this
+/// landmark instead of reading the open byte and scanning from the start.
+#[derive(Debug, Clone, Copy)]
+pub enum ResumeHint {
+  /// Object: resume the member scan from this high-water offset.
+  ObjectFrontier { offset: u64 },
+  /// Array: resume the comma popcount from element `index` at `offset`.
+  ArrayFrontier { index: usize, offset: u64 },
+}
+
+/// Child offsets a scan passed over, collected for the structural-index cache.
+/// One [`ContainerScan`] per container the resolver entered; `session` drains
+/// these into `index_cache` after the drive. Plain data - no cache dependency.
+#[derive(Debug, Clone, Default)]
+pub struct ScanHarvest {
+  pub containers: Vec<ContainerScan>,
+}
+
+/// What one entered container yielded during a scan.
+#[derive(Debug, Clone)]
+pub struct ContainerScan {
+  /// The container is `path[..seg]` from the scan's anchor.
+  pub seg: usize,
+  pub kind: ContainerKind,
+  /// Offset of the container's `{`/`[`.
+  pub value_start: u64,
+  /// Object members seen, in scan order: `(name, member_start, value_start)`.
+  /// Empty for arrays.
+  pub members: Vec<(Box<str>, u64, u64)>,
+  /// Object only: the resume offset where the scan ended - the matched member's
+  /// start, or the close `}` position. The high-water member boundary.
+  pub object_terminal: Option<u64>,
+  /// Array only: `(resolved_index, element_offset)` of the furthest element.
+  pub array_frontier: Option<(usize, u64)>,
+}
+
 /// Per-query resolver state. Persisted across `ChunkMiss` retries so a long
 /// array walk doesn't restart from the anchor every time a new chunk is faulted
 /// in - see [`resolve_step`].
@@ -29,6 +66,12 @@ pub struct ResolveState {
   /// Per-segment scan state. `None` before descending into a container or after
   /// a segment has been fully resolved.
   loop_state: Option<LoopState>,
+  /// Cache seed for the first container entered; consumed when its `loop_state`
+  /// is created. `None` for a cold resolve.
+  seed_hint: Option<ResumeHint>,
+  /// Child offsets harvested for the cache, or `None` when caching is disabled
+  /// (no per-member decode/alloc on the hot path).
+  harvest: Option<ScanHarvest>,
 }
 
 /// Per-iteration scan state for `step_object` / `step_array`. Flattened across
@@ -52,11 +95,21 @@ struct LoopState {
 }
 
 impl ResolveState {
-  pub fn new(start: u64) -> Self {
+  /// Start resolving `path` from segment `segment_idx` at `start` (the value
+  /// start of the container `path[..segment_idx]`), optionally seeded at a cache
+  /// landmark and optionally harvesting child offsets for the cache.
+  pub fn resume(
+    start: u64,
+    segment_idx: usize,
+    seed_hint: Option<ResumeHint>,
+    harvest: bool,
+  ) -> Self {
     Self {
-      segment_idx: 0,
+      segment_idx,
       start,
       loop_state: None,
+      seed_hint,
+      harvest: harvest.then(ScanHarvest::default),
     }
   }
 
@@ -69,6 +122,11 @@ impl ResolveState {
       None => self.start,
     }
   }
+
+  /// Take the harvested child offsets (if caching was enabled) for write-back.
+  pub fn take_harvest(&mut self) -> Option<ScanHarvest> {
+    self.harvest.take()
+  }
 }
 
 /// Drive the resolver forward against the current `state`.
@@ -77,47 +135,92 @@ pub fn resolve_step(
   path: &[Segment],
   state: &mut ResolveState,
 ) -> Result<Option<u64>, TraverseError> {
-  while state.segment_idx < path.len() {
-    if state.loop_state.is_none() {
-      // First entry into this segment - figure out the container kind. Commit
-      // `state.start` to the skipped-whitespace position before the byte fetch
-      // so a `ChunkMiss` from `byte_at` doesn't re-skip on retry.
-      let s = walker.skip_whitespace(state.start)?;
-      state.start = s;
-      let b = walker.byte_at(s)?.ok_or(TraverseError::UnexpectedEof(s))?;
-      let kind = match b {
-        b'{' => ContainerKind::Object,
-        b'[' => ContainerKind::Array,
-        _ => return Ok(None),
+  // Disjoint field borrows: `loop_state` and `harvest` are mutated together
+  // below, which a single `&mut state` couldn't express.
+  let ResolveState {
+    segment_idx,
+    start,
+    loop_state,
+    seed_hint,
+    harvest,
+  } = state;
+  while *segment_idx < path.len() {
+    if loop_state.is_none() {
+      let (kind, value_start, ls) = if let Some(hint) = seed_hint.take() {
+        // Seeded resume: kind and scan position come from the cache landmark; the
+        // open byte is never read (no I/O for a cached level). Only ever consumed
+        // on the first container entered.
+        let ls = match hint {
+          ResumeHint::ObjectFrontier { offset } => LoopState {
+            kind: ContainerKind::Object,
+            offset,
+            index: 0,
+            depth: 0,
+            carry: ScanCarry::default(),
+          },
+          ResumeHint::ArrayFrontier { index, offset } => LoopState {
+            kind: ContainerKind::Array,
+            offset,
+            index,
+            depth: 0,
+            carry: ScanCarry::default(),
+          },
+        };
+        (ls.kind, *start, ls)
+      } else {
+        // Cold entry - figure out the container kind. Commit `start` to the
+        // skipped-whitespace position before the byte fetch so a `ChunkMiss` from
+        // `byte_at` doesn't re-skip on retry.
+        let s = walker.skip_whitespace(*start)?;
+        *start = s;
+        let b = walker.byte_at(s)?.ok_or(TraverseError::UnexpectedEof(s))?;
+        let kind = match b {
+          b'{' => ContainerKind::Object,
+          b'[' => ContainerKind::Array,
+          _ => return Ok(None),
+        };
+        let ls = LoopState {
+          kind,
+          offset: s + 1,
+          index: 0,
+          depth: 0,
+          carry: ScanCarry::default(),
+        };
+        (kind, s, ls)
       };
-      state.loop_state = Some(LoopState {
-        kind,
-        offset: s + 1,
-        index: 0,
-        depth: 0,
-        carry: ScanCarry::default(),
-      });
+      if let Some(h) = harvest.as_mut() {
+        h.containers.push(ContainerScan {
+          seg: *segment_idx,
+          kind,
+          value_start,
+          members: Vec::new(),
+          object_terminal: None,
+          array_frontier: None,
+        });
+      }
+      *loop_state = Some(ls);
     }
-    let segment = &path[state.segment_idx];
-    let ls = state.loop_state.as_mut().expect("set just above");
+    let segment = &path[*segment_idx];
+    let ls = loop_state.as_mut().expect("set just above");
+    let cs = harvest.as_mut().and_then(|h| h.containers.last_mut());
     let descend = match (ls.kind, segment) {
-      (ContainerKind::Object, Segment::Member(name)) => step_object(walker, name, ls)?,
-      (ContainerKind::Array, Segment::Element(idx)) => step_array(walker, *idx, ls)?,
+      (ContainerKind::Object, Segment::Member(name)) => step_object(walker, name, ls, cs)?,
+      (ContainerKind::Array, Segment::Element(idx)) => step_array(walker, *idx, ls, cs)?,
       // Type mismatch (member-name into array, index into object) is a miss, not
       // an error - mirrors RFC 6901 where `/0` against an object resolves to
       // nothing.
       _ => return Ok(None),
     };
     match descend {
-      Some(value_start) => {
-        state.start = value_start;
-        state.segment_idx += 1;
-        state.loop_state = None;
+      Some(vs) => {
+        *start = vs;
+        *segment_idx += 1;
+        *loop_state = None;
       }
       None => return Ok(None),
     }
   }
-  Ok(Some(state.start))
+  Ok(Some(*start))
 }
 
 /// Given the offset of a member key's closing quote, skip the `:` separator
@@ -138,13 +241,20 @@ fn step_object(
   walker: &mut Walker,
   target: &str,
   state: &mut LoopState,
+  mut cs: Option<&mut ContainerScan>,
 ) -> Result<Option<u64>, TraverseError> {
+  let harvesting = cs.is_some();
   loop {
     let iter_offset = state.offset;
     let offset = walker.skip_whitespace(iter_offset)?;
     match walker.byte_at(offset)? {
       None => return Err(TraverseError::UnexpectedEof(offset)),
-      Some(b'}') => return Ok(None),
+      Some(b'}') => {
+        if let Some(cs) = cs.as_deref_mut() {
+          cs.object_terminal = Some(offset);
+        }
+        return Ok(None);
+      }
       Some(b'"') => {}
       Some(_) => return Err(TraverseError::Malformed(offset)),
     }
@@ -152,26 +262,66 @@ fn step_object(
       .next_string_close(offset + 1)?
       .ok_or(TraverseError::UnexpectedEof(offset))?;
 
-    // Fast path: JSON escapes only ever shrink a string's byte count, so if the
-    // raw byte span between the quotes is shorter than the target name, no
-    // decoding can make them equal - skip the `read_range` allocation entirely.
-    let raw_len = (key_close - offset).saturating_sub(1) as usize;
     let target_bytes = target.as_bytes();
-    let matches = if raw_len < target_bytes.len() {
-      false
+    let raw_len = (key_close - offset).saturating_sub(1) as usize;
+    // When harvesting we need the decoded key for the cache table, so every
+    // scanned key is decoded. Otherwise the fast path holds: JSON escapes only
+    // shrink a string's byte count, so a raw span shorter than the target can't
+    // match, skipping the `read_range` allocation entirely.
+    let mut decoded: Option<String> = None;
+    let matches = if !harvesting {
+      if raw_len < target_bytes.len() {
+        false
+      } else {
+        let raw = walker.read_range(offset, key_close + 1)?;
+        quoted_string_eq(&raw, target).map_err(|()| TraverseError::Malformed(offset))?
+      }
     } else {
       let raw = walker.read_range(offset, key_close + 1)?;
-      quoted_string_eq(&raw, target).map_err(|()| TraverseError::Malformed(offset))?
+      let name: String =
+        serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(offset))?;
+      let m = name == target;
+      decoded = Some(name);
+      m
     };
     let value_start = member_value_start(walker, key_close)?;
     if matches {
+      // Commit point for a match: no fallible call follows, so recording here is
+      // never redone by a retry.
+      if let Some(cs) = cs.as_deref_mut() {
+        if let Some(name) = decoded.take() {
+          cs.members.push((name.into(), iter_offset, value_start));
+        }
+        cs.object_terminal = Some(iter_offset);
+      }
       return Ok(Some(value_start));
     }
     let value_end = walker.skip_value(value_start)?;
     let after = walker.skip_whitespace(value_end)?;
     match walker.byte_at(after)? {
-      Some(b',') => state.offset = after + 1,
-      Some(b'}') => return Ok(None),
+      Some(b',') => {
+        // Commit point for a skip: `state` now advances past this member. A
+        // mid-iteration fault leaves `state` at `iter_offset` and records
+        // nothing, so the retry re-records exactly once.
+        state.offset = after + 1;
+        if let Some(cs) = cs.as_deref_mut() {
+          if let Some(name) = decoded.take() {
+            cs.members.push((name.into(), iter_offset, value_start));
+          }
+        }
+      }
+      Some(b'}') => {
+        // Last member of the object (no trailing comma). It was fully scanned,
+        // so it must be recorded before the terminal advances the frontier to
+        // the close - otherwise the frontier would claim a member it skipped.
+        if let Some(cs) = cs.as_deref_mut() {
+          if let Some(name) = decoded.take() {
+            cs.members.push((name.into(), iter_offset, value_start));
+          }
+          cs.object_terminal = Some(after);
+        }
+        return Ok(None);
+      }
       _ => return Err(TraverseError::Malformed(after)),
     }
   }
@@ -201,9 +351,11 @@ fn step_array(
   walker: &mut Walker,
   target_index: usize,
   state: &mut LoopState,
+  mut cs: Option<&mut ContainerScan>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
-  // per-element skip_value calls.
+  // per-element skip_value calls. Intermediate positions aren't cached (only the
+  // resolved element is a confirmed boundary), so nothing is recorded here.
   while state.index < target_index {
     let needed = target_index - state.index;
     match walker.advance_top_level_commas(state.offset, state.depth, needed, state.carry)? {
@@ -246,6 +398,9 @@ fn step_array(
       _ => {}
     }
     if iter_index == target_index {
+      if let Some(cs) = cs.as_deref_mut() {
+        cs.array_frontier = Some((target_index, offset));
+      }
       return Ok(Some(offset));
     }
     let value_end = walker.skip_value(offset)?;
@@ -407,4 +562,146 @@ fn next_array_element(
       end: value_end,
     },
   }))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::chunks::ByteWindow;
+  use bytes::Bytes;
+
+  /// A [`ByteWindow`] holding every chunk of `source`, so a single
+  /// [`resolve_step`] resolves without faulting.
+  fn full_window(source: &[u8]) -> ByteWindow {
+    let cs = 64u64;
+    let mut w = ByteWindow::new(cs, source.len() as u64);
+    let mut off = 0u64;
+    while (off as usize) < source.len() {
+      let end = (off as usize + cs as usize).min(source.len());
+      w.insert(off, Bytes::copy_from_slice(&source[off as usize..end]));
+      off += cs;
+    }
+    w
+  }
+
+  fn resolve_once(win: &ByteWindow, path: &[Segment], state: &mut ResolveState) -> Option<u64> {
+    let mut w = Walker::new(win);
+    resolve_step(&mut w, path, state).expect("all chunks resident: no miss, no error")
+  }
+
+  fn member(name: &str) -> Segment {
+    Segment::Member(name.into())
+  }
+
+  #[test]
+  fn resume_object_equals_cold() {
+    // {"a":1,"b":2,"c":3} - "b" key starts at offset 7.
+    let src = br#"{"a":1,"b":2,"c":3}"#;
+    let win = full_window(src);
+
+    let mut cold = ResolveState::resume(0, 0, None, false);
+    let cold_c = resolve_once(&win, &[member("c")], &mut cold);
+
+    let mut seeded =
+      ResolveState::resume(0, 0, Some(ResumeHint::ObjectFrontier { offset: 7 }), false);
+    let seeded_c = resolve_once(&win, &[member("c")], &mut seeded);
+
+    assert_eq!(cold_c, seeded_c);
+    assert_eq!(src[cold_c.unwrap() as usize], b'3');
+  }
+
+  #[test]
+  fn resume_array_equals_cold() {
+    // [10,20,30,40] - element 1 starts at offset 4.
+    let src = b"[10,20,30,40]";
+    let win = full_window(src);
+
+    let mut cold = ResolveState::resume(0, 0, None, false);
+    let cold_3 = resolve_once(&win, &[Segment::Element(3)], &mut cold);
+
+    let mut seeded = ResolveState::resume(
+      0,
+      0,
+      Some(ResumeHint::ArrayFrontier {
+        index: 1,
+        offset: 4,
+      }),
+      false,
+    );
+    let seeded_3 = resolve_once(&win, &[Segment::Element(3)], &mut seeded);
+
+    assert_eq!(cold_3, seeded_3);
+    assert_eq!(src[cold_3.unwrap() as usize], b'4');
+  }
+
+  #[test]
+  fn harvest_tables_every_scanned_member() {
+    let src = br#"{"a":1,"b":2,"c":3}"#;
+    let win = full_window(src);
+    let mut st = ResolveState::resume(0, 0, None, true);
+    resolve_once(&win, &[member("c")], &mut st);
+
+    let h = st.take_harvest().expect("harvesting");
+    assert_eq!(h.containers.len(), 1);
+    let cs = &h.containers[0];
+    assert_eq!(cs.seg, 0);
+    assert_eq!(cs.value_start, 0);
+    let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
+    assert_eq!(names, vec!["a", "b", "c"]);
+    // Matched "c" starts at offset 13 - the high-water resume point.
+    assert_eq!(cs.object_terminal, Some(13));
+  }
+
+  #[test]
+  fn harvest_tables_last_member_on_miss() {
+    // Target absent: the scan runs to the close. Every member - including the
+    // last, which ends with `}` not `,` - must be tabled, or a later lookup of
+    // that member would resume past it and miss it.
+    let src = br#"{"a":1,"b":2}"#;
+    let win = full_window(src);
+    let mut st = ResolveState::resume(0, 0, None, true);
+    assert_eq!(resolve_once(&win, &[member("zzz")], &mut st), None);
+
+    let h = st.take_harvest().unwrap();
+    let cs = &h.containers[0];
+    let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
+    assert_eq!(names, vec!["a", "b"], "the last member must be tabled too");
+    assert_eq!(cs.object_terminal, Some(12)); // the closing `}`
+  }
+
+  #[test]
+  fn harvest_records_array_landmark() {
+    let src = b"[10,20,30,40]";
+    let win = full_window(src);
+    let mut st = ResolveState::resume(0, 0, None, true);
+    resolve_once(&win, &[Segment::Element(2)], &mut st);
+
+    let h = st.take_harvest().expect("harvesting");
+    let cs = &h.containers[0];
+    assert!(cs.members.is_empty());
+    // Element 2 ("30") starts at offset 7.
+    assert_eq!(cs.array_frontier, Some((2, 7)));
+  }
+
+  #[test]
+  fn harvest_spans_nested_containers() {
+    // Two container levels: object "users" -> array element 1 -> object "name".
+    let src = br#"{"users":[{"id":1},{"id":2,"name":"bo"}]}"#;
+    let win = full_window(src);
+    let mut st = ResolveState::resume(0, 0, None, true);
+    let got = resolve_once(
+      &win,
+      &[member("users"), Segment::Element(1), member("name")],
+      &mut st,
+    );
+    assert!(got.is_some());
+
+    let h = st.take_harvest().expect("harvesting");
+    // One ContainerScan per entered container: root object, users array, element object.
+    assert_eq!(h.containers.len(), 3);
+    assert_eq!(h.containers[0].seg, 0);
+    assert_eq!(h.containers[1].seg, 1);
+    assert_eq!(h.containers[2].seg, 2);
+    assert_eq!(h.containers[1].array_frontier.map(|(i, _)| i), Some(1));
+  }
 }
