@@ -37,7 +37,7 @@ static GLOBAL: dhat::Alloc = dhat::Alloc;
 #[cfg(feature = "heap-profile")]
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
-/// Build a [`Cursor`] from a JS source object with:
+/// Build a [`Cursor`] from a JS source object:
 ///   - `size: number` total source size in bytes
 ///   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
 ///     `.byteLength` is the actual count read, `<= length`
@@ -61,8 +61,8 @@ pub fn open(
   let read_fn: Function<ReadArgs, Promise<Uint8Array>> = source.get_named_property("read")?;
   let ts_read_fn = read_fn.build_threadsafe_function().weak::<true>().build()?;
 
-  // reject non-whole/non-positive outright rather than truncating (`0.5 as usize == 0`).
-  // multiple-of-64 enforced by `ChunkReader::new`. required: facade fills the default.
+  // reject non-whole/non-positive rather than truncating (`0.5 as usize == 0`).
+  // multiple-of-64 enforced by `ChunkReader::new`.
   let chunk_bytes = match source.get_named_property::<Option<f64>>("chunkBytes") {
     Ok(Some(n)) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
       n as usize
@@ -79,8 +79,7 @@ pub fn open(
     }
   };
 
-  // structural-index cache knobs. unlike chunkBytes, 0 is allowed (disables that
-  // dimension; budget 0 or both caps 0 = cache off); missing => default.
+  // cache knobs allow 0 (unlike chunkBytes): disables that dimension; missing => default.
   let index_cache_budget = whole_nonneg(
     &source,
     "indexCacheEntries",

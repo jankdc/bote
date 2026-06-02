@@ -1,9 +1,8 @@
 //! Per-block structural bitmap construction.
 //!
-//! Bitmaps are built one 64-byte block at a time, on the fly, by the walker -
-//! never stored. [`structural_word`] turns a block into the bitmask of a single
-//! structural byte's positions outside string literals, masking with the
-//! `in_string` mask produced by [`crate::simd::scan_block`].
+//! Built one 64-byte block at a time by the walker, never stored.
+//! [`structural_word`] masks a structural byte's positions against the
+//! `in_string` mask from [`crate::simd::scan_block`].
 
 use std::simd::cmp::SimdPartialEq;
 use std::simd::Simd;
@@ -40,9 +39,9 @@ impl Structural {
   ];
 }
 
-/// Structural bitmap for a single 64-byte block: bits set where `kind`'s byte
-/// occurs outside a string literal. Masks out positions covered by `in_string`
-/// (the closing-quote-exclusive string mask from [`crate::simd::scan_block`]).
+/// Bits set where `kind`'s byte occurs outside a string literal, masking out
+/// positions covered by `in_string` (closing-quote-exclusive, from
+/// [`crate::simd::scan_block`]).
 pub fn structural_word(block: &[u8; BLOCK_BYTES], in_string: u64, kind: Structural) -> u64 {
   let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
   let raw = v.simd_eq(Simd::splat(kind.byte())).to_bitmask();
@@ -72,7 +71,7 @@ mod tests {
 
   #[test]
   fn masks_in_string_and_picks_byte() {
-    // `{"k":"a,b{c}"}` - structural chars inside the string value must be masked.
+    // Structural chars inside the string value must be masked.
     let b = block(b"{\"k\":\"a,b{c}\"}");
     let (in_string, _) = scan_block(&b, ScanCarry::default());
     assert_eq!(
@@ -105,14 +104,13 @@ mod tests {
 
   #[test]
   fn carry_inside_string_masks_leading_structurals() {
-    // Block begins inside a string (carry) that closes at the `"`, then `,1`.
+    // Block begins inside a carried-over string that closes at the `"`, then `,1`.
     let b = block(b"end\",1");
     let entry = ScanCarry {
       prev_escaped: 0,
       inside_string: !0,
     };
     let (in_string, _) = scan_block(&b, entry);
-    // The comma at byte 4 is outside the string; nothing before it.
     assert_eq!(
       bit_positions(structural_word(&b, in_string, Structural::Comma)),
       vec![4],

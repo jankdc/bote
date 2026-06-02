@@ -1,14 +1,12 @@
 //! `Cursor` - the napi-exported class JavaScript holds.
 //!
-//! A Cursor is a handle around an [`Arc<Session>`] plus an optional anchor
-//! [`ValueLocation`]. The root Cursor returned by `open()` has no anchor - path
-//! resolution starts at byte 0. Sub-cursors yielded by `walk` carry an anchor
-//! and resolve paths relative to that location.
+//! A Cursor wraps an [`Arc<Session>`] plus an optional anchor [`ValueLocation`].
+//! The root Cursor (`open()`) has no anchor and resolves from byte 0; sub-cursors
+//! yielded by `walk` resolve paths relative to their anchor.
 //!
-//! `iter` / `walk` are sync methods returning [`CursorIter`] / [`CursorWalk`] -
-//! napi async-iterators that lazily resolve their path on first `next()` and
-//! then step through children one entry at a time. Each step retries through
-//! `Pending` by fetching chunks as needed.
+//! `iter` / `walk` return the [`CursorIter`] / [`CursorWalk`] async-iterators,
+//! which resolve their path lazily on first `next()` then step through children
+//! one entry at a time, faulting chunks as needed.
 
 use std::sync::Arc;
 
@@ -32,7 +30,7 @@ fn map_err(e: SessionError) -> NapiError {
 pub struct IterArgs {
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
-  /// How many items do we yield per iteration?
+  /// Items yielded per iteration.
   pub batch: f64,
   /// Yield `[key, value]` tuples instead of bare values.
   pub with_key: Option<bool>,
@@ -42,12 +40,12 @@ pub struct IterArgs {
 pub struct Cursor {
   session: Arc<Session>,
   anchor: Option<ValueLocation>,
-  /// The child entry this cursor was yielded as by `walk` (member key or array
-  /// element index, plus its location). `None` for the root cursor.
+  /// The child entry `walk` yielded this cursor as (key/index + location).
+  /// `None` for the root cursor.
   entry: Option<ChildEntry>,
-  /// Document-tree depth of this cursor's anchor (root = 0). Passed to the cache
-  /// as the `base_depth` for every query so nodes carry their true tree depth
-  /// (the eviction key), which the re-anchored relative path can't express.
+  /// Document-tree depth of this cursor's anchor (root = 0). Threaded to the cache
+  /// as `base_depth` so nodes carry their true depth (the eviction key); the
+  /// re-anchored relative path can't express it.
   depth: u32,
 }
 
@@ -147,26 +145,25 @@ impl Cursor {
 }
 
 /// State shared by `iter` and `walk`: the lazily-resolved container cursor plus
-/// the byte window carried across yields. Each `next()` call locks this briefly
-/// to snapshot or update; awaits happen with the lock held (tokio Mutex).
+/// the byte window carried across yields. Awaits happen with the lock held
+/// (tokio Mutex).
 struct StreamCore {
   path: Vec<Segment>,
   anchor_start: u64,
-  /// Document depth of `anchor_start` (the cursor that opened this stream).
-  /// Children are at `base_depth + path.len() + 1`.
+  /// Document depth of `anchor_start`; children sit at `base_depth + path.len() + 1`.
   base_depth: u32,
   initialized: bool,
-  /// Set after first `next()` finishes initialization. `None` if the path didn't
-  /// resolve, or resolved to a non-container (iteration yields nothing).
+  /// Set after first `next()`. `None` if the path didn't resolve or resolved to a
+  /// non-container (iteration yields nothing).
   child_cursor: Option<ContainerCursor>,
-  /// `value_start` of the base container (`{`/`[`), once resolved. Lets the
-  /// stream record `close`/`child_count`/resume-point landmarks on the base node.
+  /// `value_start` of the base container, once resolved. Where the stream records
+  /// `close`/`child_count`/resume-point landmarks.
   base_value_start: Option<u64>,
   /// Children yielded so far - the child count once iteration runs to the end.
   yielded: u64,
-  /// At rest holds at most the chunk covering child_cursor's `next_offset` so the
-  /// next yield's first read hits; everything else is pruned after each yield,
-  /// bounding resident chunks to ~1 between yields.
+  /// At rest holds at most the chunk covering `next_offset` so the next yield's
+  /// first read hits; everything else is pruned per yield, bounding resident
+  /// chunks to ~1 between yields.
   window: ChunkWindow,
 }
 
@@ -185,8 +182,8 @@ impl StreamCore {
   }
 }
 
-/// `iter`-only state: the shared [`StreamCore`] plus projection, batching, and
-/// key-wrapping. `walk` navigates positions and uses [`StreamCore`] directly.
+/// `iter`-only state: [`StreamCore`] plus projection, batching, and key-wrapping.
+/// `walk` uses [`StreamCore`] directly.
 struct IterState {
   core: StreamCore,
   select_ir: Option<String>,
@@ -217,8 +214,7 @@ impl IterState {
 }
 
 /// Resolve the path and open its container cursor, pruning to the scan position so
-/// the first yield's read is hot. Shared by `iter` and `walk`; `select`
-/// compilation (iter-only) happens in the caller before this runs.
+/// the first yield's read is hot. Shared by `iter` and `walk`.
 async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
   if let Some(start) = session.locate_at(&core.path, core.anchor_start, core.base_depth).await? {
     core.base_value_start = Some(start);
@@ -233,10 +229,10 @@ async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<()
   Ok(())
 }
 
-/// Record an array resume point on early termination so a later random
-/// `get([base, N])` resumes near the stop point. Arrays only: an object
-/// resume_point would claim its prefix members are tabled, but the streaming path
-/// doesn't table them. No-op before any element boundary is passed.
+/// Record an array resume point on early termination so a later `get([base, N])`
+/// resumes near the stop point. Arrays only: an object resume_point would claim
+/// its prefix members are tabled, but the streaming path doesn't table them.
+/// No-op before any element boundary is passed.
 fn record_early_break(session: &Session, core: &StreamCore) {
   if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
     if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
@@ -282,7 +278,6 @@ impl CursorIter {
   }
 }
 
-/// Member keys become strings; element indices become numbers.
 fn child_key_json(child: &ChildEntry) -> serde_json::Value {
   match child {
     ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
@@ -342,21 +337,19 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         ..
       } = core;
       let base_depth = *base_depth;
-      // Children of the iterated container sit one level below it.
       let child_depth = base_depth + path.len() as u32 + 1;
       let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
       // window is pruned after each item, so the buffer (not chunks) is the
-      // in-flight batch. The buffer lives in this `next()` frame, so early
-      // termination via `complete` needs no special handling.
+      // in-flight batch. Living in this `next()` frame, it needs no special
+      // cleanup on early termination via `complete`.
       let result: Result<Option<serde_json::Value>, SessionError> = async {
         let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
         loop {
           let Some(child) = session.next_child(child_cursor, window).await? else {
-            // Exhausted: the child_cursor sits AT the close. Record the array's
-            // child count + close on the base node (a one-time exit scalar).
-            // iter only ever runs over arrays (objects are gated above).
+            // Exhausted: child_cursor sits AT the close. Record child count + close
+            // on the base node. iter only ever runs over arrays (objects gated above).
             if let Some(vs) = *base_value_start {
               session.store_child_count(base_depth, *anchor_start, path, ContainerKind::Array, vs, *yielded);
               session.store_close(
@@ -397,8 +390,8 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         }
       }
       .await;
-      // End-of-next defensive prune: any error path also lands here so abandoned
-      // iterators don't retain chunks past the scan position.
+      // Defensive prune: error paths land here too, so abandoned iterators don't
+      // retain chunks past the scan position.
       session.prune_window(window, child_cursor.next_offset);
       result.map_err(map_err)
     }
@@ -437,8 +430,8 @@ impl CursorWalk {
 
 #[napi]
 impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
-  // Yield Cursor directly - napi-rs's ToNapiValue impl wraps it into a JS class
-  // instance when the iterator's `next()` finalizes the yield in JS-thread context.
+  // napi-rs's ToNapiValue wraps the yielded Cursor into a JS class instance when
+  // `next()` finalizes the yield on the JS thread.
   type Yield = Cursor;
   type Next = ();
   type Return = ();
@@ -467,7 +460,6 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         ..
       } = &mut *guard;
       let base_depth = *base_depth;
-      // Yielded children sit one level below the walked container.
       let child_depth = base_depth + path.len() as u32 + 1;
       let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
@@ -478,7 +470,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         .map_err(map_err)?;
       session.prune_window(window, child_cursor.next_offset);
       let Some(child) = entry else {
-        // Exhausted: the child_cursor sits AT the close. Record child count + close on
+        // Exhausted: child_cursor sits AT the close. Record child count + close on
         // the base node - works for both object and array bases.
         if let Some(vs) = *base_value_start {
           session.store_child_count(base_depth, *anchor_start, path, child_cursor.kind, vs, *yielded);
@@ -525,7 +517,7 @@ mod tests {
   }
 
   /// `{"items":[{"name":"i0000",...}, ...]}` sized to span many chunks so a walk
-  /// pins a real frontier chunk and the window bound is in force throughout.
+  /// pins a real frontier chunk and the window bound holds throughout.
   fn array_doc(items: usize) -> Vec<u8> {
     let mut doc = String::from("{\"items\":[");
     for i in 0..items {
@@ -605,7 +597,7 @@ mod tests {
       let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
-      // After complete(), the abandoned iterator's window is cleared - no leak.
+      // complete() clears the abandoned iterator's window - no leak.
       assert!(w.state.lock().await.window.is_empty());
       abandoned.push(w); // keep alive: no Drop, no GC
     }

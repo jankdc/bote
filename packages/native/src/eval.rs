@@ -1,8 +1,7 @@
 //! Per-child projection of compiled IR against the source, via the session.
 //!
-//! Sits *above* [`Session`]: it drives the session's resolver/reader to apply
-//! a compiled [`CompiledSelect`] (projection) to one child at `child_start`.
-//! Kept out of the IR module (`select`) so it stays pure data below the session.
+//! Sits *above* [`Session`] and outside the IR module (`select`), so `select`
+//! stays pure data below the session.
 
 use crate::chunks::ChunkWindow;
 use crate::path::Segment;
@@ -13,8 +12,7 @@ use crate::session::{Session, SessionError};
 /// Project a child into its yielded value per `select`: a single sub-path
 /// yields the bare sub-value; a map yields an object of named sub-values in
 /// declared order. A missing sub-path yields `null` (projection is lossy,
-/// not a filter). Only the projected `[start, end)` bytes materialize - the
-/// rest of the child never does.
+/// not a filter). Only the projected bytes materialize.
 pub async fn project(
   session: &Session,
   select: &CompiledSelect,
@@ -42,7 +40,7 @@ async fn project_map(
     if let Some(mut cursor) = session.enter_container(child_start, window).await? {
       while remaining > 0 {
         let Some(entry) = session.next_child(&mut cursor, window).await? else {
-          break; // exhausted; unmatched fields stay null
+          break; // unmatched fields stay null
         };
         for (slot, (_, path)) in matched.iter_mut().zip(fields) {
           if slot.is_none() && path.first().is_some_and(|seg| segment_matches(seg, &entry)) {
@@ -61,9 +59,9 @@ async fn project_map(
       // defensive: facade rejects empty sub-paths; treat as the whole child
       (0, _) => project_one(session, path, child_start, base_depth, window).await?,
       (_, None) => serde_json::Value::Null,
-      // single segment: the matched entry's location is the value itself
+      // single segment: the matched entry is already the value
       (1, Some(loc)) => session.materialize(loc, window).await?,
-      // deeper: resolve the tail from the matched entry's start, one level in
+      // resolve the tail from the matched entry's start
       (_, Some(loc)) => project_one(session, &path[1..], loc.start, base_depth + 1, window).await?,
     };
     obj.insert(key.clone(), value);

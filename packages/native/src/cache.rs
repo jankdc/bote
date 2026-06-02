@@ -2,34 +2,32 @@
 //! document.
 //!
 //! Caches the *containers* a scan has walked - not whole resolved paths - so a
-//! later query that lands in a container we've already entered starts near the
-//! target instead of at the container's open. Each [`ContainerNode`] holds an
-//! object child-table (`name -> value_start`) plus a resume offset; arrays keep
-//! a sorted set of `(index, offset)` landmarks so any later index resumes from
-//! the nearest landmark at or before it (forward or backward). Nothing here
-//! stores source bytes: the burst-window resident bound is untouched.
+//! later query landing in an already-entered container starts near the target
+//! instead of at the container's open. Each [`ContainerNode`] holds an object
+//! child-table (`name -> value_start`) plus a resume offset; arrays keep a sorted
+//! set of `(index, offset)` landmarks so any later index resumes from the nearest
+//! landmark at or before it (forward or backward). Nothing here stores source
+//! bytes, so the burst-window resident bound is untouched.
 //!
 //! Memoization over an immutable source: entries are never invalidated, only
 //! evicted for memory. Three knobs bound the footprint. Two cap a single node:
 //! `object_member_cap` caps an object's tabled members as a dense prefix (past
 //! the cap the resume offset freezes at the first un-tabled member, so a later
 //! lookup still resumes correctly), and `array_interval` is the element stride
-//! between sampled array landmarks (applied upstream in the walker; the cache
-//! just stores what it's handed). The third, `slot_budget`, caps the *number* of
-//! nodes (slot cost `1 + members.len()` each) - without it, a full scan of an
+//! between sampled array landmarks (applied upstream in the walker). The third,
+//! `slot_budget`, caps the *number* of nodes - without it, a full scan of an
 //! array of N objects would mint N nodes and never free them.
 //!
 //! Eviction is **document-depth-first** (deepest container evicted first, LRU
 //! tiebreak): the shallow navigational backbone - a big array's landmark node, a
-//! top-level object's table - is the high-value "where to start scanning" signal,
-//! reachable from many future queries; deep nodes are narrowly reachable and shed
-//! first. Each node carries its document depth (`base_depth + path.len()`, set by
-//! the writer) because `iter`/`walk` re-anchor children at their own byte offset,
-//! so the relative `NodeKey.path` length does *not* reflect tree depth.
+//! top-level object's table - is reachable from many future queries; deep nodes
+//! are narrowly reachable and shed first. Each node carries its document depth
+//! (`base_depth + path.len()`) because `iter`/`walk` re-anchor children at their
+//! own byte offset, so the relative `NodeKey.path` length does *not* reflect tree
+//! depth.
 //!
 //! Depends only on `path` (keys) and `resolve`
 //! (`ContainerKind`/`ResumePoint`/`ValueLocation`); never on `session`/`walker`.
-//! All reads/writes are driven from `session`, which sits above it.
 
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -38,26 +36,22 @@ use crate::resolve::{ContainerKind, ResumePoint, ScanRecord, ValueLocation};
 
 /// How a cached hop along one path segment resolves.
 enum Hop {
-  /// O(1) jump into a tabled object member: continue chaining from `value_start`.
+  /// O(1) jump into a tabled object member: chain on from `value_start`.
   Into(u64),
-  /// Stop chaining here; seed the resolver near the target (or `None` to scan
-  /// from the container open).
+  /// Stop chaining; seed the resolver near the target (or `None` to scan from the
+  /// container open).
   Stop(Option<ResumePoint>),
 }
 
-/// Kind-specific contents of a walked container. A node holds exactly one
-/// variant - no empty other-half - so object-only and array-only state never sit
-/// side by side. Objects table their members plus a high-water resume offset;
-/// arrays keep a sorted set of resume landmarks.
+/// Kind-specific contents of a walked container: one variant only, so object-
+/// and array-only state never sit side by side.
 #[derive(Debug)]
 enum ContainerBody {
   Object {
-    /// Members `name -> value_start` for every member in `[open, resume]` up to
-    /// the object cap. A flat vec: containers are small or capped, so linear
-    /// lookup beats a hash map's per-entry overhead.
+    /// Members `name -> value_start` over the dense prefix `[open, resume]` up to
+    /// the object cap. A flat vec beats a hash map: containers are small or capped.
     members: Vec<(Box<str>, u64)>,
-    /// High-water member offset: a later member scan resumes here. Just past the
-    /// open for a fresh node.
+    /// High-water member offset: a later member scan resumes here.
     resume: u64,
   },
   Array {
@@ -69,8 +63,7 @@ enum ContainerBody {
 impl ContainerBody {
   fn for_kind(kind: ContainerKind, value_start: u64) -> Self {
     match kind {
-      // Fresh resume = just past the open `{`, equivalent to scanning from the
-      // container start. A fresh array has no landmarks (it scans from the open).
+      // Fresh resume = just past the open `{`, i.e. scan from the container start.
       ContainerKind::Object => ContainerBody::Object {
         members: Vec::new(),
         resume: value_start + 1,
@@ -93,7 +86,7 @@ impl ContainerBody {
   }
 
   /// The greatest array landmark with `index <= target`, or `None` (object body).
-  /// Landmarks are kept sorted by index, so this is a binary search.
+  /// Binary search: landmarks are kept sorted by index.
   fn nearest_landmark(&self, target: usize) -> Option<(usize, u64)> {
     match self {
       ContainerBody::Array { landmarks } => {
@@ -104,15 +97,13 @@ impl ContainerBody {
     }
   }
 
-  /// How a hop along `segment` resolves: an O(1) jump into a tabled object member,
-  /// or a stop seeding the resolver near the target.
+  /// How a hop along `segment` resolves.
   fn hop(&self, segment: &Segment) -> Hop {
     match (segment, self) {
       (Segment::Member(name), ContainerBody::Object { resume, .. }) => match self.member(name) {
         Some(vs) => Hop::Into(vs),
-        // Seed the resolver with the object's high-water resume offset. The table
-        // covers a dense prefix `[open, resume]`, so an un-tabled member is at or
-        // after `resume` - resuming there is always correct.
+        // The table covers the dense prefix `[open, resume]`, so an un-tabled
+        // member is at or after `resume` - resuming there is always correct.
         None => Hop::Stop(Some(ResumePoint::Object { offset: *resume })),
       },
       (Segment::Element(idx), ContainerBody::Array { .. }) => Hop::Stop(
@@ -126,9 +117,9 @@ impl ContainerBody {
   }
 
   /// Merge object members (scan order) up to `cap`, advancing the resume offset to
-  /// the high-water boundary (`resume_hint` = the matched member's start, or the
-  /// close). If the cap is hit, the resume freezes at the first un-tabled member
-  /// so every member before it stays tabled. No-op on an array body.
+  /// the high-water boundary (`resume_hint` = matched member's start, or the
+  /// close). On hitting the cap the resume freezes at the first un-tabled member,
+  /// keeping the table a dense prefix. No-op on an array body.
   fn merge_object(&mut self, new: &[(Box<str>, u64, u64)], resume_hint: Option<u64>, cap: usize) {
     let ContainerBody::Object { members, resume } = self else {
       return;
@@ -156,9 +147,9 @@ impl ContainerBody {
     *resume = resume_off;
   }
 
-  /// Merge `new` landmarks into the sorted set (dedup by index). Unbounded: the
-  /// stride that bounds landmark count is applied upstream at sampling time.
-  /// No-op on an object body.
+  /// Merge `new` landmarks into the sorted set (dedup by index). Unbounded here:
+  /// the bounding stride is applied upstream at sampling time. No-op on an object
+  /// body.
   fn merge_array(&mut self, new: &[(usize, u64)]) {
     let ContainerBody::Array { landmarks } = self else {
       return;
@@ -179,10 +170,10 @@ pub struct ContainerNode {
   value_start: u64,
   close: Option<u64>,
   child_count: Option<u64>,
-  /// Document-tree depth of this container (`base_depth + path.len()` at the
-  /// writing query). Primary eviction key: deepest evicted first.
+  /// Document-tree depth (`base_depth + path.len()`). Primary eviction key:
+  /// deepest evicted first.
   depth: u32,
-  /// Recency clock value at the last touch/write; LRU tiebreak within a depth.
+  /// Recency clock at the last touch/write; LRU tiebreak within a depth.
   last_used: u64,
   body: ContainerBody,
 }
@@ -203,9 +194,8 @@ impl ContainerNode {
     self.child_count
   }
 
-  /// Weight toward the global `slot_budget`: one slot for the node itself plus
-  /// one per tabled object member. Array landmarks aren't counted - their count
-  /// is already bounded by `array_interval`.
+  /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
+  /// member. Landmarks aren't counted - `array_interval` already bounds them.
   fn slot_cost(&self) -> usize {
     1 + match &self.body {
       ContainerBody::Object { members, .. } => members.len(),
@@ -282,19 +272,17 @@ impl NodeKey {
 /// `slot_budget` with depth-first eviction. No invalidation (the source is
 /// immutable); nodes only leave via eviction.
 pub struct StructuralIndex {
-  /// Max combined slots (`slots_used`) before eviction kicks in; `0` disables the
-  /// cache entirely.
+  /// Max combined slots before eviction kicks in; `0` disables the cache.
   slot_budget: usize,
-  /// Current combined slots across all nodes (`sum(slot_cost)`), tracked
-  /// incrementally on every write.
+  /// `sum(slot_cost)` across all nodes, tracked incrementally on every write.
   slots_used: usize,
   /// Monotonic recency clock; the largest value is the most-recently-used.
   tick: u64,
-  /// Max tabled members per object container (`usize::MAX` = unbounded). `0`
-  /// tables no members (resume parks at the open).
+  /// Max tabled members per object (`usize::MAX` = unbounded; `0` tables none,
+  /// resume parks at the open).
   object_member_cap: usize,
-  /// Element stride between sampled array landmarks. `0` records no landmarks.
-  /// Stored for `is_enabled`; the stride itself is applied at sampling time.
+  /// Element stride between sampled array landmarks (`0` = none). Held for
+  /// `is_enabled`; the stride itself is applied at sampling time.
   array_interval: usize,
   nodes: HashMap<NodeKey, ContainerNode>,
 }
@@ -326,10 +314,8 @@ impl StructuralIndex {
 
   /// Walk cached container hops from `anchor` along `path`, returning the deepest
   /// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
-  /// member is an O(1) hop; the first uncached level returns the container's start
-  /// plus a resume point (object high-water, or the array landmark nearest at or
-  /// before the target) so the resolver resumes near the target instead of at the
-  /// open.
+  /// member is an O(1) hop; the first uncached level returns its container's start
+  /// plus a resume point so the resolver picks up near the target, not at the open.
   pub fn chain_hops(&mut self, anchor: u64, path: &[Segment]) -> (u64, usize, Option<ResumePoint>) {
     let mut start = anchor;
     let mut seg = 0;
@@ -338,8 +324,7 @@ impl StructuralIndex {
       let Some(hop) = self.nodes.get(&key).map(|n| n.hop_for(&path[seg])) else {
         return (start, seg, None);
       };
-      // Bump recency on the hit so hot containers persist over stale ones within
-      // their depth tier.
+      // Bump recency on the hit so hot containers outlive stale ones in their tier.
       let tick = self.next_tick();
       if let Some(node) = self.nodes.get_mut(&key) {
         node.last_used = tick;
@@ -347,7 +332,7 @@ impl StructuralIndex {
       match hop {
         Hop::Into(vs) => {
           start = vs;
-          seg += 1; // O(1) hop into a tabled member
+          seg += 1;
         }
         Hop::Stop(seed) => return (start, seg, seed),
       }
@@ -382,8 +367,8 @@ impl StructuralIndex {
     }
   }
 
-  /// Write back an object scan: merge the members seen (in scan order) up to the
-  /// object cap, advancing the resume offset to the high-water boundary.
+  /// Write back an object scan: merge the members seen (scan order) up to the cap,
+  /// advancing the resume offset to the high-water boundary.
   pub fn merge_object_scan(
     &mut self,
     base_depth: u32,
@@ -405,7 +390,7 @@ impl StructuralIndex {
   }
 
   /// Write back an array scan: merge its `(index, offset)` landmarks into the
-  /// node's sorted set (dedup by index).
+  /// node's sorted set.
   pub fn merge_array_scan(
     &mut self,
     base_depth: u32,
@@ -456,18 +441,16 @@ impl StructuralIndex {
     self.evict_if_over_budget();
   }
 
-  /// Depth-first batch eviction: when over `slot_budget`, drop nodes
-  /// deepest-first (LRU tiebreak) down to a low-water mark (~7/8 budget) in one
-  /// sorted pass. Batching keeps the amortized cost ~O(log n) per insert instead
-  /// of an O(n) victim scan per evicted node; shallow backbone nodes (low depth)
-  /// are shed last.
+  /// Depth-first batch eviction: when over `slot_budget`, drop nodes deepest-first
+  /// (LRU tiebreak) down to a low-water mark (~7/8 budget) in one sorted pass.
+  /// Batching keeps the amortized cost ~O(log n) per insert instead of an O(n)
+  /// victim scan per evicted node; shallow backbone nodes are shed last.
   fn evict_if_over_budget(&mut self) {
     if self.slot_budget == 0 || self.slots_used <= self.slot_budget {
       return;
     }
     let low_water = self.slot_budget - self.slot_budget / 8;
-    // Order keys so the best victim comes first: greatest depth, then least
-    // recently used within that depth.
+    // Best victim first: greatest depth, then least recently used within it.
     let mut victims: Vec<(u32, u64, NodeKey)> = self
       .nodes
       .iter()
@@ -553,8 +536,7 @@ impl StructuralIndex {
     self.slots_used
   }
 
-  /// Recompute `slots_used` from scratch; a test invariant that the incremental
-  /// accounting matches the actual node weights.
+  /// Recompute `slots_used` from scratch, to check the incremental accounting.
   #[cfg(test)]
   fn recomputed_slots_used(&self) -> usize {
     self.nodes.values().map(ContainerNode::slot_cost).sum()
@@ -584,8 +566,7 @@ mod tests {
     c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
     c.store_close(0, 0, &[], ContainerKind::Object, 0, 10);
     assert!(c.get(0, &[]).is_none());
-    // Both per-container caps 0 disables even with a budget (the user-facing
-    // `objectMemberCap: 0, arrayIndexInterval: 0` off switch).
+    // Both per-container caps 0 disables even with a budget (the off switch).
     let mut c = StructuralIndex::new(NO_EVICT, 0, 0);
     assert!(!c.is_enabled());
     c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
@@ -604,8 +585,8 @@ mod tests {
     assert_eq!(node.member("b"), Some(11));
     assert_eq!(node.member("c"), Some(17));
     assert_eq!(node.member("d"), None);
-    // The resume offset sits at the matched member's start, so any un-tabled
-    // member is at or after it and a resume from there finds it.
+    // Resume sits at the matched member's start, so any un-tabled member is at or
+    // after it - a resume from there finds it.
     assert_eq!(node.object_resume(), 13);
     assert_eq!(node.member_count(), 3);
   }
@@ -747,8 +728,8 @@ mod tests {
   fn budget_bounds_slots_used() {
     let budget = 64;
     let mut c = StructuralIndex::new(budget, usize::MAX, 16);
-    // Many distinct single-member object nodes (slot_cost 2 each), all at the
-    // same depth so eviction is purely by recency.
+    // Distinct single-member nodes, all at the same depth so eviction is purely
+    // by recency.
     for i in 0..200u64 {
       let p = obj_path(&format!("path{i}"));
       c.merge_object_scan(0, i, &p, i * 100, &[member("x", i * 100, i * 100 + 4)], Some(i * 100));
@@ -771,17 +752,15 @@ mod tests {
     let mut c = StructuralIndex::new(budget, usize::MAX, 16);
     // One shallow backbone node (depth 0): a root array with landmarks.
     c.merge_array_scan(0, 0, &[], 0, &[(0, 0), (16, 160)]);
-    // Flood deep nodes (depth 2): re-anchored element objects keyed (anchor, []),
-    // each tagged base_depth 2 the way iter/walk would.
+    // Flood deep nodes (depth 2): re-anchored element objects, tagged base_depth 2
+    // the way iter/walk would.
     for i in 0..100u64 {
       c.merge_object_scan(2, i + 1, &[], i * 100, &[member("name", i * 100, i * 100 + 7)], Some(i * 100));
       assert!(c.slots_used() <= budget);
     }
-    // The shallow node is reachable from any future query and is never the victim
-    // while deeper nodes exist - it must survive the flood.
+    // Never the victim while deeper nodes exist, so it survives the flood.
     let backbone = c.get(0, &[]).expect("shallow backbone node must survive");
     assert_eq!(backbone.array_landmarks(), &[(0, 0), (16, 160)]);
-    // Deep nodes are bounded by the budget.
     assert!(c.node_count() <= budget);
   }
 }

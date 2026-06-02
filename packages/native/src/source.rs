@@ -1,9 +1,5 @@
-//! The `ByteStream` abstraction: a seekable, async byte stream.
-//!
-//! Every stream advertises its total `size` and serves arbitrary byte ranges
-//! via `read(offset, length)`. The parser only ever asks for chunk-aligned
-//! ranges of a fixed length (typically 64 KiB); the final chunk may return
-//! fewer bytes than requested when the range straddles end-of-source.
+//! The `ByteStream` abstraction: a seekable, async byte stream serving byte
+//! ranges via `read(offset, length)`.
 //!
 //! `ByteStream` corresponds to the TS `SourceReader` (the live stream), not the
 //! TS `Source` (a factory that `open()`s a reader). The facade opens its
@@ -28,13 +24,13 @@ pub enum SourceError {
 pub trait ByteStream: Send + Sync {
   fn size(&self) -> u64;
 
-  /// Read up to `length` bytes starting at `offset`. May return fewer bytes
-  /// than requested only when the range extends past `size()`.
+  /// Read up to `length` bytes at `offset`; returns fewer only when the range
+  /// extends past `size()`.
   async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError>;
 }
 
-/// In-memory source backed by an owned byte buffer. Test fixture only -
-/// production callers feed bytes in via [`JsByteStream`].
+/// In-memory source backed by an owned buffer. Test fixture only; production
+/// feeds bytes in via [`JsByteStream`].
 #[cfg(test)]
 pub struct InMemoryStream {
   data: Bytes,
@@ -72,16 +68,14 @@ pub struct ReadArgs {
   pub length: f64,
 }
 
-/// `CalleeHandled = false`, so `call_async` takes args directly (no `Result`
-/// wrapper); JS-side rejections propagate via the returned `Promise`'s `.await`.
-/// `Weak = true` so a dormant Cursor's tsfn doesn't pin the Node event loop -
-/// pending cursor `await`s are real Promises and keep the loop alive on their own.
+/// `CalleeHandled = false`: `call_async` takes args directly and JS rejections
+/// surface via the returned `Promise`'s `.await`. `Weak = true` so a dormant
+/// Cursor's tsfn doesn't pin the Node event loop (pending `await`s keep it alive).
 pub type ReadFn =
   ThreadsafeFunction<ReadArgs, Promise<Uint8Array>, ReadArgs, napi::Status, false, true>;
 
-/// ByteStream backed by a JavaScript object exposing `size: number` and
-/// `read(args): Promise<number>`. The JS function is held as a
-/// [`ThreadsafeFunction`], which can be awaited from any tokio task.
+/// ByteStream backed by a JS `read(args): Promise<Uint8Array>`, held as a
+/// [`ThreadsafeFunction`] so it can be awaited from any tokio task.
 pub struct JsByteStream {
   read_fn: Option<ReadFn>,
   size: u64,
@@ -114,13 +108,11 @@ impl ByteStream for JsByteStream {
       .as_ref()
       .ok_or_else(|| SourceError::Io("source already closed".into()))?;
 
-    // Pull-from-JS: ask for up to `length` bytes at `offset`, JS resolves a
-    // V8-owned `Uint8Array` we copy out of. Returning the buffer *from* JS
-    // (rather than pushing a Rust-owned `with_external_data` view *to* JS)
-    // keeps it V8-owned/V8-GC'd, avoiding external-memory `arrayBuffers`
-    // accounting and a strong napi ref whose drop queues through
-    // `CUSTOM_GC_TSFN` - under a continuous scan the JS thread never idles,
-    // that queue backs up, and resident bytes grow with bytes-read.
+    // Pulling the buffer *from* JS (vs pushing a Rust-owned `with_external_data`
+    // view *to* JS) keeps it V8-owned/V8-GC'd: a pushed view needs a strong napi
+    // ref whose drop queues through `CUSTOM_GC_TSFN`, and under a continuous scan
+    // the JS thread never idles, so that queue backs up and resident bytes grow
+    // with bytes-read.
     let promise = read_fn
       .call_async(ReadArgs {
         offset: offset as f64,
@@ -138,8 +130,7 @@ impl ByteStream for JsByteStream {
         "read() returned {view_len} bytes for a {length}-byte request"
       )));
     }
-    // Copy out so `Bytes` owns its allocation - the JS view stays valid
-    // through this `.await` boundary but we shouldn't carry it further.
+    // Copy out so `Bytes` owns its allocation; don't carry the JS view further.
     Ok(Bytes::copy_from_slice(&view[..view_len]))
   }
 }

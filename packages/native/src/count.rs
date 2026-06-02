@@ -1,10 +1,9 @@
 //! Child-counting for `count`. Sits above [`Session`] in the operations layer
 //! alongside [`crate::eval`].
 //!
-//! [`at`] is the entry point. Strategy is a depth-0 comma popcount over the
-//! container bytes (the same scan `step_array` uses), driven by the resumable
-//! [`count_step`] state machine - bounded in document size regardless of
-//! container size.
+//! [`at`] is the entry point. A depth-0 comma popcount over the container bytes
+//! (the same scan `step_array` uses), driven by the resumable [`count_step`]
+//! state machine - bounded in document size regardless of container size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,26 +22,25 @@ pub async fn at(
   anchor_start: u64,
   base_depth: u32,
 ) -> Result<u64, SessionError> {
-  // repeat count is O(1): prior scan cached it, no chunk faulted.
+  // O(1) on a repeat: a prior scan cached it, no chunk faults.
   if let Some(n) = session.cached_child_count(anchor_start, path) {
     return Ok(n);
   }
   let mut q = Query::new(session);
-  // run_locate (not run_resolve): we only need the container's start; the count
+  // run_locate, not run_resolve: we only need the container's start; the count
   // comes from a per-comma scan started at the opener.
   let Some(start) = session
     .run_locate(path, anchor_start, base_depth, &mut q.window)
     .await?
   else {
-    return Ok(0); // missing path
+    return Ok(0);
   };
   let Some(cursor) = session.enter_container(start, &mut q.window).await? else {
-    return Ok(0); // not an object or array
+    return Ok(0);
   };
   let kind = cursor.kind;
   let count = children(session, cursor.next_offset, &mut q.window).await?;
-  // store the count, not the close offset: the comma scan never sees the close
-  // (see index_cache / the design doc).
+  // Store the count, not the close offset: the comma scan never sees the close.
   session.store_child_count(base_depth, anchor_start, path, kind, start, count);
   Ok(count)
 }
@@ -65,12 +63,11 @@ async fn children(
     .await
 }
 
-/// Persisted across `ChunkMiss` retries while counting a container's children,
-/// so a chunk fault mid-count resumes at the last committed block boundary
-/// instead of recounting from the container's start.
+/// Persisted across `ChunkMiss` retries so a fault mid-count resumes at the
+/// last committed block boundary instead of recounting from the container start.
 struct CountState {
-  /// Next byte to scan. Before the peek, the byte just past the opening
-  /// `{`/`[`; after, a block-boundary commit point from `Partial`.
+  /// Next byte to scan: the byte past the opener before the peek, a
+  /// block-boundary commit point from `Partial` after.
   offset: u64,
   /// Nesting depth at `offset`, relative to the container being counted.
   depth: u32,
@@ -94,13 +91,13 @@ impl CountState {
   }
 }
 
-/// Sync step for [`children`]: returns the final child count once the
-/// container's close is reached, or surfaces `ChunkMiss` (via `?`) to fault the
-/// next chunk. `state` carries progress across faults.
+/// Sync step for [`children`]: returns the child count once the container's
+/// close is reached, or surfaces `ChunkMiss` via `?` to fault the next chunk.
+/// `state` carries progress across faults.
 fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, TraverseError> {
   if !state.peeked {
-    // empty-container short-circuit: a close right after the opener is 0
-    // children. commit the skipped offset before `byte_at` so a fault here
+    // Empty-container short-circuit: a close right after the opener is 0
+    // children. Commit the skipped offset before `byte_at` so a fault here
     // doesn't re-skip.
     let off = walker.skip_whitespace(state.offset)?;
     state.offset = off;
@@ -133,7 +130,7 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
         state.carry = carry;
       }
       // Unreachable with `needed == usize::MAX` (the count never bottoms out),
-      // but stay total: keep scanning from past the comma.
+      // but stay total: keep scanning past the comma.
       CommaStop::Found {
         offset_after_comma,
         consumed,

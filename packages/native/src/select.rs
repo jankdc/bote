@@ -1,17 +1,14 @@
-//! Projection IR for `iter`'s `select`: extract a single sub-value, or a map
-//! of named sub-values, from each child before it crosses - so the
-//! non-selected parts of the child never materialize. Mirrors the TS
-//! `serializeSelect` output (`{"one": [...path]}` or
-//! `{"map": [[key, [...path]], ...]}`), where each sub-path is an array of
-//! `string | number` segments.
+//! Projection IR for `iter`'s `select`: extract sub-values from each child
+//! before it crosses, so non-selected parts never materialize. Mirrors the TS
+//! `serializeSelect` output (`{"one": [...path]}` / `{"map": [[key, [...path]],
+//! ...]}`); each sub-path is an array of `string | number` segments.
 
 use serde::Deserialize;
 
 use crate::path::Segment;
 
 /// Externally tagged + lowercase so the facade's `{"one": [...]}` /
-/// `{"map": [...]}` JSON decodes straight into it; sub-path segments decode
-/// via [`Segment`]'s untagged `Deserialize`.
+/// `{"map": [...]}` JSON decodes straight into it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompiledSelect {

@@ -1,19 +1,18 @@
 //! Async session: glues the sync walker to the chunk reader.
 //!
-//! A [`Session`] owns the immutable source metadata and a [`ChunkReader`]
-//! (coalesced async byte fetch, no residency of its own). Per-query it runs the
-//! [`Session::drive`] retry loop over a transient [`ChunkWindow`]:
+//! A [`Session`] owns the immutable source metadata and a [`ChunkReader`].
+//! Per-query it runs the [`Session::drive`] retry loop over a transient
+//! [`ChunkWindow`]:
 //!
-//!   1. Build a [`Walker`] over the window's currently-resident chunks and run
-//!      the caller-supplied sync step.
+//!   1. Build a [`Walker`] over the window's resident chunks and run the
+//!      caller-supplied sync step.
 //!   2. On `ChunkMiss(off)`, read a burst of chunks async, insert them into the
 //!      window, drop everything below the step's retention bound, and retry.
 //!   3. On success, return.
 //!
-//! The window is owned by the query (one-shot [`Query`]) or the iterator and is
-//! dropped or pruned to the scan position as the walk advances, so resident
-//! source memory stays bounded by the burst window regardless of document size.
-//! Bitmaps aren't stored - the walker builds them per block on the fly.
+//! The window is owned by the query ([`Query`]) or the iterator and is dropped
+//! or pruned to the scan position as the walk advances, so resident source
+//! memory stays bounded by the burst window regardless of document size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,12 +29,11 @@ use crate::select::SelectError;
 use crate::source::ByteStream;
 use crate::walker::{self, SkipState, TraverseError, Walker};
 
-/// Structural-index cache slot budget default when the facade omits
-/// `indexCacheEntries` (one slot per node + one per tabled member). `0` disables.
+/// Default `indexCacheEntries`: one slot per node + one per tabled member. `0` disables.
 pub(crate) const DEFAULT_INDEX_CACHE_ENTRIES: usize = 1024;
-/// Object member cap default (unbounded) when the facade omits `objectMemberCap`.
+/// Default `objectMemberCap`: unbounded.
 pub(crate) const DEFAULT_OBJECT_MEMBER_CAP: usize = usize::MAX;
-/// Array landmark element stride default when the facade omits `arrayIndexInterval`.
+/// Default `arrayIndexInterval`: landmark element stride.
 pub(crate) const DEFAULT_ARRAY_INDEX_INTERVAL: usize = 16;
 
 #[derive(Debug, Error)]
@@ -54,30 +52,26 @@ pub struct Session {
   pub source_size: u64,
   pub chunk_bytes: u64,
   pub reader: Arc<ChunkReader>,
-  /// Structural-index cache, shared across every cursor over this source.
-  /// The lock is held only for the synchronous lookup/write-back, never across
-  /// an `.await`.
+  /// Shared across every cursor over this source. The lock is held only for the
+  /// synchronous lookup/write-back, never across an `.await`.
   cache: Mutex<StructuralIndex>,
   /// Mirror of the cache config so the hot path reads it without the lock.
   cache_enabled: bool,
-  /// Object member cap: object members are recorded only when `> 0`.
+  /// Object members are recorded only when `> 0`.
   object_member_cap: usize,
-  /// Array landmark element stride handed to the resolver's sampler.
   array_interval: usize,
 }
 
 /// Cap on the adaptive doubling burst. The resolver restarts from the anchor on
-/// every chunk fault, so unbounded restarts give O(N²) traversal for an
-/// N-chunk query. Each `ChunkMiss` doubles the burst (1, 2, 4, ..., capped
-/// here): short queries pay no over-fetch, long queries converge to a near
-/// single pass. This cap is also the dominant bound on resident source memory:
-/// the window holds at most ~one burst of chunks between prunes.
+/// every chunk fault, so unbounded restarts give O(N²) traversal for an N-chunk
+/// query; doubling (1, 2, 4, ..., capped here) lets short queries avoid
+/// over-fetch and long ones converge to ~one pass. Also the dominant bound on
+/// resident source memory: the window holds at most ~one burst between prunes.
 pub(crate) const MAX_BURST: u64 = 256;
 
-/// Adaptive doubling burst used by every driver that doesn't know the value's
-/// extent up front (`run_locate`, `skip_value_at`, `count::children`). Each call
-/// yields the current burst (in chunks) and doubles it for the next, capped at
-/// [`MAX_BURST`]. Move-bound and stateful; use one per `Session::drive`.
+/// Adaptive doubling burst for drivers that don't know the value's extent up
+/// front (`run_locate`, `skip_value_at`, `count::children`). Stateful; use one
+/// per `Session::drive`.
 pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
   let mut n = 1u64;
   move |_off| {
@@ -87,7 +81,6 @@ pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
   }
 }
 
-/// Construction and window lifecycle.
 impl Session {
   pub fn new(
     source: Arc<dyn ByteStream>,
@@ -116,9 +109,9 @@ impl Session {
   }
 
   /// Prune the iterator window to the scan position: keep just the chunk
-  /// covering `next_offset` so the next yield's first read is hot, dropping
-  /// everything behind it. Clears entirely once iteration walks off the end.
-  /// Bounds the iterator's resident chunks to ~1 between yields.
+  /// covering `next_offset` so the next yield's first read is hot, dropping the
+  /// rest (clearing once iteration walks off the end). Bounds resident chunks to
+  /// ~1 between yields.
   pub(crate) fn prune_window(&self, window: &mut ChunkWindow, next_offset: u64) {
     if next_offset >= self.source_size {
       window.clear();
@@ -129,7 +122,7 @@ impl Session {
 }
 
 /// One-shot public queries. Each opens a transient window, resolves, and drops
-/// the window (and its resident chunks) on return.
+/// the window on return.
 impl Session {
   pub async fn locate_at(
     &self,
@@ -174,8 +167,8 @@ impl Session {
 /// Cursor/iterator support, called from `cursor.rs`. These take a caller-owned,
 /// long-lived window that `cursor.rs` prunes to the scan frontier between yields.
 impl Session {
-  /// Open a child iterator over the container starting at `value_start`.
-  /// Returns `Ok(None)` if the value isn't an object or array.
+  /// Open a child iterator over the container at `value_start`, or `Ok(None)` if
+  /// the value isn't an object or array.
   pub async fn enter_container(
     &self,
     value_start: u64,
@@ -198,8 +191,8 @@ impl Session {
     cursor: &mut ContainerCursor,
     window: &mut ChunkWindow,
   ) -> Result<Option<ChildEntry>, SessionError> {
-    // One element typically stays inside one chunk; burst=1 is fine, and the
-    // per-call invocation means no quadratic-restart risk to amortize.
+    // One element typically fits one chunk, and per-call invocation means no
+    // quadratic-restart risk to amortize, so burst=1.
     let min_reachable = AtomicU64::new(cursor.next_offset);
     self
       .drive(
@@ -227,14 +220,12 @@ impl Session {
   /// Resolve `path` from `anchor_start`, returning only the resolved value's
   /// start offset (no extent walk).
   ///
-  /// Memoization seam: `run_locate` (and [`run_resolve`](Self::run_resolve) /
-  /// [`locate_at`](Self::locate_at), which wrap it) is the single point every
-  /// path resolution flows through - `get`/`has`/`count`/`iter`/`walk`/`select`
-  /// all route here. The structural-index cache lives at exactly this
-  /// boundary: a chain of cached container hops starts the scan as deep as
-  /// possible (an all-hit returns the offset without faulting a single chunk),
-  /// the first uncached level resumes from the deepest landmark, and the scan's
-  /// collected child offsets are written back. Keep these three the only
+  /// Memoization seam: every path resolution flows through here (or its wrappers
+  /// `run_resolve`/`locate_at`) - `get`/`has`/`count`/`iter`/`walk`/`select` all
+  /// route in. So the structural-index cache lives here: cached container hops
+  /// start the scan as deep as possible (an all-hit returns the offset faulting
+  /// no chunks), the first uncached level resumes from the deepest landmark, and
+  /// the scan's child offsets are written back. Keep these three the only
   /// resolution entry points so the cache has one place to live.
   pub(crate) async fn run_locate(
     &self,
@@ -243,16 +234,15 @@ impl Session {
     base_depth: u32,
     window: &mut ChunkWindow,
   ) -> Result<Option<u64>, SessionError> {
-    // Walk cached container hops to the deepest landmark (lock held only for
-    // this synchronous lookup, never across the drive below).
+    // Lock held only for this lookup, never across the drive below.
     let (start, seg, hint) = if self.cache_enabled {
       self.cache.lock().unwrap().chain_hops(anchor_start, path)
     } else {
       (anchor_start, 0, None)
     };
-    // ResolveState persists across `ChunkMiss` retries; min_reachable follows the
-    // resolver's committed iteration offset so chunks behind it are dropped while
-    // the key being read (which `read_range`s behind the scan position) stays resident.
+    // min_reachable follows the resolver's committed offset so chunks behind it
+    // drop, yet sits below the scan position so a key `read_range`d there stays
+    // resident.
     let mut state = ResolveState::resume(
       start,
       seg,
@@ -293,15 +283,15 @@ impl Session {
       let end = self.skip_value_at(start, window).await?;
       return Ok(Some(ValueLocation { start, end }));
     }
-    // A cached close skips the extent walk entirely for a large container.
+    // A cached close skips the extent walk for a large container.
     let cached = self
       .with_cache(|c| c.get(anchor_start, path).and_then(|n| n.location()))
       .flatten();
     if let Some(loc) = cached {
       return Ok(Some(loc));
     }
-    // Peek the kind first (loads the start chunk, which `skip_value_at` then
-    // reuses) so only containers - not scalars - get a cache node.
+    // Peek the kind first so only containers - not scalars - get a cache node;
+    // it loads the start chunk that `skip_value_at` then reuses.
     let kind = self.peek_container_kind(start, window).await?;
     let end = self.skip_value_at(start, window).await?;
     if let Some(kind) = kind {
@@ -310,8 +300,8 @@ impl Session {
     Ok(Some(ValueLocation { start, end }))
   }
 
-  /// The container kind at `from` (whitespace already implicit), or `None` if
-  /// the value there is a scalar. One cheap byte read, usually hot.
+  /// The container kind at `from`, or `None` if the value there is a scalar.
+  /// One cheap byte read, usually hot.
   async fn peek_container_kind(
     &self,
     from: u64,
@@ -341,8 +331,8 @@ impl Session {
     from: u64,
     window: &mut ChunkWindow,
   ) -> Result<u64, SessionError> {
-    // Resumable: the SkipState commits at block boundaries, so the min_reachable tracks
-    // the skip position and the window stays bounded even for a large value.
+    // SkipState commits at block boundaries, so min_reachable tracks the skip
+    // position and the window stays bounded even for a large value.
     let mut state = SkipState::start(from);
     let min_reachable = AtomicU64::new(from);
     self
@@ -361,9 +351,9 @@ impl Session {
     window: &mut ChunkWindow,
   ) -> Result<Vec<u8>, SessionError> {
     let chunk_bytes = self.chunk_bytes;
-    // The full byte range is known, so fetch the rest in one shot on a miss.
-    // `read_range` isn't resumable (it restarts from `from`), so the min_reachable is
-    // `from`: the value's chunks must all be resident together to copy them out.
+    // The range is known, so fetch the rest in one shot on a miss. It restarts
+    // from `from` on each retry, so min_reachable is `from`: all the value's
+    // chunks must be resident together to copy them out.
     let min_reachable = AtomicU64::new(from);
     self
       .drive(
@@ -376,12 +366,12 @@ impl Session {
   }
 }
 
-/// Structural-index cache accessors. Each is a no-op when caching is disabled;
-/// the actual table logic lives in `cache.rs`. Called from `count.rs` /
+/// Structural-index cache accessors (table logic itself lives in `cache.rs`).
+/// Each is a no-op when caching is disabled. Called from `count.rs` /
 /// `cursor.rs` as scans learn child counts, closes, and array landmarks.
 impl Session {
-  /// Run `f` against the cache under the lock, skipping entirely when caching is
-  /// off. The lock is never held across an `.await`.
+  /// Run `f` against the cache under the lock, skipping when caching is off. The
+  /// lock is never held across an `.await`.
   fn with_cache<R>(&self, f: impl FnOnce(&mut StructuralIndex) -> R) -> Option<R> {
     if !self.cache_enabled {
       return None;
@@ -389,8 +379,8 @@ impl Session {
     Some(f(&mut self.cache.lock().unwrap()))
   }
 
-  /// Cached child count for `(anchor, path)`, when a prior `count`/`iter`/`walk`
-  /// learned it - lets a repeat `count` skip the scan entirely.
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`/`walk`
+  /// learned it - lets a repeat `count` skip the scan.
   pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
     self
       .with_cache(|c| c.get(anchor, path)?.child_count())
@@ -422,9 +412,8 @@ impl Session {
     self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
   }
 
-  /// Record an array resume-point landmark `(index, offset)` at `(anchor, path)` -
-  /// used by `iter`/`walk` early termination so a later random index resumes
-  /// near the stop point.
+  /// Record an array resume-point landmark `(index, offset)` so a later random
+  /// index resumes near where `iter`/`walk` stopped.
   pub(crate) fn store_array_resume_point(
     &self,
     base_depth: u32,
@@ -438,16 +427,15 @@ impl Session {
   }
 }
 
-/// The chunk-fault retry engine.
 impl Session {
-  /// The shared retry loop: build a fresh [`Walker`] over the window, run a sync
-  /// `step`, and on `ChunkMiss(off)` read a burst of chunks (sized by
-  /// `burst_for`) into the window, drop everything below `min_reachable`, and retry.
+  /// The shared chunk-fault retry loop: build a fresh [`Walker`] over the
+  /// window, run a sync `step`, and on `ChunkMiss(off)` read a burst (sized by
+  /// `burst_for`) into the window, drop everything below `min_reachable`, retry.
   ///
-  /// `min_reachable` is the lowest offset the step might still read; the step updates it
-  /// as it commits forward progress. Dropping below it keeps the window bounded
-  /// while never evicting a chunk a behind-frontier `read_range` (object keys)
-  /// still needs - the min_reachable sits at or below the current iteration's start.
+  /// `min_reachable` is the lowest offset the step might still read; the step
+  /// advances it as it commits forward progress. Dropping below it keeps the
+  /// window bounded without evicting a chunk a behind-frontier `read_range`
+  /// (object keys) still needs.
   pub(crate) async fn drive<T>(
     &self,
     window: &mut ChunkWindow,
@@ -475,12 +463,11 @@ impl Session {
   }
 }
 
-/// RAII scope for a one-shot query (`locate_at` / `get_at` / `count_at`): owns
-/// the transient [`ChunkWindow`] so its chunks are released when the query
-/// returns, including on early-`?` and early-`return` paths.
+/// RAII scope for a one-shot query: owns the transient [`ChunkWindow`] so its
+/// chunks are released on return, including early-`?` and early-`return` paths.
 ///
-/// The iterators in `cursor.rs` don't use this: they keep a long-lived window
-/// across yields and prune to the scan frontier explicitly via [`Session::prune_window`].
+/// The iterators in `cursor.rs` don't use this - they keep a long-lived window
+/// across yields and prune it explicitly via [`Session::prune_window`].
 pub(crate) struct Query {
   pub(crate) window: ChunkWindow,
 }
@@ -503,8 +490,7 @@ mod tests {
   use super::*;
   use crate::source::{InMemoryStream, SourceError};
 
-  /// Wraps an [`InMemoryStream`] and counts its `read` calls, so the cache's
-  /// effect on chunk faulting is directly observable.
+  /// Counts `read` calls so the cache's effect on chunk faulting is observable.
   struct CountingSource {
     inner: InMemoryStream,
     reads: Arc<AtomicUsize>,
@@ -543,7 +529,7 @@ mod tests {
     Segment::Member(name.into())
   }
 
-  /// `{"a":{"b":{"f0":0,...,"f199":199,"c":1,"d":2}}}` - c and d are the last two
+  /// `{"a":{"b":{"f0":0,...,"f199":199,"c":1,"d":2}}}` - c and d are the last
   /// members of a large object, so a cold scan of `b` is expensive.
   fn deep_object_doc() -> String {
     let mut b = String::from("{");
@@ -603,7 +589,7 @@ mod tests {
     let path_c = [member("a"), member("b"), member("c")];
     let path_d = [member("a"), member("b"), member("d")];
 
-    // Warm: resolve c (populates the chain + b's member table), then d resumes
+    // Warm: resolve c (populates the chain + b's member table), so d resumes
     // from c's resume_point - a one-member scan.
     let (warm, warm_reads) = counting_session(
       deep_object_doc(),
@@ -683,9 +669,8 @@ mod tests {
   #[tokio::test]
   async fn cache_backward_array_get_faults_fewer_chunks() {
     // The multi-landmark payoff: one deep get plants chunk-cadence landmarks
-    // across the array, so a *backward* re-get resumes from the nearest landmark
-    // below its index instead of rescanning from the open - impossible under the
-    // old single forward-only landmark (which parked at the deep index).
+    // across the array, so a backward re-get resumes from the nearest landmark
+    // below its index instead of rescanning from the open.
     let doc = flat_array_doc(200, 120);
     let deep = [member("arr"), Segment::Element(180)];
     let back = [member("arr"), Segment::Element(20)];
@@ -746,7 +731,7 @@ mod tests {
 
   #[tokio::test]
   async fn cache_disabled_still_resolves() {
-    // budget 0 => no caching; results must be identical and reads still happen.
+    // budget 0 => no caching; results must still resolve.
     let (s, _reads) =
       counting_session(deep_object_doc(), 256, 0, DEFAULT_OBJECT_MEMBER_CAP, DEFAULT_ARRAY_INDEX_INTERVAL);
     assert!(!s.cache_enabled);
@@ -762,10 +747,8 @@ mod tests {
     assert!(s.cache.lock().unwrap().get(0, &path).is_none());
   }
 
-  /// Inspect the cache directly (the test module is a child of `session`, so it
-  /// can read the private `cache` field). Pins the *mechanism* - which nodes and
-  /// members a scan tables - complementing the read-count tests that prove the
-  /// resulting benefit.
+  /// Pins the mechanism - which nodes and members a scan tables - complementing
+  /// the read-count tests that prove the resulting benefit.
   #[tokio::test]
   async fn cache_state_records_walked_containers() {
     // {"a":{"b":{"c":1,"d":2,"e":3}}}: resolving c then d tables both on the
@@ -829,8 +812,8 @@ mod tests {
       .await
       .unwrap()
       .expect("element 40 resolves");
-    // The nearest landmark at or below the resolved index is the index itself -
-    // an exact landmark was planted at the target (plus chunk-cadence ones below).
+    // An exact landmark was planted at the target, so the nearest at or below 40
+    // is 40 itself.
     let nearest = s
       .cache
       .lock()
@@ -862,9 +845,9 @@ mod tests {
     );
   }
 
-  /// A full linear scan of a many-chunk document keeps the byte window bounded
-  /// by the burst, never by document size: the bounded-memory contract, now an
-  /// internal invariant (there is no `cacheStats` to assert it through).
+  /// The bounded-memory contract: a full scan of a many-chunk document keeps the
+  /// byte window bounded by the burst, not by document size. An internal
+  /// invariant (no `cacheStats` to assert it through).
   #[tokio::test]
   async fn window_stays_bounded_under_full_scan() {
     // 4 MiB doc of a flat array of small objects; 4 KiB chunks => ~1000 chunks.

@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::source::{ByteStream, SourceError};
 
-/// A primitive needed a chunk not resident in the window; the async driver
-/// reads the chunk at this offset and retries the primitive.
+/// Primitive needed a non-resident chunk; the async driver reads the chunk at
+/// this offset and retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("chunk at offset {0} not loaded")]
 pub struct ChunkMiss(pub u64);
@@ -46,7 +46,7 @@ impl ChunkWindow {
     self.chunks.insert(chunk_start, bytes);
   }
 
-  /// Resident-chunk count, used only to assert the bounded-memory invariant in tests.
+  /// Resident-chunk count; only used to assert the bounded-memory invariant.
   #[cfg(test)]
   pub fn len(&self) -> usize {
     self.chunks.len()
@@ -67,8 +67,8 @@ impl ChunkWindow {
   }
 
   /// Drop every chunk below the one containing `min_reachable`. Forward-only
-  /// traversal can never revisit bytes below the resolver's committed position,
-  /// so this keeps the window bounded as the scan advances.
+  /// traversal never revisits bytes below the committed position, so this keeps
+  /// the window bounded as the scan advances.
   pub fn drop_below(&mut self, min_reachable: u64) {
     let fc = self.chunk_start_of(min_reachable);
     self.chunks.retain(|&off, _| off >= fc);
@@ -76,8 +76,7 @@ impl ChunkWindow {
 
   /// Bytes of the chunk at chunk-aligned `chunk_start`, or `ChunkMiss` if not
   /// resident. The slice is tied to the window so the [`Walker`]'s per-step
-  /// chunk cache can hold it across `&mut self` calls; all walker byte access
-  /// (`byte_at`, `read_range`, `block_at`) builds on this.
+  /// chunk cache can hold it across `&mut self` calls.
   #[inline]
   pub(crate) fn chunk_for(&self, chunk_start: u64) -> Result<&[u8], ChunkMiss> {
     self
@@ -91,8 +90,8 @@ impl ChunkWindow {
 const MIN_CHUNK_BYTES: usize = 64;
 
 /// Upper bound on a single coalesced `source.read`: a larger burst splits into
-/// several reads so the transient buffer stays bounded (independent of the
-/// doubling burst's chunk count) while still collapsing per-chunk reads.
+/// several reads so the transient buffer stays bounded, independent of the
+/// burst's chunk count.
 const MAX_COALESCED_READ_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -123,11 +122,11 @@ impl ChunkReader {
     self.chunk_bytes
   }
 
-  /// Read `n` chunks from chunk-aligned `start` (ascending order), coalescing
+  /// Read `n` chunks from chunk-aligned `start` (ascending), coalescing
   /// contiguous chunks into reads of at most [`MAX_COALESCED_READ_BYTES`] and
-  /// splitting each read back into independent per-chunk `Bytes` so dropping one
-  /// frees its bytes without retaining the whole coalesced buffer. Clamps the
-  /// span to end-of-source; the final chunk may be a partial tail.
+  /// splitting each back into per-chunk `Bytes` so dropping one frees its bytes
+  /// without retaining the whole coalesced buffer. Clamps to end-of-source; the
+  /// final chunk may be a partial tail.
   pub async fn read_chunks(&self, start: u64, n: u64) -> Result<Vec<(u64, Bytes)>, ReaderError> {
     debug_assert!(start.is_multiple_of(self.chunk_bytes));
     let cs = self.chunk_bytes;
@@ -202,8 +201,7 @@ mod tests {
     assert_eq!(w.len(), 2);
   }
 
-  /// Wraps an [`InMemoryStream`] and counts its `read` calls so coalescing is
-  /// directly observable.
+  /// Counts `read` calls so coalescing is directly observable.
   struct CountingSource {
     inner: InMemoryStream,
     reads: Arc<AtomicUsize>,
@@ -245,7 +243,7 @@ mod tests {
 
   #[tokio::test]
   async fn coalesces_contiguous_run_into_one_read() {
-    // the 4 MiB cap dwarfs the 512 B span, so 8 chunks fold into one source.read
+    // 4 MiB cap dwarfs the 512 B span, so 8 chunks fold into one read
     let (reader, reads) = reader(512, 64);
     let chunks = reader.read_chunks(0, 8).await.unwrap();
     assert_eq!(chunks.len(), 8, "one entry per chunk in the span");
@@ -276,8 +274,8 @@ mod tests {
 
   #[tokio::test]
   async fn per_chunk_bytes_are_independent_allocations() {
-    // can't observe the allocator directly; copy_from_slice makes each chunk
-    // its own Bytes, so dropping one can't keep the others alive.
+    // can't observe the allocator; copy_from_slice gives each chunk its own
+    // Bytes, so dropping one can't keep the others alive.
     let (reader, _reads) = reader(512, 64);
     let chunks = reader.read_chunks(0, 8).await.unwrap();
     for (_, data) in &chunks {
