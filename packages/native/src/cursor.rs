@@ -45,6 +45,10 @@ pub struct Cursor {
   /// The child entry this cursor was yielded as by `walk` (member key or array
   /// element index, plus its location). `None` for the root cursor.
   entry: Option<ChildEntry>,
+  /// Document-tree depth of this cursor's anchor (root = 0). Passed to the cache
+  /// as the `base_depth` for every query so nodes carry their true tree depth
+  /// (the eviction key), which the re-anchored relative path can't express.
+  depth: u32,
 }
 
 impl Cursor {
@@ -53,14 +57,16 @@ impl Cursor {
       session,
       anchor: None,
       entry: None,
+      depth: 0,
     }
   }
 
-  fn child(session: Arc<Session>, entry: ChildEntry) -> Self {
+  fn child(session: Arc<Session>, entry: ChildEntry, depth: u32) -> Self {
     Self {
       session,
       anchor: Some(entry.location()),
       entry: Some(entry),
+      depth,
     }
   }
 
@@ -75,7 +81,7 @@ impl Cursor {
   pub async fn has(&self, path: Vec<Either<String, u32>>) -> napi::Result<bool> {
     self
       .session
-      .has_at(&path::from_napi(path), self.anchor_start())
+      .has_at(&path::from_napi(path), self.anchor_start(), self.depth)
       .await
       .map_err(map_err)
   }
@@ -90,7 +96,7 @@ impl Cursor {
   ) -> napi::Result<Either<serde_json::Value, ()>> {
     self
       .session
-      .get_at(&path::from_napi(path), self.anchor_start())
+      .get_at(&path::from_napi(path), self.anchor_start(), self.depth)
       .await
       .map(|opt| match opt {
         Some(v) => Either::A(v),
@@ -101,7 +107,7 @@ impl Cursor {
 
   #[napi(ts_args_type = "path: Array<string | number>")]
   pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
-    crate::count::at(&self.session, &path::from_napi(path), self.anchor_start())
+    crate::count::at(&self.session, &path::from_napi(path), self.anchor_start(), self.depth)
       .await
       .map(|n| n as f64)
       .map_err(map_err)
@@ -122,6 +128,7 @@ impl Cursor {
       self.session.clone(),
       path::from_napi(path),
       self.anchor_start(),
+      self.depth,
       options.select_ir,
       (options.batch as usize).max(1),
       options.with_key.unwrap_or(false),
@@ -134,6 +141,7 @@ impl Cursor {
       self.session.clone(),
       path::from_napi(path),
       self.anchor_start(),
+      self.depth,
     )
   }
 }
@@ -144,6 +152,9 @@ impl Cursor {
 struct StreamCore {
   path: Vec<Segment>,
   anchor_start: u64,
+  /// Document depth of `anchor_start` (the cursor that opened this stream).
+  /// Children are at `base_depth + path.len() + 1`.
+  base_depth: u32,
   initialized: bool,
   /// Set after first `next()` finishes initialization. `None` if the path didn't
   /// resolve, or resolved to a non-container (iteration yields nothing).
@@ -160,10 +171,11 @@ struct StreamCore {
 }
 
 impl StreamCore {
-  fn new(session: &Session, path: Vec<Segment>, anchor_start: u64) -> Self {
+  fn new(session: &Session, path: Vec<Segment>, anchor_start: u64, base_depth: u32) -> Self {
     Self {
       path,
       anchor_start,
+      base_depth,
       initialized: false,
       child_cursor: None,
       base_value_start: None,
@@ -189,12 +201,13 @@ impl IterState {
     session: &Session,
     path: Vec<Segment>,
     anchor_start: u64,
+    base_depth: u32,
     select_ir: Option<String>,
     batch: usize,
     with_key: bool,
   ) -> Self {
     Self {
-      core: StreamCore::new(session, path, anchor_start),
+      core: StreamCore::new(session, path, anchor_start, base_depth),
       select_ir,
       select: None,
       batch,
@@ -207,7 +220,7 @@ impl IterState {
 /// the first yield's read is hot. Shared by `iter` and `walk`; `select`
 /// compilation (iter-only) happens in the caller before this runs.
 async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
-  if let Some(start) = session.locate_at(&core.path, core.anchor_start).await? {
+  if let Some(start) = session.locate_at(&core.path, core.anchor_start, core.base_depth).await? {
     core.base_value_start = Some(start);
     core.child_cursor = session.enter_container(start, &mut core.window).await?;
     if let Some(w) = &core.child_cursor {
@@ -227,7 +240,14 @@ async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<()
 fn record_early_break(session: &Session, core: &StreamCore) {
   if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
     if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
-      session.store_array_resume_point(core.anchor_start, &core.path, vs, w.index, w.next_offset);
+      session.store_array_resume_point(
+        core.base_depth,
+        core.anchor_start,
+        &core.path,
+        vs,
+        w.index,
+        w.next_offset,
+      );
     }
   }
 }
@@ -249,11 +269,12 @@ impl CursorIter {
     session: Arc<Session>,
     path: Vec<Segment>,
     anchor_start: u64,
+    base_depth: u32,
     select_ir: Option<String>,
     batch: usize,
     with_key: bool,
   ) -> Self {
-    let state = IterState::new(&session, path, anchor_start, select_ir, batch, with_key);
+    let state = IterState::new(&session, path, anchor_start, base_depth, select_ir, batch, with_key);
     Self {
       session,
       state: Arc::new(AsyncMutex::new(state)),
@@ -315,10 +336,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         window,
         path,
         anchor_start,
+        base_depth,
         base_value_start,
         yielded,
         ..
       } = core;
+      let base_depth = *base_depth;
+      // Children of the iterated container sit one level below it.
+      let child_depth = base_depth + path.len() as u32 + 1;
       let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
@@ -333,8 +358,9 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
             // child count + close on the base node (a one-time exit scalar).
             // iter only ever runs over arrays (objects are gated above).
             if let Some(vs) = *base_value_start {
-              session.store_child_count(*anchor_start, path, ContainerKind::Array, vs, *yielded);
+              session.store_child_count(base_depth, *anchor_start, path, ContainerKind::Array, vs, *yielded);
               session.store_close(
+                base_depth,
                 *anchor_start,
                 path,
                 ContainerKind::Array,
@@ -355,7 +381,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
           };
           let value = match select {
             Some(sel) => {
-              crate::eval::project(&session, sel, child.location().start, window).await?
+              crate::eval::project(&session, sel, child.location().start, child_depth, window).await?
             }
             None => session.materialize(child.location(), window).await?,
           };
@@ -400,8 +426,8 @@ pub struct CursorWalk {
 }
 
 impl CursorWalk {
-  fn new(session: Arc<Session>, path: Vec<Segment>, anchor_start: u64) -> Self {
-    let core = StreamCore::new(&session, path, anchor_start);
+  fn new(session: Arc<Session>, path: Vec<Segment>, anchor_start: u64, base_depth: u32) -> Self {
+    let core = StreamCore::new(&session, path, anchor_start, base_depth);
     Self {
       session,
       state: Arc::new(AsyncMutex::new(core)),
@@ -435,10 +461,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         window,
         path,
         anchor_start,
+        base_depth,
         base_value_start,
         yielded,
         ..
       } = &mut *guard;
+      let base_depth = *base_depth;
+      // Yielded children sit one level below the walked container.
+      let child_depth = base_depth + path.len() as u32 + 1;
       let Some(child_cursor) = child_cursor.as_mut() else {
         return Ok(None);
       };
@@ -451,8 +481,9 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         // Exhausted: the child_cursor sits AT the close. Record child count + close on
         // the base node - works for both object and array bases.
         if let Some(vs) = *base_value_start {
-          session.store_child_count(*anchor_start, path, child_cursor.kind, vs, *yielded);
+          session.store_child_count(base_depth, *anchor_start, path, child_cursor.kind, vs, *yielded);
           session.store_close(
+            base_depth,
             *anchor_start,
             path,
             child_cursor.kind,
@@ -463,7 +494,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         return Ok(None);
       };
       *yielded += 1;
-      Ok(Some(Cursor::child(session.clone(), child)))
+      Ok(Some(Cursor::child(session.clone(), child, child_depth)))
     }
   }
 
@@ -513,6 +544,8 @@ mod tests {
       source,
       chunk_bytes,
       crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
+      crate::session::DEFAULT_OBJECT_MEMBER_CAP,
+      crate::session::DEFAULT_ARRAY_INDEX_INTERVAL,
     )
     .unwrap()
   }
@@ -525,7 +558,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_released_on_complete() {
     let s = session(500, 256);
-    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
     for _ in 0..3 {
       assert!(w.next(None).await.unwrap().is_some());
     }
@@ -550,7 +583,7 @@ mod tests {
   #[tokio::test]
   async fn pins_walk_safe_when_child_escapes() {
     let s = session(500, 256);
-    let mut w = CursorWalk::new(s.clone(), items_path(), 0);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
     let child = w.next(None).await.unwrap().expect("first child");
 
     w.complete(None).await.unwrap();
@@ -569,7 +602,7 @@ mod tests {
     let bound = window_bound();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut w = CursorWalk::new(s.clone(), items_path(), 0);
+      let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
       // After complete(), the abandoned iterator's window is cleared - no leak.
@@ -583,7 +616,7 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_released_on_complete() {
     let s = session(500, 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 1, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1, false);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -602,7 +635,7 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_batch_early_break_releases() {
     let s = session(500, 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 8, false);
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
     let guard = it.state.lock().await;
@@ -622,6 +655,7 @@ mod tests {
       s.clone(),
       items_path(),
       0,
+      0,
       Some(r#"{"one":["total"]}"#.to_string()),
       64,
       false,
@@ -638,7 +672,7 @@ mod tests {
   #[tokio::test]
   async fn iter_on_object_target_throws() {
     let s = session(50, 256);
-    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, 0, None, 8, false);
     let err = it.next(None).await.expect_err("object target must throw");
     assert!(
       err.reason.contains("use walk()"),

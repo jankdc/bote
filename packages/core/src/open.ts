@@ -18,14 +18,33 @@ export const DEFAULT_ITER_BATCH = 1000
 
 export interface OpenOptions {
   /**
-   * Capacity of the structural-index cache, in slots: one slot per cached
-   * container plus one per tabled object member. The cache restores cross-query
-   * warmth - a later query that lands in an already-walked container starts its
-   * scan near the target - and caches no source bytes, so the resident-memory
-   * bound is untouched. `0` disables it entirely. Omit to use the native
-   * default (1024).
+   * Slot budget for the structural-index cache: one slot per cached container
+   * plus one per tabled object member. When a scan tips the cache over this
+   * budget, the deepest (least navigationally useful) containers are evicted
+   * first, LRU-tiebroken, keeping the shallow backbone that resumes future
+   * scans. Bounds resident cache memory regardless of document size. `0`
+   * disables the cache entirely. Omit for the native default (1024).
    */
   indexCacheEntries?: number
+  /**
+   * Max object members tabled per walked container in the structural-index
+   * cache. The table is a dense prefix; past the cap, lookups of later members
+   * resume-scan from the cap boundary. Lower trades cache memory for resume work
+   * on pathologically large objects. `0` disables object member indexing. Omit
+   * for the native default (unbounded).
+   */
+  objectMemberCap?: number
+  /**
+   * Element-index stride between sampled array landmarks in the structural-index
+   * cache. A later index resumes from the nearest landmark at or before it, so a
+   * smaller stride means denser landmarks (more memory, shorter resume scans).
+   * `0` disables array landmark indexing. Omit for the native default (16).
+   *
+   * Setting both `objectMemberCap` and `arrayIndexInterval` to `0` disables the
+   * cache entirely (no source bytes are ever cached either way), as does
+   * `indexCacheEntries: 0`.
+   */
+  arrayIndexInterval?: number
 }
 
 export interface Cursor {
@@ -71,11 +90,15 @@ export interface RootCursor extends Cursor, AsyncDisposable {
  * drives the reader's own `close()` exactly once.
  */
 export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
-  const indexCacheEntries = options?.indexCacheEntries
-  if (indexCacheEntries !== undefined && (!Number.isInteger(indexCacheEntries) || indexCacheEntries < 0)) {
-    throw new RangeError(
-      `open: indexCacheEntries must be a non-negative integer (0 disables), got ${indexCacheEntries}`,
-    )
+  const { indexCacheEntries, objectMemberCap, arrayIndexInterval } = options ?? {}
+  for (const [name, value] of [
+    ['indexCacheEntries', indexCacheEntries],
+    ['objectMemberCap', objectMemberCap],
+    ['arrayIndexInterval', arrayIndexInterval],
+  ] as const) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+      throw new RangeError(`open: ${name} must be a non-negative integer (0 disables), got ${value}`)
+    }
   }
   const reader = await source.open()
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
@@ -85,6 +108,8 @@ export async function open(source: Source, options?: OpenOptions): Promise<RootC
       size: reader.size,
       chunkBytes,
       indexCacheEntries,
+      objectMemberCap,
+      arrayIndexInterval,
       read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
     })
   } catch (err) {

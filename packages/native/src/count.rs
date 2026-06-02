@@ -21,6 +21,7 @@ pub async fn at(
   session: &Session,
   path: &[Segment],
   anchor_start: u64,
+  base_depth: u32,
 ) -> Result<u64, SessionError> {
   // repeat count is O(1): prior scan cached it, no chunk faulted.
   if let Some(n) = session.cached_child_count(anchor_start, path) {
@@ -30,7 +31,7 @@ pub async fn at(
   // run_locate (not run_resolve): we only need the container's start; the count
   // comes from a per-comma scan started at the opener.
   let Some(start) = session
-    .run_locate(path, anchor_start, &mut q.window)
+    .run_locate(path, anchor_start, base_depth, &mut q.window)
     .await?
   else {
     return Ok(0); // missing path
@@ -42,7 +43,7 @@ pub async fn at(
   let count = children(session, cursor.next_offset, &mut q.window).await?;
   // store the count, not the close offset: the comma scan never sees the close
   // (see index_cache / the design doc).
-  session.store_child_count(anchor_start, path, kind, start, count);
+  session.store_child_count(base_depth, anchor_start, path, kind, start, count);
   Ok(count)
 }
 

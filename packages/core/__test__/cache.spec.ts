@@ -142,7 +142,7 @@ test('scattered_and_backward_index_access_is_consistent', async (t) => {
   const data = enc('{"arr":[' + Array.from({ length: n }, (_, i) => `${i * 3}`).join(',') + ']}')
   const idxs = [299, 0, 150, 75, 200, 10, 299, 150, 1]
   const on = await open(memorySource(data, 64))
-  const off = await open(memorySource(data, 64), { indexCacheEntries: 0 })
+  const off = await open(memorySource(data, 64), { objectMemberCap: 0, arrayIndexInterval: 0 })
   t.after(() => on.close())
   t.after(() => off.close())
   for (const i of idxs) {
@@ -150,6 +150,34 @@ test('scattered_and_backward_index_access_is_consistent', async (t) => {
     assert.equal(await off.get('arr', i), i * 3)
   }
   assert.equal(await on.get('arr', n), undefined)
+})
+
+test('small_index_cache_budget_is_transparent_under_eviction', async (t) => {
+  // A tight slot budget forces near-constant eviction; values must stay identical
+  // to the default (effectively unbounded here) and the disabled cache. The
+  // scattered, repeated workload re-derives both object members and array indices,
+  // so any node dropped by eviction is exercised again on re-query - eviction is a
+  // performance detail, never a correctness one.
+  const n = 200
+  const rows = Array.from({ length: n }, (_, i) => `{"id":${i},"name":"r${i}","v":${i * 2}}`).join(',')
+  const data = enc(`{"rows":[${rows}]}`)
+  const tiny = await open(memorySource(data, 64), { indexCacheEntries: 4 })
+  const dflt = await open(memorySource(data, 64))
+  const off = await open(memorySource(data, 64), { indexCacheEntries: 0 })
+  t.after(() => tiny.close())
+  t.after(() => dflt.close())
+  t.after(() => off.close())
+  const idxs = [199, 0, 100, 50, 150, 5, 199, 100, 1]
+  for (const i of idxs) {
+    assert.equal(await tiny.get('rows', i, 'name'), `r${i}`)
+    assert.equal(await dflt.get('rows', i, 'name'), `r${i}`)
+    assert.equal(await off.get('rows', i, 'name'), `r${i}`)
+    assert.equal(await tiny.get('rows', i, 'v'), i * 2)
+    assert.equal(await tiny.get('rows', i, 'missing'), undefined)
+  }
+  assert.equal(await tiny.count('rows'), n)
+  assert.equal(await dflt.count('rows'), n)
+  assert.equal(await off.count('rows'), n)
 })
 
 // Cache EFFECT: a warm query must fault strictly fewer chunks than an identical
@@ -260,7 +288,7 @@ test('repeat_count_issues_no_reads', async (t) => {
 })
 
 test('cache_disabled_is_correct', async (t) => {
-  const cursor = await open(memorySource(enc('{"a":1,"b":2,"c":3}')), { indexCacheEntries: 0 })
+  const cursor = await open(memorySource(enc('{"a":1,"b":2,"c":3}')), { objectMemberCap: 0, arrayIndexInterval: 0 })
   t.after(() => cursor.close())
   assert.equal(await cursor.get('c'), 3)
   assert.equal(await cursor.get('a'), 1)
@@ -268,19 +296,21 @@ test('cache_disabled_is_correct', async (t) => {
   assert.equal(await cursor.count(), 3)
 })
 
-test('cache_small_budget_stays_correct_under_eviction', async (t) => {
-  // A tiny budget forces whole-node eviction; results must stay correct.
-  const cursor = await open(memorySource(enc(bigObject(500)), 256), { indexCacheEntries: 4 })
+test('cache_capped_object_members_stays_correct', async (t) => {
+  // A tiny object cap tables only a dense prefix; members past the cap resume-scan
+  // from the cap boundary, so every lookup must still resolve correctly.
+  const cursor = await open(memorySource(enc(bigObject(500)), 256), { objectMemberCap: 4 })
   t.after(() => cursor.close())
-  assert.equal(await cursor.get('k0001'), 1)
-  assert.equal(await cursor.get('k0400'), 400)
+  assert.equal(await cursor.get('k0001'), 1) // within the tabled prefix
+  assert.equal(await cursor.get('k0400'), 400) // beyond the cap: resumes from the boundary
   assert.equal(await cursor.get('k0001'), 1)
   assert.equal(await cursor.has('k0499'), true) // last member, terminated by `}`
   assert.equal(await cursor.has('k9999'), false)
 })
 
-test('open_rejects_invalid_indexCacheEntries', async () => {
-  await assert.rejects(() => open(memorySource(enc('{}')), { indexCacheEntries: -1 }), RangeError)
-  await assert.rejects(() => open(memorySource(enc('{}')), { indexCacheEntries: 1.5 }), RangeError)
-  await assert.rejects(() => open(memorySource(enc('{}')), { indexCacheEntries: Number.NaN }), RangeError)
+test('open_rejects_invalid_cache_knobs', async () => {
+  await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: -1 }), RangeError)
+  await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: 1.5 }), RangeError)
+  await assert.rejects(() => open(memorySource(enc('{}')), { arrayIndexInterval: -1 }), RangeError)
+  await assert.rejects(() => open(memorySource(enc('{}')), { arrayIndexInterval: Number.NaN }), RangeError)
 })

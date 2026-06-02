@@ -42,10 +42,13 @@ static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::ne
 ///   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
 ///     `.byteLength` is the actual count read, `<= length`
 ///   - `chunkBytes: number` read granularity (whole, multiple of 64)
+///   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
+///   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
+///   - `arrayIndexInterval?: number` element stride between array landmarks (0 disables; default 16)
 #[napi]
 pub fn open(
   #[napi(
-    ts_arg_type = "{ size: number; chunkBytes: number; indexCacheEntries?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
+    ts_arg_type = "{ size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
   )]
   source: Object<'_>,
 ) -> napi::Result<Cursor> {
@@ -76,24 +79,30 @@ pub fn open(
     }
   };
 
-  // structural-index cache children budget. unlike chunkBytes, 0 is allowed (disables
-  // the cache); missing => default.
-  let index_cache_budget = match source.get_named_property::<Option<f64>>("indexCacheEntries") {
-    Ok(Some(n)) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
-      n as usize
-    }
-    Ok(Some(n)) => {
-      return Err(napi::Error::from_reason(format!(
-        "indexCacheEntries must be a whole non-negative number of entries, got {n}"
-      )));
-    }
-    _ => crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
-  };
+  // structural-index cache knobs. unlike chunkBytes, 0 is allowed (disables that
+  // dimension; budget 0 or both caps 0 = cache off); missing => default.
+  let index_cache_budget = whole_nonneg(
+    &source,
+    "indexCacheEntries",
+    crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
+  )?;
+  let object_member_cap = whole_nonneg(
+    &source,
+    "objectMemberCap",
+    crate::session::DEFAULT_OBJECT_MEMBER_CAP,
+  )?;
+  let array_index_interval = whole_nonneg(
+    &source,
+    "arrayIndexInterval",
+    crate::session::DEFAULT_ARRAY_INDEX_INTERVAL,
+  )?;
 
   let session = Session::new(
     Arc::new(JsByteStream::new(ts_read_fn, size as u64)),
     chunk_bytes,
     index_cache_budget,
+    object_member_cap,
+    array_index_interval,
   )
   .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
@@ -151,4 +160,16 @@ pub fn heap_profile_stop() -> napi::Result<()> {
   Err(napi::Error::from_reason(
     "native built without `heap-profile` feature; rebuild with `--features heap-profile`",
   ))
+}
+
+fn whole_nonneg(source: &Object<'_>, name: &str, default: usize) -> napi::Result<usize> {
+  match source.get_named_property::<Option<f64>>(name) {
+    Ok(Some(n)) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= usize::MAX as f64 => {
+      Ok(n as usize)
+    }
+    Ok(Some(n)) => Err(napi::Error::from_reason(format!(
+      "{name} must be a whole non-negative number, got {n}"
+    ))),
+    _ => Ok(default),
+  }
 }

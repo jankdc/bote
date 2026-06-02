@@ -54,8 +54,11 @@ export interface IterArgs {
  *   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
  *     `.byteLength` is the actual count read, `<= length`
  *   - `chunkBytes: number` read granularity (whole, multiple of 64)
+ *   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
+ *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
+ *   - `arrayIndexInterval?: number` element stride between array landmarks (0 disables; default 16)
  */
-export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
+export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

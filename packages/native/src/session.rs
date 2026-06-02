@@ -30,8 +30,13 @@ use crate::select::SelectError;
 use crate::source::ByteStream;
 use crate::walker::{self, SkipState, TraverseError, Walker};
 
-/// Children-budget default when the facade doesn't pass `indexCacheEntries`.
+/// Structural-index cache slot budget default when the facade omits
+/// `indexCacheEntries` (one slot per node + one per tabled member). `0` disables.
 pub(crate) const DEFAULT_INDEX_CACHE_ENTRIES: usize = 1024;
+/// Object member cap default (unbounded) when the facade omits `objectMemberCap`.
+pub(crate) const DEFAULT_OBJECT_MEMBER_CAP: usize = usize::MAX;
+/// Array landmark element stride default when the facade omits `arrayIndexInterval`.
+pub(crate) const DEFAULT_ARRAY_INDEX_INTERVAL: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -53,8 +58,12 @@ pub struct Session {
   /// The lock is held only for the synchronous lookup/write-back, never across
   /// an `.await`.
   cache: Mutex<StructuralIndex>,
-  /// Mirror of `budget > 0` so the hot gate checks never take the lock.
+  /// Mirror of the cache config so the hot path reads it without the lock.
   cache_enabled: bool,
+  /// Object member cap: object members are recorded only when `> 0`.
+  object_member_cap: usize,
+  /// Array landmark element stride handed to the resolver's sampler.
+  array_interval: usize,
 }
 
 /// Cap on the adaptive doubling burst. The resolver restarts from the anchor on
@@ -84,15 +93,21 @@ impl Session {
     source: Arc<dyn ByteStream>,
     chunk_bytes: usize,
     index_cache_budget: usize,
+    object_member_cap: usize,
+    array_interval: usize,
   ) -> Result<Arc<Self>, SessionError> {
     let source_size = source.size();
     let reader = ChunkReader::new(source, chunk_bytes)?;
+    let cache = StructuralIndex::new(index_cache_budget, object_member_cap, array_interval);
+    let cache_enabled = cache.is_enabled();
     Ok(Arc::new(Self {
       source_size,
       chunk_bytes: reader.chunk_bytes(),
       reader,
-      cache: Mutex::new(StructuralIndex::new(index_cache_budget)),
-      cache_enabled: index_cache_budget > 0,
+      cache: Mutex::new(cache),
+      cache_enabled,
+      object_member_cap,
+      array_interval,
     }))
   }
 
@@ -120,16 +135,22 @@ impl Session {
     &self,
     path: &[Segment],
     anchor_start: u64,
+    base_depth: u32,
   ) -> Result<Option<u64>, SessionError> {
     let mut window = self.new_window();
-    self.run_locate(path, anchor_start, &mut window).await
+    self.run_locate(path, anchor_start, base_depth, &mut window).await
   }
 
-  pub async fn has_at(&self, path: &[Segment], anchor_start: u64) -> Result<bool, SessionError> {
+  pub async fn has_at(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    base_depth: u32,
+  ) -> Result<bool, SessionError> {
     let mut window = self.new_window();
     Ok(
       self
-        .run_resolve(path, anchor_start, &mut window)
+        .run_resolve(path, anchor_start, base_depth, &mut window)
         .await?
         .is_some(),
     )
@@ -139,9 +160,10 @@ impl Session {
     &self,
     path: &[Segment],
     anchor_start: u64,
+    base_depth: u32,
   ) -> Result<Option<serde_json::Value>, SessionError> {
     let mut window = self.new_window();
-    let Some(loc) = self.run_resolve(path, anchor_start, &mut window).await? else {
+    let Some(loc) = self.run_resolve(path, anchor_start, base_depth, &mut window).await? else {
       return Ok(None);
     };
     let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
@@ -218,6 +240,7 @@ impl Session {
     &self,
     path: &[Segment],
     anchor_start: u64,
+    base_depth: u32,
     window: &mut ChunkWindow,
   ) -> Result<Option<u64>, SessionError> {
     // Walk cached container hops to the deepest landmark (lock held only for
@@ -230,7 +253,13 @@ impl Session {
     // ResolveState persists across `ChunkMiss` retries; min_reachable follows the
     // resolver's committed iteration offset so chunks behind it are dropped while
     // the key being read (which `read_range`s behind the scan position) stays resident.
-    let mut state = ResolveState::resume(start, seg, hint, self.cache_enabled);
+    let mut state = ResolveState::resume(
+      start,
+      seg,
+      hint,
+      self.object_member_cap > 0,
+      self.array_interval,
+    );
     let min_reachable = AtomicU64::new(start);
     let result = self
       .drive(window, &min_reachable, doubling_burst(), |walker| {
@@ -244,7 +273,7 @@ impl Session {
         .cache
         .lock()
         .unwrap()
-        .apply_scan_record(anchor_start, path, &scan_record);
+        .apply_scan_record(base_depth, anchor_start, path, &scan_record);
     }
     Ok(result)
   }
@@ -254,9 +283,10 @@ impl Session {
     &self,
     path: &[Segment],
     anchor_start: u64,
+    base_depth: u32,
     window: &mut ChunkWindow,
   ) -> Result<Option<ValueLocation>, SessionError> {
-    let Some(start) = self.run_locate(path, anchor_start, window).await? else {
+    let Some(start) = self.run_locate(path, anchor_start, base_depth, window).await? else {
       return Ok(None);
     };
     if !self.cache_enabled {
@@ -275,7 +305,7 @@ impl Session {
     let kind = self.peek_container_kind(start, window).await?;
     let end = self.skip_value_at(start, window).await?;
     if let Some(kind) = kind {
-      self.store_close(anchor_start, path, kind, start, end);
+      self.store_close(base_depth, anchor_start, path, kind, start, end);
     }
     Ok(Some(ValueLocation { start, end }))
   }
@@ -369,25 +399,27 @@ impl Session {
 
   pub(crate) fn store_child_count(
     &self,
+    base_depth: u32,
     anchor: u64,
     path: &[Segment],
     kind: ContainerKind,
     value_start: u64,
     count: u64,
   ) {
-    self.with_cache(|c| c.store_child_count(anchor, path, kind, value_start, count));
+    self.with_cache(|c| c.store_child_count(base_depth, anchor, path, kind, value_start, count));
   }
 
   /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
   pub(crate) fn store_close(
     &self,
+    base_depth: u32,
     anchor: u64,
     path: &[Segment],
     kind: ContainerKind,
     value_start: u64,
     close: u64,
   ) {
-    self.with_cache(|c| c.store_close(anchor, path, kind, value_start, close));
+    self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
   }
 
   /// Record an array resume-point landmark `(index, offset)` at `(anchor, path)` -
@@ -395,13 +427,14 @@ impl Session {
   /// near the stop point.
   pub(crate) fn store_array_resume_point(
     &self,
+    base_depth: u32,
     anchor: u64,
     path: &[Segment],
     value_start: u64,
     index: usize,
     offset: u64,
   ) {
-    self.with_cache(|c| c.merge_array_scan(anchor, path, value_start, &[(index, offset)]));
+    self.with_cache(|c| c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)]));
   }
 }
 
@@ -491,14 +524,19 @@ mod tests {
   fn counting_session(
     doc: String,
     chunk: usize,
-    budget: usize,
+    index_cache_budget: usize,
+    object_member_cap: usize,
+    array_interval: usize,
   ) -> (Arc<Session>, Arc<AtomicUsize>) {
     let reads = Arc::new(AtomicUsize::new(0));
     let source: Arc<dyn ByteStream> = Arc::new(CountingSource {
       inner: InMemoryStream::new(doc.into_bytes()),
       reads: reads.clone(),
     });
-    (Session::new(source, chunk, budget).unwrap(), reads)
+    (
+      Session::new(source, chunk, index_cache_budget, object_member_cap, array_interval).unwrap(),
+      reads,
+    )
   }
 
   fn member(name: &str) -> Segment {
@@ -567,22 +605,34 @@ mod tests {
 
     // Warm: resolve c (populates the chain + b's member table), then d resumes
     // from c's resume_point - a one-member scan.
-    let (warm, warm_reads) = counting_session(deep_object_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (warm, warm_reads) = counting_session(
+      deep_object_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut w = warm.new_window();
-    warm.run_locate(&path_c, 0, &mut w).await.unwrap().unwrap();
+    warm.run_locate(&path_c, 0, 0, &mut w).await.unwrap().unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
     assert!(warm
-      .run_locate(&path_d, 0, &mut w2)
+      .run_locate(&path_d, 0, 0, &mut w2)
       .await
       .unwrap()
       .is_some());
     let warm_n = warm_reads.load(Ordering::Relaxed);
 
     // Cold: d on a fresh session scans root, a, and all of b from their opens.
-    let (cold, cold_reads) = counting_session(deep_object_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (cold, cold_reads) = counting_session(
+      deep_object_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&path_d, 0, &mut c).await.unwrap().is_some());
+    assert!(cold.run_locate(&path_d, 0, 0, &mut c).await.unwrap().is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -595,21 +645,33 @@ mod tests {
   async fn cache_array_resume_faults_fewer_chunks() {
     let at = |i: usize| [member("arr"), Segment::Element(i)];
 
-    let (warm, warm_reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (warm, warm_reads) = counting_session(
+      big_array_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut w = warm.new_window();
-    warm.run_locate(&at(40), 0, &mut w).await.unwrap().unwrap();
+    warm.run_locate(&at(40), 0, 0, &mut w).await.unwrap().unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
     assert!(warm
-      .run_locate(&at(50), 0, &mut w2)
+      .run_locate(&at(50), 0, 0, &mut w2)
       .await
       .unwrap()
       .is_some());
     let warm_n = warm_reads.load(Ordering::Relaxed);
 
-    let (cold, cold_reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (cold, cold_reads) = counting_session(
+      big_array_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&at(50), 0, &mut c).await.unwrap().is_some());
+    assert!(cold.run_locate(&at(50), 0, 0, &mut c).await.unwrap().is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -628,17 +690,29 @@ mod tests {
     let deep = [member("arr"), Segment::Element(180)];
     let back = [member("arr"), Segment::Element(20)];
 
-    let (warm, warm_reads) = counting_session(doc.clone(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (warm, warm_reads) = counting_session(
+      doc.clone(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut w = warm.new_window();
-    warm.run_locate(&deep, 0, &mut w).await.unwrap().unwrap();
+    warm.run_locate(&deep, 0, 0, &mut w).await.unwrap().unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
-    assert!(warm.run_locate(&back, 0, &mut w2).await.unwrap().is_some());
+    assert!(warm.run_locate(&back, 0, 0, &mut w2).await.unwrap().is_some());
     let warm_n = warm_reads.load(Ordering::Relaxed);
 
-    let (cold, cold_reads) = counting_session(doc, 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (cold, cold_reads) = counting_session(
+      doc,
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&back, 0, &mut c).await.unwrap().is_some());
+    assert!(cold.run_locate(&back, 0, 0, &mut c).await.unwrap().is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -649,13 +723,19 @@ mod tests {
 
   #[tokio::test]
   async fn cache_repeat_count_issues_no_reads() {
-    let (s, reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (s, reads) = counting_session(
+      big_array_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let path = [member("arr")];
-    let first = crate::count::at(&s, &path, 0).await.unwrap();
+    let first = crate::count::at(&s, &path, 0, 0).await.unwrap();
     assert_eq!(first, 100);
     assert!(reads.load(Ordering::Relaxed) > 0, "cold count must read");
     reads.store(0, Ordering::Relaxed);
-    let second = crate::count::at(&s, &path, 0).await.unwrap();
+    let second = crate::count::at(&s, &path, 0, 0).await.unwrap();
     assert_eq!(second, 100);
     assert_eq!(
       reads.load(Ordering::Relaxed),
@@ -667,13 +747,14 @@ mod tests {
   #[tokio::test]
   async fn cache_disabled_still_resolves() {
     // budget 0 => no caching; results must be identical and reads still happen.
-    let (s, _reads) = counting_session(deep_object_doc(), 256, 0);
+    let (s, _reads) =
+      counting_session(deep_object_doc(), 256, 0, DEFAULT_OBJECT_MEMBER_CAP, DEFAULT_ARRAY_INDEX_INTERVAL);
     assert!(!s.cache_enabled);
     let path = [member("a"), member("b"), member("d")];
     let mut w = s.new_window();
-    assert!(s.run_locate(&path, 0, &mut w).await.unwrap().is_some());
+    assert!(s.run_locate(&path, 0, 0, &mut w).await.unwrap().is_some());
     // Repeat count is not short-circuited when disabled.
-    let n = crate::count::at(&s, &[member("a"), member("b")], 0)
+    let n = crate::count::at(&s, &[member("a"), member("b")], 0, 0)
       .await
       .unwrap();
     assert_eq!(n, 202);
@@ -690,14 +771,20 @@ mod tests {
     // {"a":{"b":{"c":1,"d":2,"e":3}}}: resolving c then d tables both on the
     // [a,b] node; e is never queried, so it stays untabled.
     let doc = r#"{"a":{"b":{"c":1,"d":2,"e":3}}}"#.to_string();
-    let (s, _reads) = counting_session(doc, 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (s, _reads) = counting_session(
+      doc,
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let ab = [member("a"), member("b")];
 
     // Cold: nothing cached yet.
     assert!(s.cache.lock().unwrap().get(0, &ab).is_none());
 
     let mut w = s.new_window();
-    s.run_locate(&[member("a"), member("b"), member("c")], 0, &mut w)
+    s.run_locate(&[member("a"), member("b"), member("c")], 0, 0, &mut w)
       .await
       .unwrap()
       .expect("c resolves");
@@ -713,7 +800,7 @@ mod tests {
     }
 
     let mut w2 = s.new_window();
-    s.run_locate(&[member("a"), member("b"), member("d")], 0, &mut w2)
+    s.run_locate(&[member("a"), member("b"), member("d")], 0, 0, &mut w2)
       .await
       .unwrap()
       .expect("d resolves");
@@ -728,11 +815,17 @@ mod tests {
 
   #[tokio::test]
   async fn cache_state_array_records_landmark_at_target() {
-    let (s, _reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (s, _reads) = counting_session(
+      big_array_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let arr = [member("arr")];
 
     let mut w = s.new_window();
-    s.run_locate(&[member("arr"), Segment::Element(40)], 0, &mut w)
+    s.run_locate(&[member("arr"), Segment::Element(40)], 0, 0, &mut w)
       .await
       .unwrap()
       .expect("element 40 resolves");
@@ -753,9 +846,15 @@ mod tests {
 
   #[tokio::test]
   async fn cache_state_count_records_child_count() {
-    let (s, _reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let (s, _reads) = counting_session(
+      big_array_doc(),
+      256,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
     let arr = [member("arr")];
-    assert_eq!(crate::count::at(&s, &arr, 0).await.unwrap(), 100);
+    assert_eq!(crate::count::at(&s, &arr, 0, 0).await.unwrap(), 100);
     assert_eq!(
       s.cache.lock().unwrap().get(0, &arr).unwrap().child_count(),
       Some(100),
@@ -780,10 +879,17 @@ mod tests {
     }
     doc.push_str("]}");
     let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
-    let session = Session::new(source, 4096, DEFAULT_INDEX_CACHE_ENTRIES).unwrap();
+    let session = Session::new(
+      source,
+      4096,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    )
+    .unwrap();
 
     let start = session
-      .locate_at(&[Segment::Member("items".into())], 0)
+      .locate_at(&[Segment::Member("items".into())], 0, 0)
       .await
       .unwrap()
       .expect("items resolves");

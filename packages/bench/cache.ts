@@ -1,9 +1,18 @@
 // Structural-index cache demonstrator: warm vs cold.
 //
-//   yarn workspace @botejs/bench cache                    # per-scenario table
-//   yarn workspace @botejs/bench cache --reads-only       # skip the timing columns
-//   yarn workspace @botejs/bench cache --sweep            # indexCacheEntries sweep (~200 MB doc)
-//   yarn workspace @botejs/bench cache --sweep --mb 500   # sweep on a custom doc size
+//   yarn workspace @botejs/bench bench:cache                   # per-scenario table
+//   yarn workspace @botejs/bench bench:cache --reads-only       # skip the timing columns
+//   yarn workspace @botejs/bench bench:cache --index-cache-entries 3072   # custom slot budget (default 1024; 0 disables)
+//   yarn workspace @botejs/bench bench:cache --mb 200          # also run the demo on a freshly-built ~200 MB doc
+//
+// `--index-cache-entries <n>` sets the structural-index cache slot budget for
+// every cursor opened by this run (both modes), so you can see how a larger or
+// smaller budget shifts warm reads — a budget too small to hold a scenario's
+// containers evicts them and warm climbs back toward cold.
+//
+// `--mb <n>` builds a fresh records-shaped JSON of about n megabytes and appends a
+// combined-access scenario over its deepest record, so the warm/cold read gap can
+// be watched widening as the document grows past the small built-in fixtures.
 //
 // The cache restores cross-query warmth - a query that lands in a container an
 // earlier query already walked starts its scan near the target instead of from
@@ -15,12 +24,6 @@
 // Source: deterministic and machine-independent - a fresh scan cannot
 // out-read itself, so a drop is forgery-proof proof the cache did work. The
 // wall-clock columns are indicative color only (hardware-dependent).
-//
-// The --sweep mode varies `indexCacheEntries` over a deep single-locality drill
-// to show the budget's threshold-then-plateau effect on cold-vs-warm time: too
-// few slots and the cache is effectively off (warm == cold); past a small
-// threshold the warm drill collapses to a resume; more slots only raise the
-// memory ceiling, they don't speed a single-locality drill further.
 
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -33,6 +36,20 @@ import { buildArrayDoc } from './fixtures.ts'
 import { fmtBytes, fmtNs } from './format.ts'
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
+
+// Optional slot-budget override applied to every cursor this run opens. Accepts
+// kebab and camel spellings; validated here so a typo fails fast rather than
+// deep inside `open`.
+const indexCacheEntriesArg = arg('--index-cache-entries') ?? arg('--indexCacheEntries')
+if (indexCacheEntriesArg != null && (!Number.isInteger(Number(indexCacheEntriesArg)) || Number(indexCacheEntriesArg) < 0)) {
+  throw new Error(`--index-cache-entries must be a non-negative integer (0 disables), got ${indexCacheEntriesArg}`)
+}
+const indexCacheEntries = indexCacheEntriesArg == null ? undefined : Number(indexCacheEntriesArg)
+/** Base open options for this run (the budget override, or {} for the native default). */
+const baseOpts: { indexCacheEntries?: number } = indexCacheEntries === undefined ? {} : { indexCacheEntries }
+/** Header suffix naming the active budget, so a run's output is self-describing. */
+const budgetNote = (): string =>
+  indexCacheEntries === undefined ? '  (indexCacheEntries=native default)' : `  (indexCacheEntries=${indexCacheEntries})`
 
 /** A `Source` that counts `read` calls so cache-driven fault reduction is
  *  observable from the facade (there is no `cacheStats()`). */
@@ -75,6 +92,8 @@ interface Scenario {
   name: string
   doc: Uint8Array
   chunkBytes: number
+  /** Override the cold-timing sample count (a big doc scans too much to time 120×). */
+  coldIters?: number
   /** Primes the cache: the query a real caller would have made earlier. */
   warm: (c: Cur) => Promise<unknown>
   /** The measured query - resolves to the same place warm or cold. */
@@ -85,8 +104,8 @@ type Cur = Awaited<ReturnType<typeof open>>
 
 const ARRAY_ITEMS = 100_000
 const arrayDoc = buildArrayDoc(ARRAY_ITEMS, 6)
-// Kept under the default 1024-slot cache budget: a tabled object holds one slot
-// per member, so a wider object would evict its own table and lose the resume.
+// With the default unbounded object cap the whole object tables on one scan, so
+// warming on a later member tables every earlier one and the sibling resume is free.
 const OBJ_MEMBERS = 900
 const objDoc = nestedBigObject(OBJ_MEMBERS)
 const CHUNK = 4096
@@ -98,15 +117,17 @@ const recDoc = recordsDoc(REC_COUNT)
 // A realistic combined access: render one record's detail view, mixing all three
 // ops the way an app would - a header `get`, a point `get`, a `walk` over the
 // record's fields, and an `iter` over its tags. Cold, the first get pays the
-// full scan to REC_IDX; warm, the array landmark and the record's container are
-// already cached, so every step resumes near the target.
-async function detailView(c: Cur): Promise<number> {
-  let sink = 0
-  sink += Number(await c.get('meta', 'version'))
-  sink += String(await c.get('records', REC_IDX, 'name')).length
-  for await (const _field of c.walk('records', REC_IDX)) sink += 1
-  for await (const batch of c.iter('records', REC_IDX, 'tags')) sink += batch.length
-  return sink
+// full scan to the record; warm, the array landmark and the record's container
+// are already cached, so every step resumes near the target.
+function detailViewAt(idx: number): (c: Cur) => Promise<number> {
+  return async (c) => {
+    let sink = 0
+    sink += Number(await c.get('meta', 'version'))
+    sink += String(await c.get('records', idx, 'name')).length
+    for await (const _field of c.walk('records', idx)) sink += 1
+    for await (const batch of c.iter('records', idx, 'tags')) sink += batch.length
+    return sink
+  }
 }
 
 // A scattered, out-of-order index set over the big array. Each get plants a
@@ -201,21 +222,44 @@ const scenarios: Scenario[] = [
     name: 'detail view: get + walk + iter (combined)',
     doc: recDoc,
     chunkBytes: CHUNK,
-    warm: detailView,
-    target: detailView,
+    warm: detailViewAt(REC_IDX),
+    target: detailViewAt(REC_IDX),
   },
 ]
 
+// `--mb <n>`: build a fresh records-shaped doc of about n megabytes and append a
+// combined detail view over its deepest record. Cold, the first get scans the
+// whole array to reach it; warm, the landmark grid and the record's container are
+// cached, so the same access resumes near the target — a gap that widens with size.
+const docMbArg = arg('--mb')
+if (docMbArg != null && (!Number.isFinite(Number(docMbArg)) || Number(docMbArg) <= 0)) {
+  throw new Error(`--mb must be a positive number of megabytes, got ${docMbArg}`)
+}
+if (docMbArg != null) {
+  const mb = Number(docMbArg)
+  console.log(`building ~${mb} MB records doc…`)
+  const { buf, count } = buildRecordsBuffer(mb * 1024 * 1024)
+  const view = detailViewAt(count - 1)
+  scenarios.push({
+    name: `big detail view (${fmtBytes(buf.length)}, ${count.toLocaleString()} recs)`,
+    doc: buf,
+    chunkBytes: CHUNK,
+    coldIters: 8,
+    warm: view,
+    target: view,
+  })
+}
+
 async function measureReads(s: Scenario): Promise<{ cold: number; warm: number }> {
   const cold = countingSource(s.doc, s.chunkBytes)
-  const cc = await open(cold.source)
+  const cc = await open(cold.source, baseOpts)
   cold.reads.n = 0
   await s.target(cc)
   const coldReads = cold.reads.n
   await cc.close()
 
   const warm = countingSource(s.doc, s.chunkBytes)
-  const wc = await open(warm.source)
+  const wc = await open(warm.source, baseOpts)
   await s.warm(wc)
   warm.reads.n = 0
   await s.target(wc)
@@ -236,17 +280,18 @@ const WARM_ITERS = 3000
 
 async function measureTime(s: Scenario): Promise<{ cold: number; warm: number }> {
   const source = fromBuffer(s.doc, { chunkBytes: s.chunkBytes })
+  const coldIters = s.coldIters ?? COLD_ITERS
 
   const coldSamples: number[] = []
-  for (let i = 0; i < COLD_ITERS; i++) {
-    const c = await open(source)
+  for (let i = 0; i < coldIters; i++) {
+    const c = await open(source, baseOpts)
     const t0 = process.hrtime.bigint()
     await s.target(c)
     coldSamples.push(Number(process.hrtime.bigint() - t0))
     await c.close()
   }
 
-  const wc = await open(source)
+  const wc = await open(source, baseOpts)
   await s.warm(wc)
   for (let i = 0; i < 100; i++) await s.target(wc) // warm up the hit path
   const warmSamples: number[] = []
@@ -280,7 +325,7 @@ function padL(s: string, w: number): string {
 
 async function runScenarios(): Promise<void> {
   const skipTime = flag('--reads-only')
-  console.log(`bote structural-index cache — warm vs cold\n`)
+  console.log(`bote structural-index cache — warm vs cold${budgetNote()}\n`)
   const header = skipTime
     ? [pad('scenario', 42), padL('cold reads', 11), padL('warm reads', 11), padL('saved', 8)]
     : [
@@ -345,145 +390,4 @@ function buildRecordsBuffer(targetBytes: number): { buf: Uint8Array; count: numb
   }
 }
 
-// A deep single-locality drill, the access pattern the cache actually
-// accelerates: a header `get`, a point `get` into a record near the end of the
-// doc, a `walk` over that record's fields, and an `iter` of its tags - all in
-// one locality. Cold, the first step scans the whole doc to reach the record;
-// warm, the cursor resumes from the frontier the prior pass parked there.
-function makeDrillView(count: number): (c: Cur) => Promise<number> {
-  const idx = count - 2 // a record near the very end, so the cold scan is long
-  return async (c) => {
-    let sink = 0
-    sink += Number(await c.get('meta', 'version'))
-    sink += String(await c.get('records', idx, 'name')).length
-    sink += Number(await c.get('records', idx, 'detail', 'score'))
-    for await (const _f of c.walk('records', idx)) sink += 1
-    for await (const batch of c.iter('records', idx, 'tags')) sink += batch.length
-    return sink
-  }
-}
-
-// A scattered, out-of-order set of indices spread across the whole array - the
-// access pattern multi-landmarks unlock. With too small a budget the per-array
-// landmark set is coarse (few survive), so the warm revisit stays near cold;
-// past a threshold every visited index keeps its own landmark and the revisit
-// collapses to a per-index resume. This is the payoff the single forward-only
-// landmark could never give (it parked at the furthest index).
-function makeScatterView(count: number): (c: Cur) => Promise<number> {
-  const k = 24
-  const idxs = Array.from({ length: k }, (_, j) => Math.floor(((j + 1) * count) / (k + 1)))
-  for (let i = idxs.length - 1; i > 0; i--) {
-    const j = (i * 7 + 3) % (i + 1) // deterministic shuffle: access out of source order
-    ;[idxs[i], idxs[j]] = [idxs[j], idxs[i]]
-  }
-  return async (c) => {
-    let sink = 0
-    sink += Number(await c.get('meta', 'version'))
-    for (const i of idxs) sink += String(await c.get('records', i, 'name')).length
-    return sink
-  }
-}
-
-async function sweepBudget(
-  buf: Uint8Array,
-  workflow: (c: Cur) => Promise<number>,
-  entries: number,
-  coldIters: number,
-  warmIters: number,
-): Promise<{ coldReads: number; warmReads: number; coldNs: number; warmNs: number }> {
-  const opt = { indexCacheEntries: entries }
-
-  const coldR = countingSource(buf, CHUNK)
-  const ccR = await open(coldR.source, opt)
-  coldR.reads.n = 0
-  await workflow(ccR)
-  const coldReads = coldR.reads.n
-  await ccR.close()
-
-  const warmR = countingSource(buf, CHUNK)
-  const wcR = await open(warmR.source, opt)
-  await workflow(wcR)
-  warmR.reads.n = 0
-  await workflow(wcR)
-  const warmReads = warmR.reads.n
-  await wcR.close()
-
-  const source = fromBuffer(buf, { chunkBytes: CHUNK })
-  const cold: number[] = []
-  for (let i = 0; i < coldIters; i++) {
-    const c = await open(source, opt)
-    const t0 = process.hrtime.bigint()
-    await workflow(c)
-    cold.push(Number(process.hrtime.bigint() - t0))
-    await c.close()
-  }
-  const wc = await open(source, opt)
-  await workflow(wc)
-  for (let i = 0; i < 3; i++) await workflow(wc)
-  const warm: number[] = []
-  for (let i = 0; i < warmIters; i++) {
-    const t0 = process.hrtime.bigint()
-    await workflow(wc)
-    warm.push(Number(process.hrtime.bigint() - t0))
-  }
-  await wc.close()
-
-  return { coldReads, warmReads, coldNs: median(cold), warmNs: median(warm) }
-}
-
-async function runSweep(): Promise<void> {
-  const mb = Number(arg('--mb') ?? 200)
-  const scatter = flag('--scatter')
-  console.log(`building ~${mb} MB records doc…`)
-  const { buf, count } = buildRecordsBuffer(mb * 1024 * 1024)
-  const workload = scatter
-    ? `scattered (24 out-of-order gets spread across the array, revisited warm)`
-    : `deep drill (get + walk + iter on one record near the end)`
-  console.log(
-    `bote structural-index cache — indexCacheEntries sweep\n` +
-      `doc ${fmtBytes(buf.length)}, ${count.toLocaleString()} records, ${CHUNK} B chunks\n` +
-      `workload: ${workload}\n`,
-  )
-  const workflow = scatter ? makeScatterView(count) : makeDrillView(count)
-
-  const header = [
-    pad('indexCacheEntries', 18),
-    padL('cold time', 11),
-    padL('warm time', 11),
-    padL('speedup', 9),
-    padL('cold reads', 11),
-    padL('warm reads', 11),
-  ]
-  console.log(header.join('  '))
-  console.log('-'.repeat(header.join('  ').length))
-
-  // Span the threshold: 0 disables the cache; a few entries can't hold the
-  // container's frontier; tens are enough; more only raises memory.
-  for (const entries of [0, 8, 64, 1024, 16384, 262144]) {
-    const r = await sweepBudget(buf, workflow, entries, 4, 40)
-    console.log(
-      [
-        pad(entries === 0 ? '0 (off)' : String(entries), 18),
-        padL(fmtNs(r.coldNs), 11),
-        padL(fmtNs(r.warmNs), 11),
-        padL(speedup(r.coldNs, r.warmNs), 9),
-        padL(String(r.coldReads), 11),
-        padL(String(r.warmReads), 11),
-      ].join('  '),
-    )
-  }
-
-  console.log(
-    scatter
-      ? `\nWarm reads slope down with the budget: each visited index keeps its own resume\n` +
-          `landmark only while the per-array set can hold it, so more entries means more\n` +
-          `scattered targets resume near their index instead of from the array open.\n` +
-          `Reads are deterministic; times indicative.`
-      : `\nWarm time steps down once the budget can hold the drilled container's frontier,\n` +
-          `then plateaus - extra entries don't speed a single-locality drill, they only let\n` +
-          `more distinct containers stay warm at once. Reads are deterministic; times indicative.`,
-  )
-}
-
-if (flag('--sweep')) await runSweep()
-else await runScenarios()
+await runScenarios()

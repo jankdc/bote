@@ -50,7 +50,8 @@ pub struct ContainerRecord {
   /// start, or the close `}` position. The high-water member boundary.
   pub object_resume: Option<u64>,
   /// Array only: `(index, element_offset)` landmarks sampled during the scan
-  /// (one per chunk crossed) plus the resolved target, in ascending index order.
+  /// (one per element-index stride multiple) plus the resolved target, in
+  /// ascending index order.
   pub array_landmarks: Vec<(usize, u64)>,
 }
 
@@ -72,6 +73,11 @@ pub struct ResolveState {
   /// Child offsets collected for the cache, or `None` when caching is disabled
   /// (no per-member decode/alloc on the hot path).
   scan_record: Option<ScanRecord>,
+  /// Whether object members are tabled (object cap `> 0`). When `false`, object
+  /// key decoding is skipped on the hot path even while arrays are collecting.
+  record_objects: bool,
+  /// Element-index stride for array landmark sampling (`0` = no landmarks).
+  array_stride: usize,
 }
 
 /// Per-iteration scan state for `step_object` / `step_array`. Flattened across
@@ -92,23 +98,28 @@ struct SegmentScan {
   /// element boundaries; the fast path may commit a mid-string carry at a block
   /// boundary. Unused for objects.
   carry: ScanCarry,
-  /// Next chunk-boundary offset at which the array scan samples a cache landmark;
-  /// `0` until anchored. Persisted across `ChunkMiss` resumes so the per-chunk
-  /// cadence never double-samples. Unused for objects.
-  landmark_boundary: u64,
 }
 
 impl ResolveState {
   /// Start resolving `path` from segment `segment_idx` at `start` (the value
   /// start of the container `path[..segment_idx]`), optionally seeded at a cache
-  /// landmark and optionally collecting child offsets for the cache.
-  pub fn resume(start: u64, segment_idx: usize, seed: Option<ResumePoint>, collect: bool) -> Self {
+  /// landmark. Collects child offsets for the cache when object members are tabled
+  /// (`record_objects`) or array landmarks are sampled (`array_stride > 0`).
+  pub fn resume(
+    start: u64,
+    segment_idx: usize,
+    seed: Option<ResumePoint>,
+    record_objects: bool,
+    array_stride: usize,
+  ) -> Self {
     Self {
       segment_idx,
       start,
       segment_scan: None,
       seed,
-      scan_record: collect.then(ScanRecord::default),
+      scan_record: (record_objects || array_stride > 0).then(ScanRecord::default),
+      record_objects,
+      array_stride,
     }
   }
 
@@ -135,13 +146,17 @@ pub fn resolve_step(
   state: &mut ResolveState,
 ) -> Result<Option<u64>, TraverseError> {
   // Disjoint field borrows: `segment_scan` and `scan_record` are mutated together
-  // below, which a single `&mut state` couldn't express.
+  // below, which a single `&mut state` couldn't express. The config fields are
+  // `Copy`, so read them out before the destructure.
+  let record_objects = state.record_objects;
+  let array_stride = state.array_stride;
   let ResolveState {
     segment_idx,
     start,
     segment_scan,
     seed,
     scan_record,
+    ..
   } = state;
   while *segment_idx < path.len() {
     if segment_scan.is_none() {
@@ -156,7 +171,6 @@ pub fn resolve_step(
             index: 0,
             depth: 0,
             carry: ScanCarry::default(),
-            landmark_boundary: 0,
           },
           ResumePoint::Array { index, offset } => SegmentScan {
             kind: ContainerKind::Array,
@@ -164,7 +178,6 @@ pub fn resolve_step(
             index,
             depth: 0,
             carry: ScanCarry::default(),
-            landmark_boundary: 0,
           },
         };
         (ls.kind, *start, ls)
@@ -186,7 +199,6 @@ pub fn resolve_step(
           index: 0,
           depth: 0,
           carry: ScanCarry::default(),
-          landmark_boundary: 0,
         };
         (kind, s, ls)
       };
@@ -206,8 +218,18 @@ pub fn resolve_step(
     let ls = segment_scan.as_mut().expect("set just above");
     let cs = scan_record.as_mut().and_then(|h| h.containers.last_mut());
     let descend = match (ls.kind, segment) {
-      (ContainerKind::Object, Segment::Member(name)) => step_object(walker, name, ls, cs)?,
-      (ContainerKind::Array, Segment::Element(idx)) => step_array(walker, *idx, ls, cs)?,
+      // `cs` is gated per kind: objects skip recording (and key decode) when the
+      // object cap is 0; arrays skip the landmark sink when the stride is 0.
+      (ContainerKind::Object, Segment::Member(name)) => {
+        step_object(walker, name, ls, if record_objects { cs } else { None })?
+      }
+      (ContainerKind::Array, Segment::Element(idx)) => step_array(
+        walker,
+        *idx,
+        ls,
+        array_stride,
+        if array_stride > 0 { cs } else { None },
+      )?,
       // Type mismatch (member-name into array, index into object) is a miss, not
       // an error - mirrors RFC 6901 where `/0` against an object resolves to
       // nothing.
@@ -353,12 +375,13 @@ fn step_array(
   walker: &mut Walker,
   target_index: usize,
   state: &mut SegmentScan,
+  array_stride: usize,
   mut cs: Option<&mut ContainerRecord>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
-  // per-element skip_value calls. When collecting, a `LandmarkSink` samples one
-  // resume landmark per chunk crossed (snapped to an element boundary); the
-  // cadence offset (`landmark_boundary`) persists across `ChunkMiss` resumes.
+  // per-element skip_value calls. When collecting, a `LandmarkSink` samples a
+  // resume landmark at each element-index stride multiple (snapped to an element
+  // boundary); the stride grid is absolute, so sampling is resume-safe.
   while state.index < target_index {
     let needed = target_index - state.index;
     let base_index = state.index;
@@ -368,7 +391,7 @@ fn step_array(
     let stop = {
       let sink = cs.as_deref_mut().map(|cs| LandmarkSink {
         base_index,
-        boundary: &mut state.landmark_boundary,
+        stride: array_stride,
         out: &mut cs.array_landmarks,
       });
       walker.advance_top_level_commas(from, depth, needed, carry, sink)?
@@ -614,10 +637,10 @@ mod tests {
     let src = br#"{"a":1,"b":2,"c":3}"#;
     let win = full_window(src);
 
-    let mut cold = ResolveState::resume(0, 0, None, false);
+    let mut cold = ResolveState::resume(0, 0, None, false, 0);
     let cold_c = resolve_once(&win, &[member("c")], &mut cold);
 
-    let mut seeded = ResolveState::resume(0, 0, Some(ResumePoint::Object { offset: 7 }), false);
+    let mut seeded = ResolveState::resume(0, 0, Some(ResumePoint::Object { offset: 7 }), false, 0);
     let seeded_c = resolve_once(&win, &[member("c")], &mut seeded);
 
     assert_eq!(cold_c, seeded_c);
@@ -630,7 +653,7 @@ mod tests {
     let src = b"[10,20,30,40]";
     let win = full_window(src);
 
-    let mut cold = ResolveState::resume(0, 0, None, false);
+    let mut cold = ResolveState::resume(0, 0, None, false, 0);
     let cold_3 = resolve_once(&win, &[Segment::Element(3)], &mut cold);
 
     let mut seeded = ResolveState::resume(
@@ -641,6 +664,7 @@ mod tests {
         offset: 4,
       }),
       false,
+      0,
     );
     let seeded_3 = resolve_once(&win, &[Segment::Element(3)], &mut seeded);
 
@@ -652,7 +676,7 @@ mod tests {
   fn records_every_scanned_member() {
     let src = br#"{"a":1,"b":2,"c":3}"#;
     let win = full_window(src);
-    let mut st = ResolveState::resume(0, 0, None, true);
+    let mut st = ResolveState::resume(0, 0, None, true, 16);
     resolve_once(&win, &[member("c")], &mut st);
 
     let h = st.take_scan_record().expect("collecting");
@@ -673,7 +697,7 @@ mod tests {
     // that member would resume past it and miss it.
     let src = br#"{"a":1,"b":2}"#;
     let win = full_window(src);
-    let mut st = ResolveState::resume(0, 0, None, true);
+    let mut st = ResolveState::resume(0, 0, None, true, 16);
     assert_eq!(resolve_once(&win, &[member("zzz")], &mut st), None);
 
     let h = st.take_scan_record().unwrap();
@@ -687,14 +711,14 @@ mod tests {
   fn records_array_landmark() {
     let src = b"[10,20,30,40]";
     let win = full_window(src);
-    let mut st = ResolveState::resume(0, 0, None, true);
+    let mut st = ResolveState::resume(0, 0, None, false, 16);
     resolve_once(&win, &[Segment::Element(2)], &mut st);
 
     let h = st.take_scan_record().expect("collecting");
     let cs = &h.containers[0];
     assert!(cs.members.is_empty());
-    // One chunk, so no chunk-cadence sampling: just the resolved target.
-    // Element 2 ("30") starts at offset 7.
+    // Stride 16 over a 4-element array samples no grid landmark: just the resolved
+    // target. Element 2 ("30") starts at offset 7.
     assert_eq!(cs.array_landmarks, vec![(2, 7)]);
   }
 
@@ -703,7 +727,7 @@ mod tests {
     // Two container levels: object "users" -> array element 1 -> object "name".
     let src = br#"{"users":[{"id":1},{"id":2,"name":"bo"}]}"#;
     let win = full_window(src);
-    let mut st = ResolveState::resume(0, 0, None, true);
+    let mut st = ResolveState::resume(0, 0, None, true, 16);
     let got = resolve_once(
       &win,
       &[member("users"), Segment::Element(1), member("name")],
