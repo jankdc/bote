@@ -401,7 +401,7 @@ impl Session {
     index: usize,
     offset: u64,
   ) {
-    self.with_cache(|c| c.merge_array_scan(anchor, path, value_start, Some((index, offset))));
+    self.with_cache(|c| c.merge_array_scan(anchor, path, value_start, &[(index, offset)]));
   }
 }
 
@@ -468,7 +468,6 @@ mod tests {
   use bytes::Bytes;
 
   use super::*;
-  use crate::resolve::ResumePoint;
   use crate::source::{InMemoryStream, SourceError};
 
   /// Wraps an [`InMemoryStream`] and counts its `read` calls, so the cache's
@@ -527,6 +526,23 @@ mod tests {
         s.push(',');
       }
       s.push_str(&format!("{{\"v\":\"{pad}\"}}"));
+    }
+    s.push_str("]}");
+    s
+  }
+
+  /// `{"arr":["<pad>", ... n elements ...]}` - a long flat array where a deep
+  /// index sits many chunks in, so a backward re-get has real distance to save.
+  fn flat_array_doc(n: usize, pad: usize) -> String {
+    let p = "x".repeat(pad);
+    let mut s = String::from("{\"arr\":[");
+    for i in 0..n {
+      if i > 0 {
+        s.push(',');
+      }
+      s.push('"');
+      s.push_str(&p);
+      s.push('"');
     }
     s.push_str("]}");
     s
@@ -599,6 +615,35 @@ mod tests {
     assert!(
       warm_n < cold_n,
       "warm index resume ({warm_n} reads) should fault fewer chunks than cold ({cold_n})"
+    );
+  }
+
+  #[tokio::test]
+  async fn cache_backward_array_get_faults_fewer_chunks() {
+    // The multi-landmark payoff: one deep get plants chunk-cadence landmarks
+    // across the array, so a *backward* re-get resumes from the nearest landmark
+    // below its index instead of rescanning from the open - impossible under the
+    // old single forward-only landmark (which parked at the deep index).
+    let doc = flat_array_doc(200, 120);
+    let deep = [member("arr"), Segment::Element(180)];
+    let back = [member("arr"), Segment::Element(20)];
+
+    let (warm, warm_reads) = counting_session(doc.clone(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let mut w = warm.new_window();
+    warm.run_locate(&deep, 0, &mut w).await.unwrap().unwrap();
+    warm_reads.store(0, Ordering::Relaxed);
+    let mut w2 = warm.new_window();
+    assert!(warm.run_locate(&back, 0, &mut w2).await.unwrap().is_some());
+    let warm_n = warm_reads.load(Ordering::Relaxed);
+
+    let (cold, cold_reads) = counting_session(doc, 256, DEFAULT_INDEX_CACHE_ENTRIES);
+    let mut c = cold.new_window();
+    assert!(cold.run_locate(&back, 0, &mut c).await.unwrap().is_some());
+    let cold_n = cold_reads.load(Ordering::Relaxed);
+
+    assert!(
+      warm_n < cold_n,
+      "warm backward get ({warm_n} reads) should fault fewer chunks than cold ({cold_n})"
     );
   }
 
@@ -682,7 +727,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn cache_state_array_resume_advances() {
+  async fn cache_state_array_records_landmark_at_target() {
     let (s, _reads) = counting_session(big_array_doc(), 256, DEFAULT_INDEX_CACHE_ENTRIES);
     let arr = [member("arr")];
 
@@ -691,18 +736,18 @@ mod tests {
       .await
       .unwrap()
       .expect("element 40 resolves");
-    let resume_point = s
+    // The nearest landmark at or below the resolved index is the index itself -
+    // an exact landmark was planted at the target (plus chunk-cadence ones below).
+    let nearest = s
       .cache
       .lock()
       .unwrap()
       .get(0, &arr)
       .expect("arr node")
-      .resume_point();
-    match resume_point {
-      ResumePoint::Array { index, .. } => {
-        assert_eq!(index, 40, "resume_point landmark at the resolved index")
-      }
-      other => panic!("expected an array resume_point, got {other:?}"),
+      .nearest_landmark(40);
+    match nearest {
+      Some((index, _)) => assert_eq!(index, 40, "exact landmark at the resolved index"),
+      None => panic!("expected an array landmark at or below 40"),
     }
   }
 

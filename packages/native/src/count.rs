@@ -111,7 +111,13 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
     state.peeked = true;
   }
   loop {
-    match walker.advance_top_level_commas(state.offset, state.depth, usize::MAX, state.carry)? {
+    match walker.advance_top_level_commas(
+      state.offset,
+      state.depth,
+      usize::MAX,
+      state.carry,
+      None,
+    )? {
       // Non-empty container: child count is depth-0 commas + 1.
       CommaStop::ArrayClosed { consumed } => return Ok(state.consumed + consumed as u64 + 1),
       CommaStop::Partial {

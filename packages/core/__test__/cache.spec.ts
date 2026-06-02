@@ -135,6 +135,23 @@ test('array_repeated_and_overlapping_index_access_is_consistent', async (t) => {
   assert.equal(await cursor.get('arr', 50), undefined)
 })
 
+test('scattered_and_backward_index_access_is_consistent', async (t) => {
+  // Multi-landmark resume must stay transparent for backward and scattered
+  // access: identical values with the cache on and off, in any index order.
+  const n = 300
+  const data = enc('{"arr":[' + Array.from({ length: n }, (_, i) => `${i * 3}`).join(',') + ']}')
+  const idxs = [299, 0, 150, 75, 200, 10, 299, 150, 1]
+  const on = await open(memorySource(data, 64))
+  const off = await open(memorySource(data, 64), { indexCacheEntries: 0 })
+  t.after(() => on.close())
+  t.after(() => off.close())
+  for (const i of idxs) {
+    assert.equal(await on.get('arr', i), i * 3)
+    assert.equal(await off.get('arr', i), i * 3)
+  }
+  assert.equal(await on.get('arr', n), undefined)
+})
+
 // Cache EFFECT: a warm query must fault strictly fewer chunks than an identical
 // cold one. This is the only forgery-proof signal that the cache did something -
 // a fresh scan cannot out-read itself.
@@ -178,6 +195,56 @@ test('warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
   const coldReads = cold.reads.n
 
   assert.ok(warmReads < coldReads, `warm index get (${warmReads} reads) should be < cold (${coldReads})`)
+})
+
+// A long flat array used by the backward / scattered effect tests below: one
+// deep get plants chunk-cadence landmarks across it, which earlier indices reuse.
+function flatArrayDoc(n: number): Uint8Array {
+  return enc('{"arr":[' + Array.from({ length: n }, () => '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"').join(',') + ']}')
+}
+
+test('warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
+  // One deep get plants landmarks along the way; a backward re-get then resumes
+  // from a nearby landmark instead of rescanning from the open. Impossible under
+  // the old single forward-only landmark, which parked at the deep index.
+  const data = flatArrayDoc(400)
+  const warm = countingSource(data, 256)
+  const wc = await open(warm.source)
+  t.after(() => wc.close())
+  await wc.get('arr', 380)
+  warm.reads.n = 0
+  await wc.get('arr', 40)
+  const warmReads = warm.reads.n
+
+  const cold = countingSource(data, 256)
+  const cc = await open(cold.source)
+  t.after(() => cc.close())
+  await cc.get('arr', 40)
+  const coldReads = cold.reads.n
+
+  assert.ok(warmReads < coldReads, `warm backward get (${warmReads} reads) should be < cold (${coldReads})`)
+})
+
+test('warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => {
+  // Visiting a scattered index set plants a landmark at each; revisiting then
+  // resumes from each landmark rather than rescanning from the open.
+  const data = flatArrayDoc(400)
+  const idxs = [350, 50, 220, 120, 300, 80]
+  const warm = countingSource(data, 256)
+  const wc = await open(warm.source)
+  t.after(() => wc.close())
+  for (const i of idxs) await wc.get('arr', i)
+  warm.reads.n = 0
+  for (const i of idxs) await wc.get('arr', i)
+  const warmReads = warm.reads.n
+
+  const cold = countingSource(data, 256)
+  const cc = await open(cold.source)
+  t.after(() => cc.close())
+  for (const i of idxs) await cc.get('arr', i)
+  const coldReads = cold.reads.n
+
+  assert.ok(warmReads < coldReads, `warm scattered revisit (${warmReads} reads) should be < cold (${coldReads})`)
 })
 
 test('repeat_count_issues_no_reads', async (t) => {

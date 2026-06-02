@@ -275,12 +275,18 @@ impl<'a> Walker<'a> {
   ///
   /// Depth-0 commas are element boundaries; a block with no nesting transitions
   /// takes the popcount fast path instead of walking bit-by-bit.
+  ///
+  /// When `sink` is `Some` (the structural-index cache is collecting), one
+  /// landmark per chunk crossed is appended at an exact element boundary, so a
+  /// later index can resume from the nearest landmark instead of the array open.
+  /// `None` leaves both scan paths byte-for-byte unchanged.
   pub fn advance_top_level_commas(
     &mut self,
     from: u64,
     initial_depth: u32,
     needed: usize,
     entry_carry: ScanCarry,
+    mut sink: Option<LandmarkSink>,
   ) -> Result<CommaStop, TraverseError> {
     if needed == 0 {
       return Ok(CommaStop::Found {
@@ -289,9 +295,15 @@ impl<'a> Walker<'a> {
       });
     }
     let source_size = self.source_size();
-    let mut depth = initial_depth;
-    let mut remaining = needed;
-    let mut consumed: usize = 0;
+    let chunk_bytes = self.chunk_bytes();
+    if let Some(s) = sink.as_mut() {
+      s.anchor(from, chunk_bytes);
+    }
+    let mut scan = CommaScan {
+      depth: initial_depth,
+      remaining: needed,
+      consumed: 0,
+    };
     let mut offset = from;
     let mut carry = entry_carry;
     while offset < source_size {
@@ -308,69 +320,217 @@ impl<'a> Walker<'a> {
           }
           return Ok(CommaStop::Partial {
             offset,
-            depth,
-            consumed,
+            depth: scan.depth,
+            consumed: scan.consumed,
             carry,
           });
         }
       };
       let (in_string, next) = scan_block(&block, carry);
-      let lbrace = structural_word(&block, in_string, Structural::LBrace);
-      let rbrace = structural_word(&block, in_string, Structural::RBrace);
-      let lbracket = structural_word(&block, in_string, Structural::LBracket);
-      let rbracket = structural_word(&block, in_string, Structural::RBracket);
-      let commas = structural_word(&block, in_string, Structural::Comma);
-      let opens_w = lbrace | lbracket;
-      let closes_w = rbrace | rbracket;
-
-      if depth == 0 && opens_w == 0 && closes_w == 0 {
-        // Depth-0 fast path: every comma is an element boundary.
-        let c = commas.count_ones() as usize;
-        if c < remaining {
-          remaining -= c;
-          consumed += c;
-        } else {
-          let mut bits = commas;
-          for _ in 0..remaining - 1 {
-            bits &= bits - 1;
-          }
-          let bit_idx = bits.trailing_zeros() as u64;
-          consumed += remaining;
-          return Ok(CommaStop::Found {
-            offset_after_comma: offset + bit_idx + 1,
-            consumed,
-          });
-        }
+      let words = StructuralWords::new(&block, in_string);
+      let outcome = if scan.depth == 0 && words.nesting_free() {
+        scan.scan_flat(words.commas, offset, chunk_bytes, sink.as_mut())
       } else {
-        let mut bits = opens_w | closes_w | commas;
-        while bits != 0 {
-          let bit_idx = bits.trailing_zeros();
-          let bit = 1u64 << bit_idx;
-          let abs = offset + bit_idx as u64;
-          if opens_w & bit != 0 {
-            depth += 1;
-          } else if closes_w & bit != 0 {
-            if depth == 0 {
-              return Ok(CommaStop::ArrayClosed { consumed });
-            }
-            depth -= 1;
-          } else if depth == 0 {
-            remaining -= 1;
-            consumed += 1;
-            if remaining == 0 {
-              return Ok(CommaStop::Found {
-                offset_after_comma: abs + 1,
-                consumed,
-              });
-            }
-          }
-          bits &= bits - 1;
+        scan.scan_nested(&words, offset, chunk_bytes, sink.as_mut())
+      };
+      match outcome {
+        BlockOutcome::Found { offset_after_comma } => {
+          return Ok(CommaStop::Found {
+            offset_after_comma,
+            consumed: scan.consumed,
+          })
         }
+        BlockOutcome::ArrayClosed => {
+          return Ok(CommaStop::ArrayClosed {
+            consumed: scan.consumed,
+          })
+        }
+        BlockOutcome::Continue => {}
       }
       offset += BLOCK_BYTES as u64;
       carry = next;
     }
     Err(TraverseError::UnexpectedEof(offset))
+  }
+}
+
+/// The depth-0 structural words of one 64-byte block, string contents already
+/// masked out: container opens (`{`/`[`), closes (`}`/`]`), and element commas.
+struct StructuralWords {
+  opens: u64,
+  closes: u64,
+  commas: u64,
+}
+
+impl StructuralWords {
+  fn new(block: &[u8; BLOCK_BYTES], in_string: u64) -> Self {
+    let lbrace = structural_word(block, in_string, Structural::LBrace);
+    let rbrace = structural_word(block, in_string, Structural::RBrace);
+    let lbracket = structural_word(block, in_string, Structural::LBracket);
+    let rbracket = structural_word(block, in_string, Structural::RBracket);
+    Self {
+      opens: lbrace | lbracket,
+      closes: rbrace | rbracket,
+      commas: structural_word(block, in_string, Structural::Comma),
+    }
+  }
+
+  /// No container transitions here - every comma is a depth-0 element boundary,
+  /// so the popcount fast path applies.
+  fn nesting_free(&self) -> bool {
+    self.opens == 0 && self.closes == 0
+  }
+}
+
+/// Outcome of scanning one block in [`Walker::advance_top_level_commas`].
+enum BlockOutcome {
+  /// Target comma consumed; the next element begins at `offset_after_comma`.
+  Found { offset_after_comma: u64 },
+  /// A depth-0 close was hit - the array ended before the target.
+  ArrayClosed,
+  /// Block exhausted, target not yet reached; advance to the next block.
+  Continue,
+}
+
+/// Running counters for one `advance_top_level_commas` call. `offset`/`carry`
+/// stay in the driver loop (they advance per block); these advance per
+/// structural bit and so are threaded into the per-block scan helpers.
+struct CommaScan {
+  depth: u32,
+  remaining: usize,
+  consumed: usize,
+}
+
+impl CommaScan {
+  /// Depth-0 fast path: bulk-count this block's commas, returning [`Found`] when
+  /// the target falls inside it. Samples one landmark if the block crosses the
+  /// cadence boundary.
+  ///
+  /// [`Found`]: BlockOutcome::Found
+  fn scan_flat(
+    &mut self,
+    commas: u64,
+    offset: u64,
+    chunk_bytes: u64,
+    sink: Option<&mut LandmarkSink>,
+  ) -> BlockOutcome {
+    if let Some(s) = sink {
+      s.sample_block(commas, offset, self.consumed, chunk_bytes);
+    }
+    let c = commas.count_ones() as usize;
+    if c < self.remaining {
+      self.remaining -= c;
+      self.consumed += c;
+      BlockOutcome::Continue
+    } else {
+      let mut bits = commas;
+      for _ in 0..self.remaining - 1 {
+        bits &= bits - 1;
+      }
+      let bit_idx = bits.trailing_zeros() as u64;
+      self.consumed += self.remaining;
+      BlockOutcome::Found {
+        offset_after_comma: offset + bit_idx + 1,
+      }
+    }
+  }
+
+  /// Bit-iterating path for blocks with container nesting: track depth and count
+  /// only depth-0 commas, sampling a landmark as each depth-0 boundary is crossed.
+  fn scan_nested(
+    &mut self,
+    words: &StructuralWords,
+    offset: u64,
+    chunk_bytes: u64,
+    mut sink: Option<&mut LandmarkSink>,
+  ) -> BlockOutcome {
+    let mut bits = words.opens | words.closes | words.commas;
+    while bits != 0 {
+      let bit_idx = bits.trailing_zeros();
+      let bit = 1u64 << bit_idx;
+      let abs = offset + bit_idx as u64;
+      if words.opens & bit != 0 {
+        self.depth += 1;
+      } else if words.closes & bit != 0 {
+        if self.depth == 0 {
+          return BlockOutcome::ArrayClosed;
+        }
+        self.depth -= 1;
+      } else if self.depth == 0 {
+        self.remaining -= 1;
+        self.consumed += 1;
+        if let Some(s) = sink.as_deref_mut() {
+          let index = s.base_index + self.consumed;
+          s.sample(index, abs + 1, chunk_bytes);
+        }
+        if self.remaining == 0 {
+          return BlockOutcome::Found {
+            offset_after_comma: abs + 1,
+          };
+        }
+      }
+      bits &= bits - 1;
+    }
+    BlockOutcome::Continue
+  }
+}
+
+/// Sink for chunk-cadence array landmarks sampled by
+/// [`Walker::advance_top_level_commas`]. Records one `(index, offset)` per chunk
+/// crossed, each snapped to an exact element boundary (just past a depth-0
+/// comma). Constructed per call from resolver state that persists across
+/// `ChunkMiss` resumes; present only when the structural-index cache collects.
+pub struct LandmarkSink<'a> {
+  /// Element index at the scan call's `from` position.
+  pub base_index: usize,
+  /// Next chunk-boundary offset to sample at; `0` until lazily anchored to the
+  /// first boundary past `from`. Persisted by the caller across `Partial` resumes.
+  pub boundary: &'a mut u64,
+  /// Collected landmarks, appended in ascending index order.
+  pub out: &'a mut Vec<(usize, u64)>,
+}
+
+impl LandmarkSink<'_> {
+  /// Anchor the per-chunk cadence at the first chunk boundary past `from`, once.
+  fn anchor(&mut self, from: u64, chunk_bytes: u64) {
+    if *self.boundary == 0 {
+      *self.boundary = (from / chunk_bytes + 1) * chunk_bytes;
+    }
+  }
+
+  /// Record a landmark for the element of `index` starting at `after`, if the
+  /// cadence boundary has been reached, then advance the boundary one chunk on.
+  fn sample(&mut self, index: usize, after: u64, chunk_bytes: u64) {
+    if after >= *self.boundary {
+      self.out.push((index, after));
+      *self.boundary = (after / chunk_bytes + 1) * chunk_bytes;
+    }
+  }
+
+  /// Fast-path sampling: if this block of depth-0 `commas` reaches the cadence
+  /// boundary, sample the first comma at or after it. `base_consumed` is the
+  /// comma count consumed before this block, so the landmark's index is exact.
+  fn sample_block(&mut self, commas: u64, offset: u64, base_consumed: usize, chunk_bytes: u64) {
+    if commas == 0 || offset + BLOCK_BYTES as u64 <= *self.boundary {
+      return;
+    }
+    let min_bit = self.boundary.saturating_sub(1).saturating_sub(offset);
+    let at_or_after = if min_bit >= BLOCK_BYTES as u64 {
+      0
+    } else {
+      commas & (u64::MAX << min_bit)
+    };
+    if at_or_after == 0 {
+      return;
+    }
+    let p = at_or_after.trailing_zeros();
+    let through = if p >= 63 {
+      commas
+    } else {
+      commas & ((1u64 << (p + 1)) - 1)
+    };
+    let index = self.base_index + base_consumed + through.count_ones() as usize;
+    self.sample(index, offset + p as u64 + 1, chunk_bytes);
   }
 }
 
@@ -389,9 +549,13 @@ pub struct StringScan {
 #[derive(Debug, Clone)]
 pub(crate) enum SkipState {
   /// Need the opening byte at `from` to pick a kind.
-  Pending { from: u64 },
+  Pending {
+    from: u64,
+  },
   String(StringScan),
-  Primitive { offset: u64 },
+  Primitive {
+    offset: u64,
+  },
   Container(ContainerSkipState),
 }
 
@@ -654,7 +818,7 @@ mod tests {
     let win = window(source, 64);
     let mut w = Walker::new(&win);
     match w
-      .advance_top_level_commas(1, 0, 2, ScanCarry::default())
+      .advance_top_level_commas(1, 0, 2, ScanCarry::default(), None)
       .unwrap()
     {
       CommaStop::Found {
@@ -679,7 +843,7 @@ mod tests {
     let mut w = Walker::new(&win);
     // element 0 = object, element 1 = "x,y", element 2 = 7
     match w
-      .advance_top_level_commas(1, 0, 2, ScanCarry::default())
+      .advance_top_level_commas(1, 0, 2, ScanCarry::default(), None)
       .unwrap()
     {
       CommaStop::Found {
@@ -699,7 +863,7 @@ mod tests {
     let win = window(source, 64);
     let mut w = Walker::new(&win);
     assert_eq!(
-      w.advance_top_level_commas(1, 0, 5, ScanCarry::default())
+      w.advance_top_level_commas(1, 0, 5, ScanCarry::default(), None)
         .unwrap(),
       CommaStop::ArrayClosed { consumed: 1 }
     );
@@ -742,7 +906,7 @@ mod tests {
     loop {
       let result = {
         let mut w = Walker::new(&win);
-        w.advance_top_level_commas(off, depth, target_index - consumed_total, carry)
+        w.advance_top_level_commas(off, depth, target_index - consumed_total, carry, None)
       };
       match result {
         Ok(CommaStop::Found {
@@ -789,6 +953,137 @@ mod tests {
     assert_eq!(
       w.read_range(50, 150).unwrap(),
       (50..150).map(|i| (i % 251) as u8).collect::<Vec<_>>()
+    );
+  }
+
+  /// A flat `[7,7,...,7]` of `n` single-digit elements.
+  fn flat_digit_array(n: usize) -> Vec<u8> {
+    let mut s = String::from("[");
+    for i in 0..n {
+      if i > 0 {
+        s.push(',');
+      }
+      s.push('7');
+    }
+    s.push(']');
+    s.into_bytes()
+  }
+
+  #[test]
+  fn advance_commas_samples_landmarks_at_exact_boundaries() {
+    let chunk_bytes = 64u64;
+    let source = flat_digit_array(400);
+    let win = window(&source, chunk_bytes);
+    let mut w = Walker::new(&win);
+
+    let mut boundary = 0u64;
+    let mut out: Vec<(usize, u64)> = Vec::new();
+    let sink = LandmarkSink {
+      base_index: 0,
+      boundary: &mut boundary,
+      out: &mut out,
+    };
+    match w
+      .advance_top_level_commas(1, 0, 350, ScanCarry::default(), Some(sink))
+      .unwrap()
+    {
+      CommaStop::Found { consumed, .. } => assert_eq!(consumed, 350),
+      other => panic!("expected Found, got {other:?}"),
+    }
+
+    assert!(!out.is_empty(), "expected landmarks across many chunks");
+    let mut last_chunk: Option<u64> = None;
+    for &(idx, off) in &out {
+      // Each landmark offset is an exact element start (a digit, not a comma).
+      assert_eq!(
+        source[off as usize], b'7',
+        "landmark not at an element start"
+      );
+      let commas_before = source[..off as usize]
+        .iter()
+        .filter(|&&b| b == b',')
+        .count();
+      assert_eq!(idx, commas_before, "landmark index must match its offset");
+      // At most one landmark per chunk: strictly increasing chunk number.
+      let chunk = off / chunk_bytes;
+      if let Some(prev) = last_chunk {
+        assert!(chunk > prev, "more than one landmark in chunk {chunk}");
+      }
+      last_chunk = Some(chunk);
+    }
+  }
+
+  #[test]
+  fn advance_commas_sampling_survives_chunk_faults() {
+    // The landmark set collected while faulting chunk-by-chunk must equal the
+    // set collected with the whole document resident (no dup/missing landmarks
+    // across a mid-scan `ChunkMiss`).
+    let chunk_bytes = 64u64;
+    let n = 400usize;
+    let source = flat_digit_array(n);
+    let target = 350usize;
+
+    let full = window(&source, chunk_bytes);
+    let mut full_out: Vec<(usize, u64)> = Vec::new();
+    {
+      let mut b = 0u64;
+      let mut w = Walker::new(&full);
+      let sink = LandmarkSink {
+        base_index: 0,
+        boundary: &mut b,
+        out: &mut full_out,
+      };
+      w.advance_top_level_commas(1, 0, target, ScanCarry::default(), Some(sink))
+        .unwrap();
+    }
+
+    let mut win = ChunkWindow::new(chunk_bytes, source.len() as u64);
+    let load = |win: &mut ChunkWindow, chunk_start: u64| {
+      let end = (chunk_start + chunk_bytes).min(source.len() as u64) as usize;
+      win.insert(
+        chunk_start,
+        Bytes::copy_from_slice(&source[chunk_start as usize..end]),
+      );
+    };
+    load(&mut win, 0);
+
+    let mut off = 1u64;
+    let mut depth = 0u32;
+    let mut carry = ScanCarry::default();
+    let mut consumed_total = 0usize;
+    let mut boundary = 0u64;
+    let mut faulted_out: Vec<(usize, u64)> = Vec::new();
+    loop {
+      let result = {
+        let mut w = Walker::new(&win);
+        let sink = LandmarkSink {
+          base_index: consumed_total,
+          boundary: &mut boundary,
+          out: &mut faulted_out,
+        };
+        w.advance_top_level_commas(off, depth, target - consumed_total, carry, Some(sink))
+      };
+      match result {
+        Ok(CommaStop::Found { .. }) => break,
+        Ok(CommaStop::Partial {
+          offset,
+          depth: d,
+          consumed,
+          carry: c,
+        }) => {
+          off = offset;
+          depth = d;
+          carry = c;
+          consumed_total += consumed;
+        }
+        Ok(other) => panic!("unexpected {other:?}"),
+        Err(TraverseError::Pending(ChunkMiss(m))) => load(&mut win, m),
+        Err(e) => panic!("error {e:?}"),
+      }
+    }
+    assert_eq!(
+      faulted_out, full_out,
+      "faulted landmark set must equal the resident-window set"
     );
   }
 }

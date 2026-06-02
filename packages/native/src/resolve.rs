@@ -7,7 +7,7 @@
 
 use crate::path::Segment;
 use crate::simd::ScanCarry;
-use crate::walker::{CommaStop, TraverseError, Walker};
+use crate::walker::{CommaStop, LandmarkSink, TraverseError, Walker};
 
 /// Byte range `[start, end)` covering a JSON value in the source document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +49,9 @@ pub struct ContainerRecord {
   /// Object only: the resume offset where the scan ended - the matched member's
   /// start, or the close `}` position. The high-water member boundary.
   pub object_resume: Option<u64>,
-  /// Array only: `(resolved_index, element_offset)` of the furthest element.
-  pub array_resume: Option<(usize, u64)>,
+  /// Array only: `(index, element_offset)` landmarks sampled during the scan
+  /// (one per chunk crossed) plus the resolved target, in ascending index order.
+  pub array_landmarks: Vec<(usize, u64)>,
 }
 
 /// Per-query resolver state. Persisted across `ChunkMiss` retries so a long
@@ -91,6 +92,10 @@ struct SegmentScan {
   /// element boundaries; the fast path may commit a mid-string carry at a block
   /// boundary. Unused for objects.
   carry: ScanCarry,
+  /// Next chunk-boundary offset at which the array scan samples a cache landmark;
+  /// `0` until anchored. Persisted across `ChunkMiss` resumes so the per-chunk
+  /// cadence never double-samples. Unused for objects.
+  landmark_boundary: u64,
 }
 
 impl ResolveState {
@@ -151,6 +156,7 @@ pub fn resolve_step(
             index: 0,
             depth: 0,
             carry: ScanCarry::default(),
+            landmark_boundary: 0,
           },
           ResumePoint::Array { index, offset } => SegmentScan {
             kind: ContainerKind::Array,
@@ -158,6 +164,7 @@ pub fn resolve_step(
             index,
             depth: 0,
             carry: ScanCarry::default(),
+            landmark_boundary: 0,
           },
         };
         (ls.kind, *start, ls)
@@ -179,6 +186,7 @@ pub fn resolve_step(
           index: 0,
           depth: 0,
           carry: ScanCarry::default(),
+          landmark_boundary: 0,
         };
         (kind, s, ls)
       };
@@ -189,7 +197,7 @@ pub fn resolve_step(
           value_start,
           members: Vec::new(),
           object_resume: None,
-          array_resume: None,
+          array_landmarks: Vec::new(),
         });
       }
       *segment_scan = Some(ls);
@@ -348,11 +356,24 @@ fn step_array(
   mut cs: Option<&mut ContainerRecord>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
-  // per-element skip_value calls. Intermediate positions aren't cached (only the
-  // resolved element is a confirmed boundary), so nothing is recorded here.
+  // per-element skip_value calls. When collecting, a `LandmarkSink` samples one
+  // resume landmark per chunk crossed (snapped to an element boundary); the
+  // cadence offset (`landmark_boundary`) persists across `ChunkMiss` resumes.
   while state.index < target_index {
     let needed = target_index - state.index;
-    match walker.advance_top_level_commas(state.offset, state.depth, needed, state.carry)? {
+    let base_index = state.index;
+    let from = state.offset;
+    let depth = state.depth;
+    let carry = state.carry;
+    let stop = {
+      let sink = cs.as_deref_mut().map(|cs| LandmarkSink {
+        base_index,
+        boundary: &mut state.landmark_boundary,
+        out: &mut cs.array_landmarks,
+      });
+      walker.advance_top_level_commas(from, depth, needed, carry, sink)?
+    };
+    match stop {
       CommaStop::Found {
         offset_after_comma,
         consumed,
@@ -393,7 +414,7 @@ fn step_array(
     }
     if iter_index == target_index {
       if let Some(cs) = cs.as_deref_mut() {
-        cs.array_resume = Some((target_index, offset));
+        cs.array_landmarks.push((target_index, offset));
       }
       return Ok(Some(offset));
     }
@@ -663,7 +684,7 @@ mod tests {
   }
 
   #[test]
-  fn records_array_resume() {
+  fn records_array_landmark() {
     let src = b"[10,20,30,40]";
     let win = full_window(src);
     let mut st = ResolveState::resume(0, 0, None, true);
@@ -672,8 +693,9 @@ mod tests {
     let h = st.take_scan_record().expect("collecting");
     let cs = &h.containers[0];
     assert!(cs.members.is_empty());
+    // One chunk, so no chunk-cadence sampling: just the resolved target.
     // Element 2 ("30") starts at offset 7.
-    assert_eq!(cs.array_resume, Some((2, 7)));
+    assert_eq!(cs.array_landmarks, vec![(2, 7)]);
   }
 
   #[test]
@@ -695,6 +717,9 @@ mod tests {
     assert_eq!(h.containers[0].seg, 0);
     assert_eq!(h.containers[1].seg, 1);
     assert_eq!(h.containers[2].seg, 2);
-    assert_eq!(h.containers[1].array_resume.map(|(i, _)| i), Some(1));
+    assert_eq!(
+      h.containers[1].array_landmarks.last().map(|&(i, _)| i),
+      Some(1)
+    );
   }
 }
