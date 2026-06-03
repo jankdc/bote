@@ -30,11 +30,13 @@ function deepObjectDoc(): string {
   return `{"a":{"b":{${fields},"c":1,"d":2}}}`
 }
 
-// Chunked-read behavior: reads are chunk-aligned and a large document resolves
-// correctly while only a bounded transient window of chunks is ever resident
-// (the streaming walk stores no chunk or bitmap cache).
+/** A long flat array used by the backward / scattered effect tests: one deep get
+ *  plants chunk-cadence array members across it, which earlier indices reuse. */
+function flatArrayDoc(n: number): Uint8Array {
+  return enc('{"arr":[' + Array.from({ length: n }, () => '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"').join(',') + ']}')
+}
 
-test('reads_are_chunk_aligned', async () => {
+test('reads_are_chunk_aligned_and_coalesce_into_multi_chunk_bursts', async () => {
   const data = enc('[' + Array.from({ length: 200 }, () => '1').join(',') + ']')
   const reads: Array<{ offset: number; length: number }> = []
   const source: Source = {
@@ -56,48 +58,33 @@ test('reads_are_chunk_aligned', async () => {
     const end = r.offset + r.length
     assert.ok(end % 64 === 0 || end >= data.length, `read ${r.offset}+${r.length} neither whole-chunk nor at EOF`)
   }
-  // The burst path must actually coalesce: at least one read spans >1 chunk.
   assert.ok(
     reads.some((r) => r.length > 64),
     `expected at least one coalesced multi-chunk read, got ${JSON.stringify(reads)}`,
   )
 })
 
-test('large_doc_resolves_with_small_chunks', async () => {
-  // 30 KB object with 2000 keys, 256-byte chunks: the query succeeds under heavy
-  // forward faulting with only a bounded window of chunks resident at a time.
+test('reads_large_doc_resolves_under_heavy_forward_faulting_with_small_chunks', async () => {
   const cursor = await open(memorySource(enc(bigObject(2000)), 256))
   assert.equal(await cursor.get('k1500'), 1500)
   assert.equal(await cursor.get('k0042'), 42)
   assert.equal(await cursor.has('k9999'), false)
 })
 
-// Cache TRANSPARENCY: these assert only that values are correct - identical
-// whether resolved cold, served warm, or with the cache disabled. They do NOT
-// prove a cache hit (a fresh scan passes them too); the cache *effect* is
-// asserted separately below via read counts. They still earn their keep: warm
-// and disabled paths must never diverge, and the last-member / missing-key cases
-// guard the frontier-correctness invariant (the bug this caught was a frontier
-// that skipped an untabled member).
-
-test('repeated_overlapping_get_returns_identical_values', async (t) => {
+test('transparency_repeated_overlapping_get_returns_identical_values', async (t) => {
   const doc = '{"data":{"meta":{"v":2},"users":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}}'
   const cursor = await open(memorySource(enc(doc)))
   t.after(() => cursor.close())
   assert.equal(await cursor.get('data', 'meta', 'v'), 2)
   assert.equal(await cursor.get('data', 'users', 1, 'name'), 'b')
   assert.equal(await cursor.get('data', 'users', 0, 'id'), 1)
-  // Re-query the same and overlapping paths - results must be identical.
   assert.equal(await cursor.get('data', 'meta', 'v'), 2)
   assert.equal(await cursor.get('data', 'users', 1, 'name'), 'b')
-  // A sibling of an already-resolved member, then a missing sibling.
   assert.equal(await cursor.get('data', 'users', 0, 'name'), 'a')
   assert.equal(await cursor.get('data', 'users', 0, 'missing'), undefined)
 })
 
-test('object_sibling_access_consistent_first_and_last_members', async (t) => {
-  // Resolving the last member first must still let earlier members resolve, and
-  // a missing key must stay undefined (the frontier never skips a real member).
+test('transparency_object_sibling_access_consistent_first_and_last_members', async (t) => {
   const cursor = await open(memorySource(enc('{"a":1,"b":2,"c":3}')))
   t.after(() => cursor.close())
   assert.equal(await cursor.get('c'), 3)
@@ -107,12 +94,11 @@ test('object_sibling_access_consistent_first_and_last_members', async (t) => {
   assert.equal(await cursor.get('missing'), undefined)
 })
 
-test('walk_then_multi_get_on_child_is_consistent', async (t) => {
+test('transparency_walk_then_out_of_order_multi_get_on_child_is_consistent', async (t) => {
   const cursor = await open(memorySource(enc('{"rows":[{"a":1,"b":2,"c":3},{"a":4,"b":5,"c":6}]}')))
   t.after(() => cursor.close())
   const seen: Array<[unknown, unknown, unknown]> = []
   for await (const row of cursor.walk('rows')) {
-    // Several gets on one walked child, out of source order.
     const a = await row.get('a')
     const c = await row.get('c')
     const b = await row.get('b')
@@ -124,7 +110,7 @@ test('walk_then_multi_get_on_child_is_consistent', async (t) => {
   ])
 })
 
-test('array_repeated_and_overlapping_index_access_is_consistent', async (t) => {
+test('transparency_array_repeated_and_overlapping_index_access_is_consistent', async (t) => {
   const data = enc('{"arr":[' + Array.from({ length: 50 }, (_, i) => `${i * 2}`).join(',') + ']}')
   const cursor = await open(memorySource(data, 64))
   t.after(() => cursor.close())
@@ -135,9 +121,7 @@ test('array_repeated_and_overlapping_index_access_is_consistent', async (t) => {
   assert.equal(await cursor.get('arr', 50), undefined)
 })
 
-test('scattered_and_backward_index_access_is_consistent', async (t) => {
-  // Multi-member resume must stay transparent for backward and scattered
-  // access: identical values with the cache on and off, in any index order.
+test('transparency_scattered_and_backward_index_access_identical_with_cache_on_and_off', async (t) => {
   const n = 300
   const data = enc('{"arr":[' + Array.from({ length: n }, (_, i) => `${i * 3}`).join(',') + ']}')
   const idxs = [299, 0, 150, 75, 200, 10, 299, 150, 1]
@@ -152,12 +136,7 @@ test('scattered_and_backward_index_access_is_consistent', async (t) => {
   assert.equal(await on.get('arr', n), undefined)
 })
 
-test('small_index_cache_budget_is_transparent_under_eviction', async (t) => {
-  // A tight slot budget forces near-constant eviction; values must stay identical
-  // to the default (effectively unbounded here) and the disabled cache. The
-  // scattered, repeated workload re-derives both object members and array indices,
-  // so any node dropped by eviction is exercised again on re-query - eviction is a
-  // performance detail, never a correctness one.
+test('transparency_small_index_cache_budget_stays_identical_under_constant_eviction', async (t) => {
   const n = 200
   const rows = Array.from({ length: n }, (_, i) => `{"id":${i},"name":"r${i}","v":${i * 2}}`).join(',')
   const data = enc(`{"rows":[${rows}]}`)
@@ -180,14 +159,27 @@ test('small_index_cache_budget_is_transparent_under_eviction', async (t) => {
   assert.equal(await off.count('rows'), n)
 })
 
-// Cache EFFECT: a warm query must fault strictly fewer chunks than an identical
-// cold one. This is the only forgery-proof signal that the cache did something -
-// a fresh scan cannot out-read itself.
+test('transparency_capped_object_members_resolve_past_the_cap_boundary', async (t) => {
+  const cursor = await open(memorySource(enc(bigObject(500)), 256), { objectMemberCap: 4 })
+  t.after(() => cursor.close())
+  assert.equal(await cursor.get('k0001'), 1)
+  assert.equal(await cursor.get('k0400'), 400)
+  assert.equal(await cursor.get('k0001'), 1)
+  assert.equal(await cursor.has('k0499'), true) // last member, terminated by `}`
+  assert.equal(await cursor.has('k9999'), false)
+})
 
-test('warm_sibling_get_faults_fewer_reads_than_cold', async (t) => {
+test('transparency_disabled_cache_is_correct', async (t) => {
+  const cursor = await open(memorySource(enc('{"a":1,"b":2,"c":3}')), { objectMemberCap: 0, arrayIndexInterval: 0 })
+  t.after(() => cursor.close())
+  assert.equal(await cursor.get('c'), 3)
+  assert.equal(await cursor.get('a'), 1)
+  assert.equal(await cursor.get('missing'), undefined)
+  assert.equal(await cursor.count(), 3)
+})
+
+test('effect_warm_sibling_get_faults_fewer_reads_than_cold', async (t) => {
   const data = enc(deepObjectDoc())
-  // Warm: resolve c (populates the chain + b's member table), reset the counter,
-  // then resolve sibling d - which resumes from c's frontier.
   const warm = countingSource(data, 256)
   const wc = await open(warm.source)
   t.after(() => wc.close())
@@ -196,7 +188,6 @@ test('warm_sibling_get_faults_fewer_reads_than_cold', async (t) => {
   assert.equal(await wc.get('a', 'b', 'd'), 2)
   const warmReads = warm.reads.n
 
-  // Cold: resolve d on a fresh cursor - scans b from its open.
   const cold = countingSource(data, 256)
   const cc = await open(cold.source)
   t.after(() => cc.close())
@@ -206,7 +197,7 @@ test('warm_sibling_get_faults_fewer_reads_than_cold', async (t) => {
   assert.ok(warmReads < coldReads, `warm sibling get (${warmReads} reads) should be < cold (${coldReads})`)
 })
 
-test('warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
+test('effect_warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
   const data = enc('{"arr":[' + Array.from({ length: 100 }, () => '{"v":"xxxxxxxxxxxxxxxxxxxx"}').join(',') + ']}')
   const warm = countingSource(data, 256)
   const wc = await open(warm.source)
@@ -225,16 +216,7 @@ test('warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
   assert.ok(warmReads < coldReads, `warm index get (${warmReads} reads) should be < cold (${coldReads})`)
 })
 
-// A long flat array used by the backward / scattered effect tests below: one
-// deep get plants chunk-cadence array members across it, which earlier indices reuse.
-function flatArrayDoc(n: number): Uint8Array {
-  return enc('{"arr":[' + Array.from({ length: n }, () => '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"').join(',') + ']}')
-}
-
-test('warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
-  // One deep get plants array members along the way; a backward re-get then resumes
-  // from a nearby array member instead of rescanning from the open. Impossible under
-  // the old single forward-only array member, which parked at the deep index.
+test('effect_warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
   const data = flatArrayDoc(400)
   const warm = countingSource(data, 256)
   const wc = await open(warm.source)
@@ -253,9 +235,7 @@ test('warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
   assert.ok(warmReads < coldReads, `warm backward get (${warmReads} reads) should be < cold (${coldReads})`)
 })
 
-test('warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => {
-  // Visiting a scattered index set plants an array member at each; revisiting then
-  // resumes from each array member rather than rescanning from the open.
+test('effect_warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => {
   const data = flatArrayDoc(400)
   const idxs = [350, 50, 220, 120, 300, 80]
   const warm = countingSource(data, 256)
@@ -275,7 +255,7 @@ test('warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => {
   assert.ok(warmReads < coldReads, `warm scattered revisit (${warmReads} reads) should be < cold (${coldReads})`)
 })
 
-test('repeat_count_issues_no_reads', async (t) => {
+test('effect_repeat_count_issues_no_reads', async (t) => {
   const data = enc('{"xs":[' + Array.from({ length: 300 }, (_, i) => `${i}`).join(',') + ']}')
   const { source, reads } = countingSource(data, 256)
   const cursor = await open(source)
@@ -287,28 +267,7 @@ test('repeat_count_issues_no_reads', async (t) => {
   assert.equal(reads.n, 0, 'a repeat count must be served from the cache with no reads')
 })
 
-test('cache_disabled_is_correct', async (t) => {
-  const cursor = await open(memorySource(enc('{"a":1,"b":2,"c":3}')), { objectMemberCap: 0, arrayIndexInterval: 0 })
-  t.after(() => cursor.close())
-  assert.equal(await cursor.get('c'), 3)
-  assert.equal(await cursor.get('a'), 1)
-  assert.equal(await cursor.get('missing'), undefined)
-  assert.equal(await cursor.count(), 3)
-})
-
-test('cache_capped_object_members_stays_correct', async (t) => {
-  // A tiny object cap tables only a dense prefix; members past the cap resume-scan
-  // from the cap boundary, so every lookup must still resolve correctly.
-  const cursor = await open(memorySource(enc(bigObject(500)), 256), { objectMemberCap: 4 })
-  t.after(() => cursor.close())
-  assert.equal(await cursor.get('k0001'), 1) // within the tabled prefix
-  assert.equal(await cursor.get('k0400'), 400) // beyond the cap: resumes from the boundary
-  assert.equal(await cursor.get('k0001'), 1)
-  assert.equal(await cursor.has('k0499'), true) // last member, terminated by `}`
-  assert.equal(await cursor.has('k9999'), false)
-})
-
-test('open_rejects_invalid_cache_knobs', async () => {
+test('knobs_open_rejects_invalid_cache_knobs', async () => {
   await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: -1 }), RangeError)
   await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: 1.5 }), RangeError)
   await assert.rejects(() => open(memorySource(enc('{}')), { arrayIndexInterval: -1 }), RangeError)

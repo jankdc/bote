@@ -105,10 +105,15 @@ impl Cursor {
 
   #[napi(ts_args_type = "path: Array<string | number>")]
   pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
-    crate::count::at(&self.session, &path::from_napi(path), self.anchor_start(), self.depth)
-      .await
-      .map(|n| n as f64)
-      .map_err(map_err)
+    crate::count::at(
+      &self.session,
+      &path::from_napi(path),
+      self.anchor_start(),
+      self.depth,
+    )
+    .await
+    .map(|n| n as f64)
+    .map_err(map_err)
   }
 
   #[napi(getter)]
@@ -216,7 +221,10 @@ impl IterState {
 /// Resolve the path and open its container cursor, pruning to the scan position so
 /// the first yield's read is hot. Shared by `iter` and `walk`.
 async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
-  if let Some(start) = session.locate_at(&core.path, core.anchor_start, core.base_depth).await? {
+  if let Some(start) = session
+    .locate_at(&core.path, core.anchor_start, core.base_depth)
+    .await?
+  {
     core.base_value_start = Some(start);
     core.child_cursor = session.enter_container(start, &mut core.window).await?;
     if let Some(w) = &core.child_cursor {
@@ -270,7 +278,15 @@ impl CursorIter {
     batch: usize,
     with_key: bool,
   ) -> Self {
-    let state = IterState::new(&session, path, anchor_start, base_depth, select_ir, batch, with_key);
+    let state = IterState::new(
+      &session,
+      path,
+      anchor_start,
+      base_depth,
+      select_ir,
+      batch,
+      with_key,
+    );
     Self {
       session,
       state: Arc::new(AsyncMutex::new(state)),
@@ -351,7 +367,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
             // Exhausted: child_cursor sits AT the close. Record child count + close
             // on the base node. iter only ever runs over arrays (objects gated above).
             if let Some(vs) = *base_value_start {
-              session.store_child_count(base_depth, *anchor_start, path, ContainerKind::Array, vs, *yielded);
+              session.store_child_count(
+                base_depth,
+                *anchor_start,
+                path,
+                ContainerKind::Array,
+                vs,
+                *yielded,
+              );
               session.store_close(
                 base_depth,
                 *anchor_start,
@@ -374,7 +397,8 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
           };
           let value = match select {
             Some(sel) => {
-              crate::eval::project(&session, sel, child.location().start, child_depth, window).await?
+              crate::eval::project(&session, sel, child.location().start, child_depth, window)
+                .await?
             }
             None => session.materialize(child.location(), window).await?,
           };
@@ -473,7 +497,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         // Exhausted: child_cursor sits AT the close. Record child count + close on
         // the base node - works for both object and array bases.
         if let Some(vs) = *base_value_start {
-          session.store_child_count(base_depth, *anchor_start, path, child_cursor.kind, vs, *yielded);
+          session.store_child_count(
+            base_depth,
+            *anchor_start,
+            path,
+            child_cursor.kind,
+            vs,
+            *yielded,
+          );
           session.store_close(
             base_depth,
             *anchor_start,
@@ -597,7 +628,6 @@ mod tests {
       let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
       assert!(w.next(None).await.unwrap().is_some());
       w.complete(None).await.unwrap();
-      // complete() clears the abandoned iterator's window - no leak.
       assert!(w.state.lock().await.window.is_empty());
       abandoned.push(w); // keep alive: no Drop, no GC
     }
@@ -640,7 +670,6 @@ mod tests {
 
   #[tokio::test]
   async fn pins_iter_batch_window_bounded() {
-    // Batching a large array stays bounded by the burst window, not doc size.
     let s = session(2000, 256);
     let bound = window_bound();
     let mut it = CursorIter::new(

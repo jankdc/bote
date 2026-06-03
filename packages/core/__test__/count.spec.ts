@@ -16,6 +16,12 @@ test('count_object_members', async (t) => {
   assert.equal(await cursor.count(), 3)
 })
 
+test('count_ignores_nested_and_in_string_commas', async (t) => {
+  const cursor = await open(memorySource(enc('{"xs":[{"a":[1,2,3]},"c,d,e",[9,9]]}')))
+  t.after(() => cursor.close())
+  assert.equal(await cursor.count('xs'), 3)
+})
+
 test('count_empty_container_is_zero', async (t) => {
   const cursor = await open(memorySource(enc('{"items":[],"obj":{}}')))
   t.after(() => cursor.close())
@@ -29,12 +35,6 @@ test('count_missing_or_non_container_is_zero', async (t) => {
   assert.equal(await cursor.count('missing'), 0)
   assert.equal(await cursor.count('a'), 0)
   assert.equal(await cursor.count('s'), 0)
-})
-
-test('count_ignores_nested_and_in_string_commas', async (t) => {
-  const cursor = await open(memorySource(enc('{"xs":[{"a":[1,2,3]},"c,d,e",[9,9]]}')))
-  t.after(() => cursor.close())
-  assert.equal(await cursor.count('xs'), 3)
 })
 
 test('count_large_array_under_eviction', async (t) => {

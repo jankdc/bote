@@ -674,6 +674,21 @@ mod tests {
   }
 
   #[test]
+  fn records_array_member() {
+    let src = b"[10,20,30,40]";
+    let win = full_window(src);
+    let mut st = ResolveState::resume(0, 0, None, false, 16);
+    resolve_once(&win, &[Segment::Element(2)], &mut st);
+
+    let h = st.take_scan_record().expect("collecting");
+    let cs = &h.containers[0];
+    assert!(cs.members.is_empty());
+    // Stride 16 over 4 elements samples no grid array member, just the resolved
+    // target. Element 2 ("30") starts at offset 7.
+    assert_eq!(cs.array_members, vec![(2, 7)]);
+  }
+
+  #[test]
   fn records_last_member_on_miss() {
     // Target absent: scan runs to the close. The last member (ends with `}` not
     // `,`) must be tabled too, or a later lookup of it would resume past it.
@@ -690,23 +705,7 @@ mod tests {
   }
 
   #[test]
-  fn records_array_member() {
-    let src = b"[10,20,30,40]";
-    let win = full_window(src);
-    let mut st = ResolveState::resume(0, 0, None, false, 16);
-    resolve_once(&win, &[Segment::Element(2)], &mut st);
-
-    let h = st.take_scan_record().expect("collecting");
-    let cs = &h.containers[0];
-    assert!(cs.members.is_empty());
-    // Stride 16 over 4 elements samples no grid array member, just the resolved
-    // target. Element 2 ("30") starts at offset 7.
-    assert_eq!(cs.array_members, vec![(2, 7)]);
-  }
-
-  #[test]
-  fn record_spans_nested_containers() {
-    // Path: object "users" -> array element 1 -> object "name".
+  fn records_spans_nested_containers() {
     let src = br#"{"users":[{"id":1},{"id":2,"name":"bo"}]}"#;
     let win = full_window(src);
     let mut st = ResolveState::resume(0, 0, None, true, 16);

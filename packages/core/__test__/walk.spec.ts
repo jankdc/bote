@@ -50,18 +50,8 @@ test('walk_subcursor_key_and_get_resolve_against_anchor', async () => {
     keys.push(user.key)
     names.push((await user.get('name')) as string)
   }
-  assert.deepEqual(keys, [0, 1]) // key reflects the parent step, even when nested
-  assert.deepEqual(names, ['Alice', 'Bob']) // relative get resolves against the child anchor
-})
-
-test('walk_missing_path_yields_empty', async (t) => {
-  // A missing path on `walk` produces no children, mirroring the same total
-  // / non-throwing semantics get/has/count already have.
-  const cursor = await open(memorySource(enc('{"users":[1,2]}')))
-  t.after(() => cursor.close())
-  const seen: unknown[] = []
-  for await (const sub of cursor.walk('missing')) seen.push(sub.key)
-  assert.deepEqual(seen, [])
+  assert.deepEqual(keys, [0, 1])
+  assert.deepEqual(names, ['Alice', 'Bob'])
 })
 
 test('walk_large_array_with_small_chunks', async () => {
@@ -75,4 +65,14 @@ test('walk_large_array_with_small_chunks', async () => {
   assert.equal(ids.length, 100)
   assert.equal(ids[0], 0)
   assert.equal(ids[99], 99)
+})
+
+test('walk_missing_path_yields_empty', async (t) => {
+  // A missing path on `walk` produces no children, mirroring the same total
+  // / non-throwing semantics get/has/count already have.
+  const cursor = await open(memorySource(enc('{"users":[1,2]}')))
+  t.after(() => cursor.close())
+  const seen: unknown[] = []
+  for await (const sub of cursor.walk('missing')) seen.push(sub.key)
+  assert.deepEqual(seen, [])
 })

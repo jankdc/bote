@@ -36,41 +36,17 @@ test('get_full_subobject', async () => {
   assert.deepEqual(await cursor.get('a'), { b: 1, c: [2, 3] })
 })
 
-test('get_string_with_structural_chars', async () => {
-  const cursor = await open(memorySource(enc('{"x":"has } and , inside","y":2}')))
-  assert.equal(await cursor.get('y'), 2)
-  assert.equal(await cursor.get('x'), 'has } and , inside')
-})
-
-test('get_missing_returns_undefined_distinct_from_json_null', async () => {
-  const cursor = await open(memorySource(enc('{"a":1,"b":null}')))
-  assert.equal(await cursor.get('missing'), undefined)
-  assert.equal(await cursor.get('b'), null)
-  assert.equal(await cursor.has('missing'), false)
-  assert.equal(await cursor.has('b'), true)
-})
-
-test('has_presence_and_absence', async () => {
-  const cursor = await open(memorySource(enc('{"a":1,"b":[10,20]}')))
-  assert.equal(await cursor.has('a'), true)
-  assert.equal(await cursor.has('b', 1), true)
-  assert.equal(await cursor.has('missing'), false)
-  assert.equal(await cursor.has('b', 5), false)
-})
-
-test('has_resolves_value_like_get', async () => {
-  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has(), true)
-  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has('missing'), false)
-  await assert.rejects((await open(memorySource(enc('')))).has())
-})
-
 test('get_path_segments_can_be_spread_from_an_array', async (t) => {
-  // Variadic accepts a spread from any accumulated path - the common case
-  // for code that builds a path during traversal.
   const cursor = await open(memorySource(enc('{"users":[{"name":"Alice"}]}')))
   t.after(() => cursor.close())
   const path = ['users', 0, 'name'] as const
   assert.equal(await cursor.get(...path), 'Alice')
+})
+
+test('get_string_with_structural_chars', async () => {
+  const cursor = await open(memorySource(enc('{"x":"has } and , inside","y":2}')))
+  assert.equal(await cursor.get('y'), 2)
+  assert.equal(await cursor.get('x'), 'has } and , inside')
 })
 
 test('get_keys_with_slashes_and_tildes_are_just_keys', async (t) => {
@@ -79,7 +55,6 @@ test('get_keys_with_slashes_and_tildes_are_just_keys', async (t) => {
   t.after(() => cursor.close())
   assert.equal(await cursor.get('a/b'), 1)
   assert.equal(await cursor.get('c~d'), 2)
-  // Empty-string keys are real keys, addressable like any other.
   assert.equal(await cursor.get('', ''), 7)
 })
 
@@ -109,10 +84,25 @@ test('get_array_out_of_range_is_missing', async (t) => {
   assert.equal(await cursor.has('xs', 3), false)
 })
 
-test('get_rejects_bad_segments_at_the_facade', async (t) => {
-  // The facade catches segments that aren't strings or non-negative integers
-  // before they cross FFI, so a fractional / negative / NaN index turns into
-  // a clear TypeError instead of silently truncating in the native layer.
+test('get_missing_returns_undefined_distinct_from_json_null', async () => {
+  const cursor = await open(memorySource(enc('{"a":1,"b":null}')))
+  assert.equal(await cursor.get('missing'), undefined)
+  assert.equal(await cursor.get('b'), null)
+  assert.equal(await cursor.has('missing'), false)
+  assert.equal(await cursor.has('b'), true)
+})
+
+test('get_type_mismatch_is_missing_not_error', async (t) => {
+  // Member-name against an array, or numeric index against an object, both
+  // resolve to nothing rather than throwing - same total / non-throwing
+  // shape as `has` and `count`.
+  const cursor = await open(memorySource(enc('{"xs":[10,20],"obj":{"k":"v"}}')))
+  t.after(() => cursor.close())
+  assert.equal(await cursor.has('xs', 'name'), false)
+  assert.equal(await cursor.has('obj', 0), false)
+})
+
+test('get_rejects_fractional_negative_nan_and_non_string_number_segments', async (t) => {
   const cursor = await open(memorySource(enc('{"xs":[1,2,3]}')))
   t.after(() => cursor.close())
   // @ts-expect-error fractional index is not a valid segment
@@ -125,6 +115,20 @@ test('get_rejects_bad_segments_at_the_facade', async (t) => {
   await assert.rejects(() => cursor.get('xs', null), TypeError)
 })
 
+test('has_presence_and_absence', async () => {
+  const cursor = await open(memorySource(enc('{"a":1,"b":[10,20]}')))
+  assert.equal(await cursor.has('a'), true)
+  assert.equal(await cursor.has('b', 1), true)
+  assert.equal(await cursor.has('missing'), false)
+  assert.equal(await cursor.has('b', 5), false)
+})
+
+test('has_resolves_value_like_get', async () => {
+  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has(), true)
+  assert.equal(await (await open(memorySource(enc('{"a":1}')))).has('missing'), false)
+  await assert.rejects((await open(memorySource(enc('')))).has())
+})
+
 test('iter_select_rejects_bad_sub_path_segments', async (t) => {
   const cursor = await open(memorySource(enc('{"xs":[{"a":1}]}')))
   t.after(() => cursor.close())
@@ -134,14 +138,4 @@ test('iter_select_rejects_bad_sub_path_segments', async (t) => {
   assert.throws(() => cursor.iter('xs', { select: ['a', 1.5] }), TypeError)
   // @ts-expect-error sub-path in a map is also validated
   assert.throws(() => cursor.iter('xs', { select: { a: [-1] } }), TypeError)
-})
-
-test('get_type_mismatch_is_missing_not_error', async (t) => {
-  // Member-name against an array, or numeric index against an object, both
-  // resolve to nothing rather than throwing - same total / non-throwing
-  // shape as `has` and `count`.
-  const cursor = await open(memorySource(enc('{"xs":[10,20],"obj":{"k":"v"}}')))
-  t.after(() => cursor.close())
-  assert.equal(await cursor.has('xs', 'name'), false)
-  assert.equal(await cursor.has('obj', 0), false)
 })

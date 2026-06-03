@@ -140,7 +140,6 @@ mod tests {
 
   #[test]
   fn string_simple_marks_in_string() {
-    // `"hello"`
     let block = pad_to_window(b"\"hello\"");
     assert_matches_reference(&block, ScanCarry::default());
     let (in_string, _) = scan_block(&block, ScanCarry::default());
@@ -150,12 +149,17 @@ mod tests {
 
   #[test]
   fn string_escaped_quote_does_not_close() {
-    // `"a\"b"` - the middle quote is escaped, so it doesn't close the string
     let block = pad_to_window(b"\"a\\\"b\"");
     assert_matches_reference(&block, ScanCarry::default());
     let (in_string, _) = scan_block(&block, ScanCarry::default());
     // 0=" 1=a 2=\ 3=" 4=b 5=": bits 0..=4 in_string, bit 5 closes
     assert_eq!(in_string, 0b0001_1111u64);
+  }
+
+  #[test]
+  fn string_quote_outside_opens_string() {
+    let block = pad_to_window(b"hello \"world\" rest");
+    assert_matches_reference(&block, ScanCarry::default());
   }
 
   #[test]
@@ -185,14 +189,7 @@ mod tests {
   }
 
   #[test]
-  fn string_quote_outside_opens_string() {
-    let block = pad_to_window(b"hello \"world\" rest");
-    assert_matches_reference(&block, ScanCarry::default());
-  }
-
-  #[test]
   fn carry_inside_string_propagates() {
-    // Carry-in says we begin inside a string; it closes mid-block.
     let block = pad_to_window(b"continues here\" then");
     let carry = ScanCarry {
       prev_escaped: 0,
@@ -206,7 +203,6 @@ mod tests {
 
   #[test]
   fn carry_out_set_when_ends_inside_string() {
-    // String opens here and never closes, so the carry-out must stay set.
     let mut block = [b'x'; BLOCK_BYTES];
     block[0] = b'"';
     let (in_string, out_carry) = scan_block(&block, ScanCarry::default());
@@ -255,8 +251,6 @@ mod tests {
 
   #[test]
   fn fuzz_streaming_matches_reference_over_concatenation() {
-    // Cross-block correctness gate: chained SIMD carries must track the
-    // reference run block for block.
     let alphabet: &[u8] = b"abc{}[],:\"\\";
     let mut state: u64 = 0xfeed_face_dead_c0de;
     let mut simd_carry = ScanCarry::default();

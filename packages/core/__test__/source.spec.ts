@@ -17,8 +17,6 @@ function mockFetch(handler: (url: string, init: RequestInit) => Response | Promi
   }
 }
 
-// Source construction & I/O contract, plus cursor lifecycle (close / dispose).
-
 test('source_custom_open_and_get', async (t) => {
   const cursor = await open(fromBuffer(enc(DOC)))
   t.after(() => cursor.close())
@@ -68,15 +66,85 @@ test('source_rejects_zero_chunk_bytes', async () => {
   await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a whole positive/)
 })
 
+test('source_rejects_invalid_chunk_bytes', async () => {
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a whole positive/)
+})
+
 test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
   await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 100 })), /multiple of 64/)
 })
 
-test('source_invalid_chunk_bytes_is_rejected', async () => {
-  await assert.rejects(
-    () => open(fromBuffer(enc(DOC), { chunkBytes: 0 })),
-    /chunkBytes must be a whole positive/,
+// fromHttpRange isn't exercised by the memory/file specs. Mocking `globalThis.fetch`
+// covers the HTTP protocol surface without a real server.
+
+test('source_from_http_range_reads_with_head_then_get_range', async (t) => {
+  const data = enc(DOC)
+  const restore = mockFetch((_url, init) => {
+    if (init.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'content-length': String(data.byteLength),
+          'accept-ranges': 'bytes',
+        },
+      })
+    }
+    const range = new Headers(init.headers).get('range') ?? ''
+    const m = range.match(/^bytes=(\d+)-(\d+)$/)
+    assert.ok(m, `expected bytes=N-M range header, got ${JSON.stringify(range)}`)
+    const start = Number(m[1])
+    const endInclusive = Number(m[2])
+    // TS 6's BodyInit accepts ArrayBufferView<ArrayBuffer>, not the generic
+    // Uint8Array<ArrayBufferLike> returned by .subarray(). .slice() copies
+    // into a fresh ArrayBuffer; pass that directly.
+    const body = data.slice(start, endInclusive + 1).buffer as ArrayBuffer
+    return new Response(body, { status: 206 })
+  })
+  t.after(restore)
+
+  const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
+  t.after(() => cursor.close())
+  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
+  assert.equal(await cursor.get('meta', 'enabled'), true)
+})
+
+test('source_from_http_range_rejects_when_accept_ranges_missing', async (t) => {
+  const restore = mockFetch(
+    () =>
+      new Response(null, {
+        status: 200,
+        headers: { 'content-length': '100' }, // no accept-ranges advertised
+      }),
   )
+  t.after(restore)
+  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /does not advertise Accept-Ranges/)
+})
+
+test('source_from_http_range_rejects_when_head_not_ok', async (t) => {
+  const restore = mockFetch(() => new Response(null, { status: 404, statusText: 'Not Found' }))
+  t.after(restore)
+  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /HEAD .* failed: 404/)
+})
+
+test('source_from_http_range_rejects_when_get_returns_200_ignoring_range', async (t) => {
+  const data = enc(DOC)
+  const restore = mockFetch((_url, init) => {
+    if (init.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'content-length': String(data.byteLength),
+          'accept-ranges': 'bytes',
+        },
+      })
+    }
+    // Same BodyInit-cast as above: pass the underlying ArrayBuffer.
+    return new Response(data.slice().buffer as ArrayBuffer, { status: 200 })
+  })
+  t.after(restore)
+  const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
+  t.after(() => cursor.close())
+  await assert.rejects(() => cursor.get('users', 0, 'name'), /ignored Range and returned 200/)
 })
 
 test('lifecycle_close_drives_reader_close_exactly_once', async () => {
@@ -142,84 +210,4 @@ test('lifecycle_open_failure_still_closes_reader', async () => {
   }
   await assert.rejects(() => open(source))
   assert.equal(closeCalls, 1, 'reader.close must run even when openNative rejects')
-})
-
-// fromHttpRange isn't exercised by any of the existing specs - they all use
-// memory or file sources. Mocking `globalThis.fetch` lets us cover the HTTP
-// protocol surface without a real server. The four cases below are: happy
-// path (HEAD then GET-with-Range), missing `Accept-Ranges: bytes` rejection,
-// non-OK HEAD rejection, and a misconfigured server that ignores Range and
-// returns 200 (which we must reject so we don't buffer the whole body).
-
-test('source_from_http_range_reads_with_head_then_get_range', async (t) => {
-  const data = enc(DOC)
-  const restore = mockFetch((_url, init) => {
-    if (init.method === 'HEAD') {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          'content-length': String(data.byteLength),
-          'accept-ranges': 'bytes',
-        },
-      })
-    }
-    // GET: parse the Range header and slice `data`.
-    const range = new Headers(init.headers).get('range') ?? ''
-    const m = range.match(/^bytes=(\d+)-(\d+)$/)
-    assert.ok(m, `expected bytes=N-M range header, got ${JSON.stringify(range)}`)
-    const start = Number(m[1])
-    const endInclusive = Number(m[2])
-    // TS 6's BodyInit accepts ArrayBufferView<ArrayBuffer>, not the generic
-    // Uint8Array<ArrayBufferLike> returned by .subarray(). .slice() copies
-    // into a fresh ArrayBuffer; pass that directly.
-    const body = data.slice(start, endInclusive + 1).buffer as ArrayBuffer
-    return new Response(body, { status: 206 })
-  })
-  t.after(restore)
-
-  const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
-  t.after(() => cursor.close())
-  assert.equal(await cursor.get('users', 0, 'name'), 'Alice')
-  assert.equal(await cursor.get('meta', 'enabled'), true)
-})
-
-test('source_from_http_range_rejects_when_accept_ranges_missing', async (t) => {
-  const restore = mockFetch(
-    () =>
-      new Response(null, {
-        status: 200,
-        headers: { 'content-length': '100' }, // no accept-ranges advertised
-      }),
-  )
-  t.after(restore)
-  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /does not advertise Accept-Ranges/)
-})
-
-test('source_from_http_range_rejects_when_head_not_ok', async (t) => {
-  const restore = mockFetch(() => new Response(null, { status: 404, statusText: 'Not Found' }))
-  t.after(restore)
-  await assert.rejects(() => open(fromHttpRange('https://example.test/doc.json')), /HEAD .* failed: 404/)
-})
-
-test('source_from_http_range_rejects_when_get_returns_200_ignoring_range', async (t) => {
-  // The server returns 200 with the full body for the Range GET. fromHttpRange
-  // rejects on read so we never buffer the whole body in memory.
-  const data = enc(DOC)
-  const restore = mockFetch((_url, init) => {
-    if (init.method === 'HEAD') {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          'content-length': String(data.byteLength),
-          'accept-ranges': 'bytes',
-        },
-      })
-    }
-    // Same BodyInit-cast as above: pass the underlying ArrayBuffer.
-    return new Response(data.slice().buffer as ArrayBuffer, { status: 200 })
-  })
-  t.after(restore)
-  const cursor = await open(fromHttpRange('https://example.test/doc.json', { chunkBytes: 64 }))
-  t.after(() => cursor.close())
-  await assert.rejects(() => cursor.get('users', 0, 'name'), /ignored Range and returned 200/)
 })

@@ -70,8 +70,18 @@ mod tests {
   }
 
   #[test]
-  fn masks_in_string_and_picks_byte() {
-    // Structural chars inside the string value must be masked.
+  fn structural_word_each_kind_picks_only_its_byte() {
+    let b = block(b"[1,2,3]");
+    let (in_string, _) = scan_block(&b, ScanCarry::default());
+    for kind in Structural::ALL {
+      let positions = bit_positions(structural_word(&b, in_string, kind));
+      let expected: Vec<usize> = (0..7).filter(|&i| b[i] == kind.byte()).collect();
+      assert_eq!(positions, expected, "kind {kind:?}");
+    }
+  }
+
+  #[test]
+  fn structural_word_masks_structurals_inside_strings() {
     let b = block(b"{\"k\":\"a,b{c}\"}");
     let (in_string, _) = scan_block(&b, ScanCarry::default());
     assert_eq!(
@@ -92,18 +102,7 @@ mod tests {
   }
 
   #[test]
-  fn each_kind_picks_only_its_byte() {
-    let b = block(b"[1,2,3]");
-    let (in_string, _) = scan_block(&b, ScanCarry::default());
-    for kind in Structural::ALL {
-      let positions = bit_positions(structural_word(&b, in_string, kind));
-      let expected: Vec<usize> = (0..7).filter(|&i| b[i] == kind.byte()).collect();
-      assert_eq!(positions, expected, "kind {kind:?}");
-    }
-  }
-
-  #[test]
-  fn carry_inside_string_masks_leading_structurals() {
+  fn structural_word_carry_inside_string_masks_leading_structurals() {
     // Block begins inside a carried-over string that closes at the `"`, then `,1`.
     let b = block(b"end\",1");
     let entry = ScanCarry {

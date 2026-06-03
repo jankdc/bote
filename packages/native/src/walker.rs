@@ -659,6 +659,19 @@ mod tests {
     w
   }
 
+  /// A flat `[7,7,...,7]` of `n` single-digit elements.
+  fn flat_digit_array(n: usize) -> Vec<u8> {
+    let mut s = String::from("[");
+    for i in 0..n {
+      if i > 0 {
+        s.push(',');
+      }
+      s.push('7');
+    }
+    s.push(']');
+    s.into_bytes()
+  }
+
   #[test]
   fn byte_at_returns_chunk_byte() {
     let source = b"hello, world";
@@ -674,6 +687,17 @@ mod tests {
     let win = ChunkWindow::new(64, 6);
     let mut w = Walker::new(&win);
     assert_eq!(w.byte_at(0).unwrap_err(), ChunkMiss(0));
+  }
+
+  #[test]
+  fn read_range_across_chunks() {
+    let source: Vec<u8> = (0..200).map(|i| (i % 251) as u8).collect();
+    let win = window(&source, 64);
+    let mut w = Walker::new(&win);
+    assert_eq!(
+      w.read_range(50, 150).unwrap(),
+      (50..150).map(|i| (i % 251) as u8).collect::<Vec<_>>()
+    );
   }
 
   #[test]
@@ -716,7 +740,7 @@ mod tests {
   }
 
   #[test]
-  fn string_value_skip_resumes_across_faults_without_rescan() {
+  fn skip_value_string_resumes_across_faults_without_rescan() {
     // String interior spanning 3 chunks: the resumable StringScan must thread
     // the carry and not rescan the prefix.
     let chunk_bytes = 64usize;
@@ -749,7 +773,6 @@ mod tests {
 
   #[test]
   fn skip_value_container_resumes_after_chunk_miss() {
-    // Flat `[...]` whose closer is in chunk 3; load chunks lazily.
     let chunk_bytes = 64usize;
     let mut source = Vec::new();
     source.push(b'[');
@@ -803,7 +826,6 @@ mod tests {
 
   #[test]
   fn advance_commas_skips_nested_and_strings() {
-    // Commas inside the nested object and the string must not count.
     let source = br#"[{"a":1,"b":2},"x,y",7]"#;
     let win = window(source, 64);
     let mut w = Walker::new(&win);
@@ -910,30 +932,6 @@ mod tests {
   }
 
   #[test]
-  fn read_range_across_chunks() {
-    let source: Vec<u8> = (0..200).map(|i| (i % 251) as u8).collect();
-    let win = window(&source, 64);
-    let mut w = Walker::new(&win);
-    assert_eq!(
-      w.read_range(50, 150).unwrap(),
-      (50..150).map(|i| (i % 251) as u8).collect::<Vec<_>>()
-    );
-  }
-
-  /// A flat `[7,7,...,7]` of `n` single-digit elements.
-  fn flat_digit_array(n: usize) -> Vec<u8> {
-    let mut s = String::from("[");
-    for i in 0..n {
-      if i > 0 {
-        s.push(',');
-      }
-      s.push('7');
-    }
-    s.push(']');
-    s.into_bytes()
-  }
-
-  #[test]
   fn advance_commas_samples_array_members_at_stride_multiples() {
     let stride = 16usize;
     let chunk_bytes = 64u64;
@@ -967,7 +965,10 @@ mod tests {
         .iter()
         .filter(|&&b| b == b',')
         .count();
-      assert_eq!(idx, commas_before, "array-member index must match its offset");
+      assert_eq!(
+        idx, commas_before,
+        "array-member index must match its offset"
+      );
       assert_eq!(
         idx % stride,
         0,

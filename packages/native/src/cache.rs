@@ -93,12 +93,14 @@ impl ContainerBody {
   /// How a hop along `segment` resolves.
   fn hop(&self, segment: &Segment) -> Hop {
     match (segment, self) {
-      (Segment::Member(name), ContainerBody::Object { resume, .. }) => match self.object_member(name) {
-        Some(vs) => Hop::Into(vs),
-        // The table covers the dense prefix `[open, resume]`, so an un-tabled
-        // member is at or after `resume` - resuming there is always correct.
-        None => Hop::Stop(Some(ResumePoint::Object { offset: *resume })),
-      },
+      (Segment::Member(name), ContainerBody::Object { resume, .. }) => {
+        match self.object_member(name) {
+          Some(vs) => Hop::Into(vs),
+          // The table covers the dense prefix `[open, resume]`, so an un-tabled
+          // member is at or after `resume` - resuming there is always correct.
+          None => Hop::Stop(Some(ResumePoint::Object { offset: *resume })),
+        }
+      }
       (Segment::Element(idx), ContainerBody::Array { .. }) => Hop::Stop(
         self
           .nearest_array_member(*idx)
@@ -353,9 +355,13 @@ impl StructuralIndex {
           &cs.members,
           cs.object_resume,
         ),
-        ContainerKind::Array => {
-          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, &cs.array_members)
-        }
+        ContainerKind::Array => self.merge_array_scan(
+          base_depth,
+          anchor,
+          prefix,
+          cs.value_start,
+          &cs.array_members,
+        ),
       }
     }
   }
@@ -424,7 +430,10 @@ impl StructuralIndex {
           let n = e.into_mut();
           (n.slot_cost(), n)
         }
-        Entry::Vacant(e) => (0, e.insert(ContainerNode::new(kind, value_start, depth, tick))),
+        Entry::Vacant(e) => (
+          0,
+          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
+        ),
       };
       merge(&mut node.body);
       node.last_used = tick;
@@ -509,7 +518,10 @@ impl StructuralIndex {
           let n = e.into_mut();
           (n.slot_cost(), n)
         }
-        Entry::Vacant(e) => (0, e.insert(ContainerNode::new(kind, value_start, depth, tick))),
+        Entry::Vacant(e) => (
+          0,
+          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
+        ),
       };
       set(node);
       node.last_used = tick;
@@ -552,21 +564,6 @@ mod tests {
   }
 
   #[test]
-  fn disabled_when_budget_zero_or_caps_zero() {
-    // Budget 0 disables regardless of the per-container caps.
-    let mut c = StructuralIndex::new(0, 64, 16);
-    assert!(!c.is_enabled());
-    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
-    c.store_close(0, 0, &[], ContainerKind::Object, 0, 10);
-    assert!(c.get(0, &[]).is_none());
-    // Both per-container caps 0 disables even with a budget (the off switch).
-    let mut c = StructuralIndex::new(NO_EVICT, 0, 0);
-    assert!(!c.is_enabled());
-    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
-    assert!(c.get(0, &[]).is_none());
-  }
-
-  #[test]
   fn object_table_covers_open_to_high_water() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     // {"a":1,"b":2,"c":3} - scan matched "c"; a,b skipped, c matched. Terminal is
@@ -588,7 +585,14 @@ mod tests {
   fn object_sibling_scans_extend_contiguously() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     // First scan tables a,b and matched b (resume = b's start = 7).
-    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 5), member("b", 7, 11)], Some(7));
+    c.merge_object_scan(
+      0,
+      0,
+      &[],
+      0,
+      &[member("a", 1, 5), member("b", 7, 11)],
+      Some(7),
+    );
     assert_eq!(c.get(0, &[]).unwrap().object_resume(), 7);
     // Second scan resumes at 7, re-reads b, then c,d; matched d (resume = d's start).
     c.merge_object_scan(
@@ -667,7 +671,11 @@ mod tests {
     let lms: Vec<(usize, u64)> = (0..1000).map(|i| (i, (i * 10) as u64)).collect();
     c.merge_array_scan(0, 0, &[], 0, &lms);
     let got = c.get(0, &[]).unwrap().array_members();
-    assert_eq!(got.len(), 1000, "no cap/coarsen: every array member is kept");
+    assert_eq!(
+      got.len(),
+      1000,
+      "no cap/coarsen: every array member is kept"
+    );
     assert!(
       got.windows(2).all(|w| w[0].0 < w[1].0),
       "indices stay sorted/unique"
@@ -718,6 +726,21 @@ mod tests {
   }
 
   #[test]
+  fn disabled_when_budget_zero_or_caps_zero() {
+    // Budget 0 disables regardless of the per-container caps.
+    let mut c = StructuralIndex::new(0, 64, 16);
+    assert!(!c.is_enabled());
+    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
+    c.store_close(0, 0, &[], ContainerKind::Object, 0, 10);
+    assert!(c.get(0, &[]).is_none());
+    // Both per-container caps 0 disables even with a budget (the off switch).
+    let mut c = StructuralIndex::new(NO_EVICT, 0, 0);
+    assert!(!c.is_enabled());
+    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
+    assert!(c.get(0, &[]).is_none());
+  }
+
+  #[test]
   fn budget_bounds_slots_used() {
     let budget = 64;
     let mut c = StructuralIndex::new(budget, usize::MAX, 16);
@@ -725,7 +748,14 @@ mod tests {
     // by recency.
     for i in 0..200u64 {
       let p = obj_path(&format!("path{i}"));
-      c.merge_object_scan(0, i, &p, i * 100, &[member("x", i * 100, i * 100 + 4)], Some(i * 100));
+      c.merge_object_scan(
+        0,
+        i,
+        &p,
+        i * 100,
+        &[member("x", i * 100, i * 100 + 4)],
+        Some(i * 100),
+      );
       assert!(
         c.slots_used() <= budget,
         "slots_used {} exceeded budget {budget} at i={i}",
@@ -734,8 +764,10 @@ mod tests {
     }
     assert_eq!(c.slots_used(), c.recomputed_slots_used());
     assert!(c.node_count() <= budget);
-    // The most recent node survives; an early one was evicted.
-    assert!(c.get(199, &obj_path("path199")).is_some(), "recent node kept");
+    assert!(
+      c.get(199, &obj_path("path199")).is_some(),
+      "recent node kept"
+    );
     assert!(c.get(0, &obj_path("path0")).is_none(), "stale node evicted");
   }
 
@@ -748,7 +780,14 @@ mod tests {
     // Flood deep nodes (depth 2): re-anchored element objects, tagged base_depth 2
     // the way iter/walk would.
     for i in 0..100u64 {
-      c.merge_object_scan(2, i + 1, &[], i * 100, &[member("name", i * 100, i * 100 + 7)], Some(i * 100));
+      c.merge_object_scan(
+        2,
+        i + 1,
+        &[],
+        i * 100,
+        &[member("name", i * 100, i * 100 + 7)],
+        Some(i * 100),
+      );
       assert!(c.slots_used() <= budget);
     }
     // Never the victim while deeper nodes exist, so it survives the flood.

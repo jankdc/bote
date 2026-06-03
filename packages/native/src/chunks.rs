@@ -180,7 +180,7 @@ mod tests {
   }
 
   #[test]
-  fn chunk_for_returns_bytes_or_miss() {
+  fn window_chunk_for_returns_bytes_or_miss() {
     let source: Vec<u8> = (0..128).map(|i| (i % 251) as u8).collect();
     let w = window(64, &source);
     assert_eq!(w.chunk_for(0).unwrap()[0], 0);
@@ -189,7 +189,7 @@ mod tests {
   }
 
   #[test]
-  fn drop_below_evicts_lower_chunks() {
+  fn window_drop_below_evicts_lower_chunks() {
     let source: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
     let mut w = window(64, &source);
     assert_eq!(w.len(), 4);
@@ -228,21 +228,8 @@ mod tests {
     (ChunkReader::new(source, chunk).unwrap(), reads)
   }
 
-  #[test]
-  fn rejects_invalid_chunk_size() {
-    let src: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(vec![]));
-    assert!(matches!(
-      ChunkReader::new(src.clone(), 63).err().expect("rejects 63"),
-      ReaderError::InvalidChunkSize(63)
-    ));
-    assert!(matches!(
-      ChunkReader::new(src, 0).err().expect("rejects 0"),
-      ReaderError::InvalidChunkSize(0)
-    ));
-  }
-
   #[tokio::test]
-  async fn coalesces_contiguous_run_into_one_read() {
+  async fn reader_coalesces_contiguous_run_into_one_read() {
     // 4 MiB cap dwarfs the 512 B span, so 8 chunks fold into one read
     let (reader, reads) = reader(512, 64);
     let chunks = reader.read_chunks(0, 8).await.unwrap();
@@ -263,7 +250,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn clamps_span_to_source_end() {
+  async fn reader_clamps_span_to_source_end() {
     // 4 full chunks + a 20-byte partial tail; ask for 8.
     let (reader, _reads) = reader(64 * 4 + 20, 64);
     let chunks = reader.read_chunks(0, 8).await.unwrap();
@@ -273,7 +260,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn per_chunk_bytes_are_independent_allocations() {
+  async fn reader_per_chunk_bytes_are_independent_allocations() {
     // can't observe the allocator; copy_from_slice gives each chunk its own
     // Bytes, so dropping one can't keep the others alive.
     let (reader, _reads) = reader(512, 64);
@@ -281,5 +268,18 @@ mod tests {
     for (_, data) in &chunks {
       assert_eq!(data.len(), 64);
     }
+  }
+
+  #[test]
+  fn reader_rejects_invalid_chunk_size() {
+    let src: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(vec![]));
+    assert!(matches!(
+      ChunkReader::new(src.clone(), 63).err().expect("rejects 63"),
+      ReaderError::InvalidChunkSize(63)
+    ));
+    assert!(matches!(
+      ChunkReader::new(src, 0).err().expect("rejects 0"),
+      ReaderError::InvalidChunkSize(0)
+    ));
   }
 }

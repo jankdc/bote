@@ -131,7 +131,9 @@ impl Session {
     base_depth: u32,
   ) -> Result<Option<u64>, SessionError> {
     let mut window = self.new_window();
-    self.run_locate(path, anchor_start, base_depth, &mut window).await
+    self
+      .run_locate(path, anchor_start, base_depth, &mut window)
+      .await
   }
 
   pub async fn has_at(
@@ -156,7 +158,10 @@ impl Session {
     base_depth: u32,
   ) -> Result<Option<serde_json::Value>, SessionError> {
     let mut window = self.new_window();
-    let Some(loc) = self.run_resolve(path, anchor_start, base_depth, &mut window).await? else {
+    let Some(loc) = self
+      .run_resolve(path, anchor_start, base_depth, &mut window)
+      .await?
+    else {
       return Ok(None);
     };
     let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
@@ -276,7 +281,10 @@ impl Session {
     base_depth: u32,
     window: &mut ChunkWindow,
   ) -> Result<Option<ValueLocation>, SessionError> {
-    let Some(start) = self.run_locate(path, anchor_start, base_depth, window).await? else {
+    let Some(start) = self
+      .run_locate(path, anchor_start, base_depth, window)
+      .await?
+    else {
       return Ok(None);
     };
     if !self.cache_enabled {
@@ -423,7 +431,9 @@ impl Session {
     index: usize,
     offset: u64,
   ) {
-    self.with_cache(|c| c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)]));
+    self.with_cache(|c| {
+      c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)])
+    });
   }
 }
 
@@ -520,7 +530,14 @@ mod tests {
       reads: reads.clone(),
     });
     (
-      Session::new(source, chunk, index_cache_budget, object_member_cap, array_interval).unwrap(),
+      Session::new(
+        source,
+        chunk,
+        index_cache_budget,
+        object_member_cap,
+        array_interval,
+      )
+      .unwrap(),
       reads,
     )
   }
@@ -599,7 +616,11 @@ mod tests {
       DEFAULT_ARRAY_INDEX_INTERVAL,
     );
     let mut w = warm.new_window();
-    warm.run_locate(&path_c, 0, 0, &mut w).await.unwrap().unwrap();
+    warm
+      .run_locate(&path_c, 0, 0, &mut w)
+      .await
+      .unwrap()
+      .unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
     assert!(warm
@@ -618,7 +639,11 @@ mod tests {
       DEFAULT_ARRAY_INDEX_INTERVAL,
     );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&path_d, 0, 0, &mut c).await.unwrap().is_some());
+    assert!(cold
+      .run_locate(&path_d, 0, 0, &mut c)
+      .await
+      .unwrap()
+      .is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -639,7 +664,11 @@ mod tests {
       DEFAULT_ARRAY_INDEX_INTERVAL,
     );
     let mut w = warm.new_window();
-    warm.run_locate(&at(40), 0, 0, &mut w).await.unwrap().unwrap();
+    warm
+      .run_locate(&at(40), 0, 0, &mut w)
+      .await
+      .unwrap()
+      .unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
     assert!(warm
@@ -657,7 +686,11 @@ mod tests {
       DEFAULT_ARRAY_INDEX_INTERVAL,
     );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&at(50), 0, 0, &mut c).await.unwrap().is_some());
+    assert!(cold
+      .run_locate(&at(50), 0, 0, &mut c)
+      .await
+      .unwrap()
+      .is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -686,7 +719,11 @@ mod tests {
     warm.run_locate(&deep, 0, 0, &mut w).await.unwrap().unwrap();
     warm_reads.store(0, Ordering::Relaxed);
     let mut w2 = warm.new_window();
-    assert!(warm.run_locate(&back, 0, 0, &mut w2).await.unwrap().is_some());
+    assert!(warm
+      .run_locate(&back, 0, 0, &mut w2)
+      .await
+      .unwrap()
+      .is_some());
     let warm_n = warm_reads.load(Ordering::Relaxed);
 
     let (cold, cold_reads) = counting_session(
@@ -697,7 +734,11 @@ mod tests {
       DEFAULT_ARRAY_INDEX_INTERVAL,
     );
     let mut c = cold.new_window();
-    assert!(cold.run_locate(&back, 0, 0, &mut c).await.unwrap().is_some());
+    assert!(cold
+      .run_locate(&back, 0, 0, &mut c)
+      .await
+      .unwrap()
+      .is_some());
     let cold_n = cold_reads.load(Ordering::Relaxed);
 
     assert!(
@@ -729,24 +770,6 @@ mod tests {
     );
   }
 
-  #[tokio::test]
-  async fn cache_disabled_still_resolves() {
-    // budget 0 => no caching; results must still resolve.
-    let (s, _reads) =
-      counting_session(deep_object_doc(), 256, 0, DEFAULT_OBJECT_MEMBER_CAP, DEFAULT_ARRAY_INDEX_INTERVAL);
-    assert!(!s.cache_enabled);
-    let path = [member("a"), member("b"), member("d")];
-    let mut w = s.new_window();
-    assert!(s.run_locate(&path, 0, 0, &mut w).await.unwrap().is_some());
-    // Repeat count is not short-circuited when disabled.
-    let n = crate::count::at(&s, &[member("a"), member("b")], 0, 0)
-      .await
-      .unwrap();
-    assert_eq!(n, 202);
-    // Nothing was cached.
-    assert!(s.cache.lock().unwrap().get(0, &path).is_none());
-  }
-
   /// Pins the mechanism - which nodes and members a scan tables - complementing
   /// the read-count tests that prove the resulting benefit.
   #[tokio::test]
@@ -775,7 +798,11 @@ mod tests {
       let cache = s.cache.lock().unwrap();
       // The whole ancestor chain is tabled: root -> a, [a] -> b, [a,b] -> c.
       assert!(cache.get(0, &[]).unwrap().object_member("a").is_some());
-      assert!(cache.get(0, &[member("a")]).unwrap().object_member("b").is_some());
+      assert!(cache
+        .get(0, &[member("a")])
+        .unwrap()
+        .object_member("b")
+        .is_some());
       let n = cache.get(0, &ab).expect("the [a,b] container is cached");
       assert!(n.object_member("c").is_some(), "c was just resolved");
       assert!(n.object_member("d").is_none(), "d not yet seen");
@@ -791,8 +818,14 @@ mod tests {
       let cache = s.cache.lock().unwrap();
       let n = cache.get(0, &ab).unwrap();
       assert!(n.object_member("c").is_some(), "c still tabled");
-      assert!(n.object_member("d").is_some(), "d now tabled (resumed past c)");
-      assert!(n.object_member("e").is_none(), "e never queried, never tabled");
+      assert!(
+        n.object_member("d").is_some(),
+        "d now tabled (resumed past c)"
+      );
+      assert!(
+        n.object_member("e").is_none(),
+        "e never queried, never tabled"
+      );
     }
   }
 
@@ -843,6 +876,28 @@ mod tests {
       Some(100),
       "count must record the child count on the node"
     );
+  }
+
+  #[tokio::test]
+  async fn cache_disabled_still_resolves() {
+    // budget 0 => no caching; results must still resolve.
+    let (s, _reads) = counting_session(
+      deep_object_doc(),
+      256,
+      0,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    );
+    assert!(!s.cache_enabled);
+    let path = [member("a"), member("b"), member("d")];
+    let mut w = s.new_window();
+    assert!(s.run_locate(&path, 0, 0, &mut w).await.unwrap().is_some());
+    // Repeat count is not short-circuited when disabled.
+    let n = crate::count::at(&s, &[member("a"), member("b")], 0, 0)
+      .await
+      .unwrap();
+    assert_eq!(n, 202);
+    assert!(s.cache.lock().unwrap().get(0, &path).is_none());
   }
 
   /// The bounded-memory contract: a full scan of a many-chunk document keeps the
