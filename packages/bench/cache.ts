@@ -41,7 +41,10 @@ const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
 // kebab and camel spellings; validated here so a typo fails fast rather than
 // deep inside `open`.
 const indexCacheEntriesArg = arg('--index-cache-entries') ?? arg('--indexCacheEntries')
-if (indexCacheEntriesArg != null && (!Number.isInteger(Number(indexCacheEntriesArg)) || Number(indexCacheEntriesArg) < 0)) {
+if (
+  indexCacheEntriesArg != null &&
+  (!Number.isInteger(Number(indexCacheEntriesArg)) || Number(indexCacheEntriesArg) < 0)
+) {
   throw new Error(`--index-cache-entries must be a non-negative integer (0 disables), got ${indexCacheEntriesArg}`)
 }
 const indexCacheEntries = indexCacheEntriesArg == null ? undefined : Number(indexCacheEntriesArg)
@@ -49,7 +52,9 @@ const indexCacheEntries = indexCacheEntriesArg == null ? undefined : Number(inde
 const baseOpts: { indexCacheEntries?: number } = indexCacheEntries === undefined ? {} : { indexCacheEntries }
 /** Header suffix naming the active budget, so a run's output is self-describing. */
 const budgetNote = (): string =>
-  indexCacheEntries === undefined ? '  (indexCacheEntries=native default)' : `  (indexCacheEntries=${indexCacheEntries})`
+  indexCacheEntries === undefined
+    ? '  (indexCacheEntries=native default)'
+    : `  (indexCacheEntries=${indexCacheEntries})`
 
 /** A `Source` that counts `read` calls so cache-driven fault reduction is
  *  observable from the facade (there is no `cacheStats()`). */
@@ -148,7 +153,9 @@ async function scatterGets(c: Cur): Promise<number> {
 function siblingArrayDoc(pads: number, padBytes: number, items: number): Uint8Array {
   const big = 'x'.repeat(padBytes)
   const padMembers = Array.from({ length: pads }, (_, i) => `"p${i}":"${big}"`).join(',')
-  const arr = Array.from({ length: items }, (_, i) => `{"id":${i},"name":"item-${String(i).padStart(6, '0')}"}`).join(',')
+  const arr = Array.from({ length: items }, (_, i) => `{"id":${i},"name":"item-${String(i).padStart(6, '0')}"}`).join(
+    ',',
+  )
   return enc(`{${padMembers},"items":[${arr}],"tail":{"version":3}}`)
 }
 const siblingDoc = siblingArrayDoc(50, 4000, 200)

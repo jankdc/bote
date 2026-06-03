@@ -84,14 +84,14 @@ given a **seekable** source (e.g. a file, an HTTP range) and a path, it can retr
 
 here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default settings):
 
-| operation      | approach   |      time  | js heap peak Δ | rust heap peak |
-| -------------- | ---------- | --------:  | -------------: | -------------: |
-| items[0]       | JSON.parse |  616.02 ms |        1.03 GB |            n/a |
-| items[535399]  | JSON.parse |  604.63 ms |        1.03 GB |            n/a |
-| items[1070797] | JSON.parse |  600.68 ms |        1.03 GB |            n/a |
-| items[0]       | bote       |  527.80 µs |       291.6 KB |       130.4 KB |
-| items[535399]  | bote       |  187.24 ms |       742.3 KB |        36.7 MB |
-| items[1070797] | bote       |  371.61 ms |       828.7 KB |        37.1 MB |
+| operation      | approach   |      time | js heap peak Δ | rust heap peak |
+| -------------- | ---------- | --------: | -------------: | -------------: |
+| items[0]       | JSON.parse | 616.02 ms |        1.03 GB |            n/a |
+| items[535399]  | JSON.parse | 604.63 ms |        1.03 GB |            n/a |
+| items[1070797] | JSON.parse | 600.68 ms |        1.03 GB |            n/a |
+| items[0]       | bote       | 527.80 µs |       291.6 KB |       130.4 KB |
+| items[535399]  | bote       | 187.24 ms |       742.3 KB |        36.7 MB |
+| items[1070797] | bote       | 371.61 ms |       828.7 KB |        37.1 MB |
 
 ## sources
 

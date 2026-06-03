@@ -22,7 +22,9 @@ pub async fn project(
 ) -> Result<serde_json::Value, SessionError> {
   match select {
     CompiledSelect::One(path) => project_one(session, path, child_start, base_depth, window).await,
-    CompiledSelect::Map(fields) => project_map(session, fields, child_start, base_depth, window).await,
+    CompiledSelect::Map(fields) => {
+      project_map(session, fields, child_start, base_depth, window).await
+    }
   }
 }
 
@@ -76,7 +78,10 @@ async fn project_one(
   base_depth: u32,
   window: &mut ChunkWindow,
 ) -> Result<serde_json::Value, SessionError> {
-  match session.run_resolve(path, child_start, base_depth, window).await? {
+  match session
+    .run_resolve(path, child_start, base_depth, window)
+    .await?
+  {
     None => Ok(serde_json::Value::Null),
     Some(loc) => session.materialize(loc, window).await,
   }
