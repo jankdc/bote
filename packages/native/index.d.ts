@@ -42,21 +42,21 @@ export declare function heapProfileStop(): void
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /** How many items do we yield per iteration? */
+  /** Items yielded per iteration. */
   batch: number
   /** Yield `[key, value]` tuples instead of bare values. */
   withKey?: boolean
 }
 
 /**
- * Build a [`Cursor`] from a JS source object with:
+ * Build a [`Cursor`] from a JS source object:
  *   - `size: number` total source size in bytes
  *   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
  *     `.byteLength` is the actual count read, `<= length`
  *   - `chunkBytes: number` read granularity (whole, multiple of 64)
  *   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
  *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
- *   - `arrayIndexInterval?: number` element stride between array landmarks (0 disables; default 16)
+ *   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
  */
 export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 

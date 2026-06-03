@@ -35,10 +35,10 @@ export interface OpenOptions {
    */
   objectMemberCap?: number
   /**
-   * Element-index stride between sampled array landmarks in the structural-index
-   * cache. A later index resumes from the nearest landmark at or before it, so a
-   * smaller stride means denser landmarks (more memory, shorter resume scans).
-   * `0` disables array landmark indexing. Omit for the native default (16).
+   * Element-index stride between sampled array members in the structural-index
+   * cache. A later index resumes from the nearest array member at or before it, so
+   * a smaller stride means denser array members (more memory, shorter resume
+   * scans). `0` disables array-member indexing. Omit for the native default (16).
    *
    * Setting both `objectMemberCap` and `arrayIndexInterval` to `0` disables the
    * cache entirely (no source bytes are ever cached either way), as does

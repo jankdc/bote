@@ -33,7 +33,7 @@ use crate::walker::{self, SkipState, TraverseError, Walker};
 pub(crate) const DEFAULT_INDEX_CACHE_ENTRIES: usize = 1024;
 /// Default `objectMemberCap`: unbounded.
 pub(crate) const DEFAULT_OBJECT_MEMBER_CAP: usize = usize::MAX;
-/// Default `arrayIndexInterval`: landmark element stride.
+/// Default `arrayIndexInterval`: array-member element stride.
 pub(crate) const DEFAULT_ARRAY_INDEX_INTERVAL: usize = 16;
 
 #[derive(Debug, Error)]
@@ -224,7 +224,7 @@ impl Session {
   /// `run_resolve`/`locate_at`) - `get`/`has`/`count`/`iter`/`walk`/`select` all
   /// route in. So the structural-index cache lives here: cached container hops
   /// start the scan as deep as possible (an all-hit returns the offset faulting
-  /// no chunks), the first uncached level resumes from the deepest landmark, and
+  /// no chunks), the first uncached level resumes from the deepest array member, and
   /// the scan's child offsets are written back. Keep these three the only
   /// resolution entry points so the cache has one place to live.
   pub(crate) async fn run_locate(
@@ -368,7 +368,7 @@ impl Session {
 
 /// Structural-index cache accessors (table logic itself lives in `cache.rs`).
 /// Each is a no-op when caching is disabled. Called from `count.rs` /
-/// `cursor.rs` as scans learn child counts, closes, and array landmarks.
+/// `cursor.rs` as scans learn child counts, closes, and array members.
 impl Session {
   /// Run `f` against the cache under the lock, skipping when caching is off. The
   /// lock is never held across an `.await`.
@@ -412,7 +412,7 @@ impl Session {
     self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
   }
 
-  /// Record an array resume-point landmark `(index, offset)` so a later random
+  /// Record an array resume-point member `(index, offset)` so a later random
   /// index resumes near where `iter`/`walk` stopped.
   pub(crate) fn store_array_resume_point(
     &self,
@@ -668,8 +668,8 @@ mod tests {
 
   #[tokio::test]
   async fn cache_backward_array_get_faults_fewer_chunks() {
-    // The multi-landmark payoff: one deep get plants chunk-cadence landmarks
-    // across the array, so a backward re-get resumes from the nearest landmark
+    // The multi-member payoff: one deep get plants chunk-cadence array members
+    // across the array, so a backward re-get resumes from the nearest array member
     // below its index instead of rescanning from the open.
     let doc = flat_array_doc(200, 120);
     let deep = [member("arr"), Segment::Element(180)];
@@ -774,12 +774,12 @@ mod tests {
     {
       let cache = s.cache.lock().unwrap();
       // The whole ancestor chain is tabled: root -> a, [a] -> b, [a,b] -> c.
-      assert!(cache.get(0, &[]).unwrap().member("a").is_some());
-      assert!(cache.get(0, &[member("a")]).unwrap().member("b").is_some());
+      assert!(cache.get(0, &[]).unwrap().object_member("a").is_some());
+      assert!(cache.get(0, &[member("a")]).unwrap().object_member("b").is_some());
       let n = cache.get(0, &ab).expect("the [a,b] container is cached");
-      assert!(n.member("c").is_some(), "c was just resolved");
-      assert!(n.member("d").is_none(), "d not yet seen");
-      assert!(n.member("e").is_none());
+      assert!(n.object_member("c").is_some(), "c was just resolved");
+      assert!(n.object_member("d").is_none(), "d not yet seen");
+      assert!(n.object_member("e").is_none());
     }
 
     let mut w2 = s.new_window();
@@ -790,14 +790,14 @@ mod tests {
     {
       let cache = s.cache.lock().unwrap();
       let n = cache.get(0, &ab).unwrap();
-      assert!(n.member("c").is_some(), "c still tabled");
-      assert!(n.member("d").is_some(), "d now tabled (resumed past c)");
-      assert!(n.member("e").is_none(), "e never queried, never tabled");
+      assert!(n.object_member("c").is_some(), "c still tabled");
+      assert!(n.object_member("d").is_some(), "d now tabled (resumed past c)");
+      assert!(n.object_member("e").is_none(), "e never queried, never tabled");
     }
   }
 
   #[tokio::test]
-  async fn cache_state_array_records_landmark_at_target() {
+  async fn cache_state_array_records_array_member_at_target() {
     let (s, _reads) = counting_session(
       big_array_doc(),
       256,
@@ -812,7 +812,7 @@ mod tests {
       .await
       .unwrap()
       .expect("element 40 resolves");
-    // An exact landmark was planted at the target, so the nearest at or below 40
+    // An exact array member was planted at the target, so the nearest at or below 40
     // is 40 itself.
     let nearest = s
       .cache
@@ -820,10 +820,10 @@ mod tests {
       .unwrap()
       .get(0, &arr)
       .expect("arr node")
-      .nearest_landmark(40);
+      .nearest_array_member(40);
     match nearest {
-      Some((index, _)) => assert_eq!(index, 40, "exact landmark at the resolved index"),
-      None => panic!("expected an array landmark at or below 40"),
+      Some((index, _)) => assert_eq!(index, 40, "exact array member at the resolved index"),
+      None => panic!("expected an array member at or below 40"),
     }
   }
 

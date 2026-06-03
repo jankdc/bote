@@ -157,7 +157,7 @@ struct StreamCore {
   /// non-container (iteration yields nothing).
   child_cursor: Option<ContainerCursor>,
   /// `value_start` of the base container, once resolved. Where the stream records
-  /// `close`/`child_count`/resume-point landmarks.
+  /// `close`/`child_count`/resume-point array members.
   base_value_start: Option<u64>,
   /// Children yielded so far - the child count once iteration runs to the end.
   yielded: u64,

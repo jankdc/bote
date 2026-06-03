@@ -44,7 +44,7 @@ static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::ne
 ///   - `chunkBytes: number` read granularity (whole, multiple of 64)
 ///   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
 ///   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
-///   - `arrayIndexInterval?: number` element stride between array landmarks (0 disables; default 16)
+///   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
 #[napi]
 pub fn open(
   #[napi(

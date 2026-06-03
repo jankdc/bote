@@ -136,7 +136,7 @@ test('array_repeated_and_overlapping_index_access_is_consistent', async (t) => {
 })
 
 test('scattered_and_backward_index_access_is_consistent', async (t) => {
-  // Multi-landmark resume must stay transparent for backward and scattered
+  // Multi-member resume must stay transparent for backward and scattered
   // access: identical values with the cache on and off, in any index order.
   const n = 300
   const data = enc('{"arr":[' + Array.from({ length: n }, (_, i) => `${i * 3}`).join(',') + ']}')
@@ -213,7 +213,7 @@ test('warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
   t.after(() => wc.close())
   await wc.get('arr', 40)
   warm.reads.n = 0
-  await wc.get('arr', 60) // resumes from index 40's landmark
+  await wc.get('arr', 60) // resumes from index 40's array member
   const warmReads = warm.reads.n
 
   const cold = countingSource(data, 256)
@@ -226,15 +226,15 @@ test('warm_array_index_get_faults_fewer_reads_than_cold', async (t) => {
 })
 
 // A long flat array used by the backward / scattered effect tests below: one
-// deep get plants chunk-cadence landmarks across it, which earlier indices reuse.
+// deep get plants chunk-cadence array members across it, which earlier indices reuse.
 function flatArrayDoc(n: number): Uint8Array {
   return enc('{"arr":[' + Array.from({ length: n }, () => '"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"').join(',') + ']}')
 }
 
 test('warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
-  // One deep get plants landmarks along the way; a backward re-get then resumes
-  // from a nearby landmark instead of rescanning from the open. Impossible under
-  // the old single forward-only landmark, which parked at the deep index.
+  // One deep get plants array members along the way; a backward re-get then resumes
+  // from a nearby array member instead of rescanning from the open. Impossible under
+  // the old single forward-only array member, which parked at the deep index.
   const data = flatArrayDoc(400)
   const warm = countingSource(data, 256)
   const wc = await open(warm.source)
@@ -254,8 +254,8 @@ test('warm_backward_array_get_faults_fewer_reads_than_cold', async (t) => {
 })
 
 test('warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => {
-  // Visiting a scattered index set plants a landmark at each; revisiting then
-  // resumes from each landmark rather than rescanning from the open.
+  // Visiting a scattered index set plants an array member at each; revisiting then
+  // resumes from each array member rather than rescanning from the open.
   const data = flatArrayDoc(400)
   const idxs = [350, 50, 220, 120, 300, 80]
   const warm = countingSource(data, 256)

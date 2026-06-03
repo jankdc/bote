@@ -265,17 +265,17 @@ impl<'a> Walker<'a> {
   /// first byte). `entry_carry` is the string-scan carry at `from` (default at
   /// element boundaries, or the committed carry from a prior [`CommaStop::Partial`]).
   ///
-  /// When `sink` is `Some` (the structural-index cache is collecting), a landmark
-  /// is appended at each element-index stride multiple crossed, snapped to an
-  /// exact element boundary, so a later index can resume from the nearest landmark
-  /// instead of the array open. `None` leaves both scan paths byte-for-byte unchanged.
+  /// When `sink` is `Some` (the structural-index cache is collecting), an array
+  /// member is appended at each element-index stride multiple crossed, snapped to
+  /// an exact element boundary, so a later index can resume from the nearest array
+  /// member instead of the array open. `None` leaves both scan paths byte-for-byte unchanged.
   pub fn advance_top_level_commas(
     &mut self,
     from: u64,
     initial_depth: u32,
     needed: usize,
     entry_carry: ScanCarry,
-    mut sink: Option<LandmarkSink>,
+    mut sink: Option<ArrayMemberSink>,
   ) -> Result<CommaStop, TraverseError> {
     if needed == 0 {
       return Ok(CommaStop::Found {
@@ -391,7 +391,7 @@ impl CommaScan {
     &mut self,
     commas: u64,
     offset: u64,
-    sink: Option<&mut LandmarkSink>,
+    sink: Option<&mut ArrayMemberSink>,
   ) -> BlockOutcome {
     if let Some(s) = sink {
       s.sample_block(commas, offset, self.consumed);
@@ -420,7 +420,7 @@ impl CommaScan {
     &mut self,
     words: &StructuralWords,
     offset: u64,
-    mut sink: Option<&mut LandmarkSink>,
+    mut sink: Option<&mut ArrayMemberSink>,
   ) -> BlockOutcome {
     let mut bits = words.opens | words.closes | words.commas;
     while bits != 0 {
@@ -453,22 +453,22 @@ impl CommaScan {
   }
 }
 
-/// Sink for array landmarks sampled by [`Walker::advance_top_level_commas`].
+/// Sink for array members sampled by [`Walker::advance_top_level_commas`].
 /// Records `(index, offset)` for every element whose absolute index is a
 /// multiple of `stride`, each snapped to an exact element boundary. The grid is
 /// anchored at index 0, so sampling is stateless across `ChunkMiss` resumes -
 /// the absolute index is recomputed from `base_index` each call.
-pub struct LandmarkSink<'a> {
+pub struct ArrayMemberSink<'a> {
   /// Element index at the scan call's `from`. An element's absolute index is
   /// `base_index + (depth-0 commas consumed before it)`.
   pub base_index: usize,
-  /// Stride between landmarks (`> 0`).
+  /// Stride between array members (`> 0`).
   pub stride: usize,
-  /// Collected landmarks, appended in ascending index order.
+  /// Collected array members, appended in ascending index order.
   pub out: &'a mut Vec<(usize, u64)>,
 }
 
-impl LandmarkSink<'_> {
+impl ArrayMemberSink<'_> {
   /// Record element `index` starting at `after`, but only when it lands on the
   /// stride grid.
   fn sample(&mut self, index: usize, after: u64) {
@@ -477,11 +477,11 @@ impl LandmarkSink<'_> {
     }
   }
 
-  /// Fast-path sampling: emit a landmark for every stride multiple crossed by
+  /// Fast-path sampling: emit an array member for every stride multiple crossed by
   /// this block's `commas`. `start = base_index + base_consumed` is the index at
   /// the block's first comma; the j-th comma (1-based) ends element `start + j`.
   /// Visiting only the j with `(start + j) % stride == 0` makes the work scale
-  /// with landmarks-in-block, not commas.
+  /// with array-members-in-block, not commas.
   fn sample_block(&mut self, commas: u64, offset: u64, base_consumed: usize) {
     let c = commas.count_ones() as usize;
     if c == 0 {
@@ -934,7 +934,7 @@ mod tests {
   }
 
   #[test]
-  fn advance_commas_samples_landmarks_at_stride_multiples() {
+  fn advance_commas_samples_array_members_at_stride_multiples() {
     let stride = 16usize;
     let chunk_bytes = 64u64;
     let source = flat_digit_array(400);
@@ -942,7 +942,7 @@ mod tests {
     let mut w = Walker::new(&win);
 
     let mut out: Vec<(usize, u64)> = Vec::new();
-    let sink = LandmarkSink {
+    let sink = ArrayMemberSink {
       base_index: 0,
       stride,
       out: &mut out,
@@ -955,26 +955,26 @@ mod tests {
       other => panic!("expected Found, got {other:?}"),
     }
 
-    assert!(!out.is_empty(), "expected landmarks across the scan");
+    assert!(!out.is_empty(), "expected array members across the scan");
     let mut last_idx: Option<usize> = None;
     for &(idx, off) in &out {
-      // Each landmark offset is an exact element start (a digit, not a comma).
+      // Each array-member offset is an exact element start (a digit, not a comma).
       assert_eq!(
         source[off as usize], b'7',
-        "landmark not at an element start"
+        "array member not at an element start"
       );
       let commas_before = source[..off as usize]
         .iter()
         .filter(|&&b| b == b',')
         .count();
-      assert_eq!(idx, commas_before, "landmark index must match its offset");
+      assert_eq!(idx, commas_before, "array-member index must match its offset");
       assert_eq!(
         idx % stride,
         0,
-        "landmark index must land on the stride grid"
+        "array-member index must land on the stride grid"
       );
       if let Some(prev) = last_idx {
-        assert!(idx > prev, "landmark indices must strictly increase");
+        assert!(idx > prev, "array-member indices must strictly increase");
       }
       last_idx = Some(idx);
     }
@@ -982,8 +982,8 @@ mod tests {
 
   #[test]
   fn advance_commas_sampling_survives_chunk_faults() {
-    // The landmark set collected while faulting chunk-by-chunk must equal the
-    // set collected with the whole document resident (no dup/missing landmarks
+    // The array-member set collected while faulting chunk-by-chunk must equal the
+    // set collected with the whole document resident (no dup/missing array members
     // across a mid-scan `ChunkMiss`).
     let stride = 16usize;
     let chunk_bytes = 64u64;
@@ -995,7 +995,7 @@ mod tests {
     let mut full_out: Vec<(usize, u64)> = Vec::new();
     {
       let mut w = Walker::new(&full);
-      let sink = LandmarkSink {
+      let sink = ArrayMemberSink {
         base_index: 0,
         stride,
         out: &mut full_out,
@@ -1022,7 +1022,7 @@ mod tests {
     loop {
       let result = {
         let mut w = Walker::new(&win);
-        let sink = LandmarkSink {
+        let sink = ArrayMemberSink {
           base_index: consumed_total,
           stride,
           out: &mut faulted_out,
@@ -1049,7 +1049,7 @@ mod tests {
     }
     assert_eq!(
       faulted_out, full_out,
-      "faulted landmark set must equal the resident-window set"
+      "faulted array-member set must equal the resident-window set"
     );
   }
 }

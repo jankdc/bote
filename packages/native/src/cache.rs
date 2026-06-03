@@ -1,12 +1,12 @@
 //! Structural-index cache: a bounded, lazily-built partial skeleton of the
 //! document.
 //!
-//! Caches the *containers* a scan has walked - not whole resolved paths - so a
+//! Caches the *containers* a scan has walked, not whole resolved paths, so a
 //! later query landing in an already-entered container starts near the target
 //! instead of at the container's open. Each [`ContainerNode`] holds an object
 //! child-table (`name -> value_start`) plus a resume offset; arrays keep a sorted
-//! set of `(index, offset)` landmarks so any later index resumes from the nearest
-//! landmark at or before it (forward or backward). Nothing here stores source
+//! set of `(index, offset)` members so any later index resumes from the nearest
+//! member at or before it (forward or backward). Nothing here stores source
 //! bytes, so the burst-window resident bound is untouched.
 //!
 //! Memoization over an immutable source: entries are never invalidated, only
@@ -14,20 +14,17 @@
 //! `object_member_cap` caps an object's tabled members as a dense prefix (past
 //! the cap the resume offset freezes at the first un-tabled member, so a later
 //! lookup still resumes correctly), and `array_interval` is the element stride
-//! between sampled array landmarks (applied upstream in the walker). The third,
+//! between sampled array members (applied upstream in the walker). The third,
 //! `slot_budget`, caps the *number* of nodes - without it, a full scan of an
 //! array of N objects would mint N nodes and never free them.
 //!
 //! Eviction is **document-depth-first** (deepest container evicted first, LRU
-//! tiebreak): the shallow navigational backbone - a big array's landmark node, a
+//! tiebreak): the shallow navigational backbone - a big array's member node, a
 //! top-level object's table - is reachable from many future queries; deep nodes
 //! are narrowly reachable and shed first. Each node carries its document depth
 //! (`base_depth + path.len()`) because `iter`/`walk` re-anchor children at their
 //! own byte offset, so the relative `NodeKey.path` length does *not* reflect tree
 //! depth.
-//!
-//! Depends only on `path` (keys) and `resolve`
-//! (`ContainerKind`/`ResumePoint`/`ValueLocation`); never on `session`/`walker`.
 
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -43,20 +40,16 @@ enum Hop {
   Stop(Option<ResumePoint>),
 }
 
-/// Kind-specific contents of a walked container: one variant only, so object-
-/// and array-only state never sit side by side.
 #[derive(Debug)]
 enum ContainerBody {
   Object {
-    /// Members `name -> value_start` over the dense prefix `[open, resume]` up to
-    /// the object cap. A flat vec beats a hash map: containers are small or capped.
     members: Vec<(Box<str>, u64)>,
-    /// High-water member offset: a later member scan resumes here.
+    // High-water member offset: a later member scan resumes here.
     resume: u64,
   },
   Array {
-    /// Resume landmarks `(index, offset)`, sorted ascending by index, deduped.
-    landmarks: Vec<(usize, u64)>,
+    /// Resume members `(index, offset)`, sorted ascending by index, deduped.
+    members: Vec<(usize, u64)>,
   },
 }
 
@@ -69,13 +62,13 @@ impl ContainerBody {
         resume: value_start + 1,
       },
       ContainerKind::Array => ContainerBody::Array {
-        landmarks: Vec::new(),
+        members: Vec::new(),
       },
     }
   }
 
   /// `value_start` of a tabled object member, or `None` (untabled, or array body).
-  fn member(&self, name: &str) -> Option<u64> {
+  fn object_member(&self, name: &str) -> Option<u64> {
     match self {
       ContainerBody::Object { members, .. } => members
         .iter()
@@ -85,13 +78,13 @@ impl ContainerBody {
     }
   }
 
-  /// The greatest array landmark with `index <= target`, or `None` (object body).
-  /// Binary search: landmarks are kept sorted by index.
-  fn nearest_landmark(&self, target: usize) -> Option<(usize, u64)> {
+  /// The greatest array member with `index <= target`, or `None` (object body).
+  /// Binary search: array members are kept sorted by index.
+  fn nearest_array_member(&self, target: usize) -> Option<(usize, u64)> {
     match self {
-      ContainerBody::Array { landmarks } => {
-        let i = landmarks.partition_point(|&(idx, _)| idx <= target);
-        (i > 0).then(|| landmarks[i - 1])
+      ContainerBody::Array { members } => {
+        let i = members.partition_point(|&(idx, _)| idx <= target);
+        (i > 0).then(|| members[i - 1])
       }
       ContainerBody::Object { .. } => None,
     }
@@ -100,7 +93,7 @@ impl ContainerBody {
   /// How a hop along `segment` resolves.
   fn hop(&self, segment: &Segment) -> Hop {
     match (segment, self) {
-      (Segment::Member(name), ContainerBody::Object { resume, .. }) => match self.member(name) {
+      (Segment::Member(name), ContainerBody::Object { resume, .. }) => match self.object_member(name) {
         Some(vs) => Hop::Into(vs),
         // The table covers the dense prefix `[open, resume]`, so an un-tabled
         // member is at or after `resume` - resuming there is always correct.
@@ -108,7 +101,7 @@ impl ContainerBody {
       },
       (Segment::Element(idx), ContainerBody::Array { .. }) => Hop::Stop(
         self
-          .nearest_landmark(*idx)
+          .nearest_array_member(*idx)
           .map(|(index, offset)| ResumePoint::Array { index, offset }),
       ),
       // Kind/segment mismatch: resolve will return None; no seed.
@@ -147,19 +140,19 @@ impl ContainerBody {
     *resume = resume_off;
   }
 
-  /// Merge `new` landmarks into the sorted set (dedup by index). Unbounded here:
-  /// the bounding stride is applied upstream at sampling time. No-op on an object
-  /// body.
+  /// Merge `new` array members into the sorted set (dedup by index). Unbounded
+  /// here: the bounding stride is applied upstream at sampling time. No-op on an
+  /// object body.
   fn merge_array(&mut self, new: &[(usize, u64)]) {
-    let ContainerBody::Array { landmarks } = self else {
+    let ContainerBody::Array { members } = self else {
       return;
     };
     if new.is_empty() {
       return;
     }
-    landmarks.extend_from_slice(new);
-    landmarks.sort_unstable_by_key(|&(i, _)| i);
-    landmarks.dedup_by_key(|&mut (i, _)| i);
+    members.extend_from_slice(new);
+    members.sort_unstable_by_key(|&(i, _)| i);
+    members.dedup_by_key(|&mut (i, _)| i);
   }
 }
 
@@ -195,7 +188,7 @@ impl ContainerNode {
   }
 
   /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
-  /// member. Landmarks aren't counted - `array_interval` already bounds them.
+  /// member. Array members aren't counted - `array_interval` already bounds them.
   fn slot_cost(&self) -> usize {
     1 + match &self.body {
       ContainerBody::Object { members, .. } => members.len(),
@@ -209,14 +202,14 @@ impl ContainerNode {
 
   /// `value_start` of a tabled object member, or `None` if not in the table.
   #[cfg(test)]
-  pub fn member(&self, name: &str) -> Option<u64> {
-    self.body.member(name)
+  pub fn object_member(&self, name: &str) -> Option<u64> {
+    self.body.object_member(name)
   }
 
-  /// The greatest array landmark with `index <= target`, if any.
+  /// The greatest array member with `index <= target`, if any.
   #[cfg(test)]
-  pub fn nearest_landmark(&self, target: usize) -> Option<(usize, u64)> {
-    self.body.nearest_landmark(target)
+  pub fn nearest_array_member(&self, target: usize) -> Option<(usize, u64)> {
+    self.body.nearest_array_member(target)
   }
 
   /// The container's full `[start, end)` once its close is known.
@@ -237,15 +230,15 @@ impl ContainerNode {
   }
 
   #[cfg(test)]
-  pub fn array_landmarks(&self) -> &[(usize, u64)] {
+  pub fn array_members(&self) -> &[(usize, u64)] {
     match &self.body {
-      ContainerBody::Array { landmarks } => landmarks,
+      ContainerBody::Array { members } => members,
       ContainerBody::Object { .. } => &[],
     }
   }
 
   #[cfg(test)]
-  pub fn member_count(&self) -> usize {
+  pub fn object_member_count(&self) -> usize {
     match &self.body {
       ContainerBody::Object { members, .. } => members.len(),
       ContainerBody::Array { .. } => 0,
@@ -281,7 +274,7 @@ pub struct StructuralIndex {
   /// Max tabled members per object (`usize::MAX` = unbounded; `0` tables none,
   /// resume parks at the open).
   object_member_cap: usize,
-  /// Element stride between sampled array landmarks (`0` = none). Held for
+  /// Element stride between sampled array members (`0` = none). Held for
   /// `is_enabled`; the stride itself is applied at sampling time.
   array_interval: usize,
   nodes: HashMap<NodeKey, ContainerNode>,
@@ -361,7 +354,7 @@ impl StructuralIndex {
           cs.object_resume,
         ),
         ContainerKind::Array => {
-          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, &cs.array_landmarks)
+          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, &cs.array_members)
         }
       }
     }
@@ -389,7 +382,7 @@ impl StructuralIndex {
     );
   }
 
-  /// Write back an array scan: merge its `(index, offset)` landmarks into the
+  /// Write back an array scan: merge its `(index, offset)` array members into the
   /// node's sorted set.
   pub fn merge_array_scan(
     &mut self,
@@ -397,7 +390,7 @@ impl StructuralIndex {
     anchor: u64,
     path: &[Segment],
     value_start: u64,
-    new_landmarks: &[(usize, u64)],
+    new_members: &[(usize, u64)],
   ) {
     self.merge_into(
       base_depth,
@@ -405,7 +398,7 @@ impl StructuralIndex {
       path,
       ContainerKind::Array,
       value_start,
-      |body| body.merge_array(new_landmarks),
+      |body| body.merge_array(new_members),
     );
   }
 
@@ -547,7 +540,7 @@ impl StructuralIndex {
 mod tests {
   use super::*;
 
-  // Big enough that the table/landmark tests never trip eviction.
+  // Big enough that the table/array-member tests never trip eviction.
   const NO_EVICT: usize = 1 << 20;
 
   fn member(name: &str, start: u64, value_start: u64) -> (Box<str>, u64, u64) {
@@ -581,14 +574,14 @@ mod tests {
     let members = [member("a", 1, 5), member("b", 7, 11), member("c", 13, 17)];
     c.merge_object_scan(0, 0, &[], 0, &members, Some(13));
     let node = c.get(0, &[]).expect("node");
-    assert_eq!(node.member("a"), Some(5));
-    assert_eq!(node.member("b"), Some(11));
-    assert_eq!(node.member("c"), Some(17));
-    assert_eq!(node.member("d"), None);
+    assert_eq!(node.object_member("a"), Some(5));
+    assert_eq!(node.object_member("b"), Some(11));
+    assert_eq!(node.object_member("c"), Some(17));
+    assert_eq!(node.object_member("d"), None);
     // Resume sits at the matched member's start, so any un-tabled member is at or
     // after it - a resume from there finds it.
     assert_eq!(node.object_resume(), 13);
-    assert_eq!(node.member_count(), 3);
+    assert_eq!(node.object_member_count(), 3);
   }
 
   #[test]
@@ -607,11 +600,11 @@ mod tests {
       Some(19),
     );
     let node = c.get(0, &[]).unwrap();
-    assert_eq!(node.member("c"), Some(17));
-    assert_eq!(node.member("d"), Some(23));
+    assert_eq!(node.object_member("c"), Some(17));
+    assert_eq!(node.object_member("d"), Some(23));
     assert_eq!(node.object_resume(), 19);
     // b not double-counted.
-    assert_eq!(node.member_count(), 4);
+    assert_eq!(node.object_member_count(), 4);
     // Slot accounting tracks the growing table (node + 4 members).
     assert_eq!(c.slots_used(), 5);
     assert_eq!(c.slots_used(), c.recomputed_slots_used());
@@ -627,7 +620,7 @@ mod tests {
     c.merge_object_scan(0, 0, &[], 0, &members, Some(99_999));
     let node = c.get(0, &[]).unwrap();
     assert_eq!(
-      node.member_count(),
+      node.object_member_count(),
       cap,
       "table capped at object_member_cap"
     );
@@ -644,37 +637,37 @@ mod tests {
       .collect();
     c.merge_object_scan(0, 0, &[], 0, &members, Some(99_999));
     assert_eq!(
-      c.get(0, &[]).unwrap().member_count(),
+      c.get(0, &[]).unwrap().object_member_count(),
       500,
       "the unbounded default tables every member"
     );
   }
 
   #[test]
-  fn array_landmarks_merge_sorted_and_deduped() {
+  fn array_members_merge_sorted_and_deduped() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     c.merge_array_scan(0, 0, &[], 0, &[(5, 50), (2, 20), (9, 90)]);
     assert_eq!(
-      c.get(0, &[]).unwrap().array_landmarks(),
+      c.get(0, &[]).unwrap().array_members(),
       &[(2, 20), (5, 50), (9, 90)]
     );
     // A second scan merges new indices and dedups a repeat (same index).
     c.merge_array_scan(0, 0, &[], 0, &[(2, 20), (7, 70)]);
     assert_eq!(
-      c.get(0, &[]).unwrap().array_landmarks(),
+      c.get(0, &[]).unwrap().array_members(),
       &[(2, 20), (5, 50), (7, 70), (9, 90)]
     );
-    // Landmarks don't count toward slots: one array node is one slot.
+    // Array members don't count toward slots: one array node is one slot.
     assert_eq!(c.slots_used(), 1);
   }
 
   #[test]
-  fn array_landmarks_unbounded() {
+  fn array_members_unbounded() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     let lms: Vec<(usize, u64)> = (0..1000).map(|i| (i, (i * 10) as u64)).collect();
     c.merge_array_scan(0, 0, &[], 0, &lms);
-    let got = c.get(0, &[]).unwrap().array_landmarks();
-    assert_eq!(got.len(), 1000, "no cap/coarsen: every landmark is kept");
+    let got = c.get(0, &[]).unwrap().array_members();
+    assert_eq!(got.len(), 1000, "no cap/coarsen: every array member is kept");
     assert!(
       got.windows(2).all(|w| w[0].0 < w[1].0),
       "indices stay sorted/unique"
@@ -684,7 +677,7 @@ mod tests {
   #[test]
   fn chain_hops_array_seeds_nearest_at_or_below_target() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
-    // Root container is the array (prefix `[]`); landmarks at 2, 5, 9.
+    // Root container is the array (prefix `[]`); array members at 2, 5, 9.
     c.merge_array_scan(0, 0, &[], 0, &[(2, 20), (5, 50), (9, 90)]);
 
     // Forward: target 7 resumes from the nearest at or below (index 5).
@@ -699,7 +692,7 @@ mod tests {
     );
 
     // Backward: target 3 resumes from index 2 - impossible under a single
-    // forward-only landmark, which would have parked at 9 and rescanned from open.
+    // forward-only member, which would have parked at 9 and rescanned from open.
     let (_, _, back) = c.chain_hops(0, &[Segment::Element(3)]);
     assert_eq!(
       back,
@@ -709,7 +702,7 @@ mod tests {
       })
     );
 
-    // No landmark at or below 1: scan from the open.
+    // No array member at or below 1: scan from the open.
     let (_, _, none) = c.chain_hops(0, &[Segment::Element(1)]);
     assert_eq!(none, None);
   }
@@ -750,7 +743,7 @@ mod tests {
   fn eviction_is_depth_first_keeping_the_shallow_backbone() {
     let budget = 8;
     let mut c = StructuralIndex::new(budget, usize::MAX, 16);
-    // One shallow backbone node (depth 0): a root array with landmarks.
+    // One shallow backbone node (depth 0): a root array with array members.
     c.merge_array_scan(0, 0, &[], 0, &[(0, 0), (16, 160)]);
     // Flood deep nodes (depth 2): re-anchored element objects, tagged base_depth 2
     // the way iter/walk would.
@@ -760,7 +753,7 @@ mod tests {
     }
     // Never the victim while deeper nodes exist, so it survives the flood.
     let backbone = c.get(0, &[]).expect("shallow backbone node must survive");
-    assert_eq!(backbone.array_landmarks(), &[(0, 0), (16, 160)]);
+    assert_eq!(backbone.array_members(), &[(0, 0), (16, 160)]);
     assert!(c.node_count() <= budget);
   }
 }

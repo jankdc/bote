@@ -117,7 +117,7 @@ const recDoc = recordsDoc(REC_COUNT)
 // A realistic combined access: render one record's detail view, mixing all three
 // ops the way an app would - a header `get`, a point `get`, a `walk` over the
 // record's fields, and an `iter` over its tags. Cold, the first get pays the
-// full scan to the record; warm, the array landmark and the record's container
+// full scan to the record; warm, the array member and the record's container
 // are already cached, so every step resumes near the target.
 function detailViewAt(idx: number): (c: Cur) => Promise<number> {
   return async (c) => {
@@ -131,7 +131,7 @@ function detailViewAt(idx: number): (c: Cur) => Promise<number> {
 }
 
 // A scattered, out-of-order index set over the big array. Each get plants a
-// landmark at its index; a revisit (or any later nearby index) resumes from the
+// array member at its index; a revisit (or any later nearby index) resumes from the
 // nearest one rather than rescanning from the array open.
 const SCATTER_IDXS = [90_000, 5_000, 60_000, 25_000, 80_000, 15_000, 45_000, 70_000]
 async function scatterGets(c: Cur): Promise<number> {
@@ -181,24 +181,24 @@ const scenarios: Scenario[] = [
     target: iterItems,
   },
   {
-    name: 'array index resumed from landmark',
+    name: 'array index resumed from array member',
     doc: arrayDoc,
     chunkBytes: CHUNK,
     warm: (c) => c.get('items', ARRAY_ITEMS / 2, 'name'),
     target: (c) => c.get('items', ARRAY_ITEMS / 2 + 50, 'name'),
   },
   {
-    // One deep get plants chunk-cadence landmarks across the array; a backward
-    // re-get resumes from the nearest one. Flat zero before multi-landmarks.
-    name: 'array backward index (prefix landmark)',
+    // One deep get plants chunk-cadence array members across the array; a backward
+    // re-get resumes from the nearest one. Flat zero before multi-members.
+    name: 'array backward index (prefix array member)',
     doc: arrayDoc,
     chunkBytes: CHUNK,
     warm: (c) => c.get('items', 90_000, 'name'),
     target: (c) => c.get('items', 10_000, 'name'),
   },
   {
-    // A scattered index set, revisited: each index resumes from its own landmark.
-    name: 'array scattered revisit (multi-landmark)',
+    // A scattered index set, revisited: each index resumes from its own array member.
+    name: 'array scattered revisit (multi-member)',
     doc: arrayDoc,
     chunkBytes: CHUNK,
     warm: scatterGets,
@@ -229,7 +229,7 @@ const scenarios: Scenario[] = [
 
 // `--mb <n>`: build a fresh records-shaped doc of about n megabytes and append a
 // combined detail view over its deepest record. Cold, the first get scans the
-// whole array to reach it; warm, the landmark grid and the record's container are
+// whole array to reach it; warm, the array-member grid and the record's container are
 // cached, so the same access resumes near the target — a gap that widens with size.
 const docMbArg = arg('--mb')
 if (docMbArg != null && (!Number.isFinite(Number(docMbArg)) || Number(docMbArg) <= 0)) {

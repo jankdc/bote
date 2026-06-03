@@ -7,7 +7,7 @@
 
 use crate::path::Segment;
 use crate::simd::ScanCarry;
-use crate::walker::{CommaStop, LandmarkSink, TraverseError, Walker};
+use crate::walker::{ArrayMemberSink, CommaStop, TraverseError, Walker};
 
 /// Byte range `[start, end)` covering a JSON value in the source document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +47,9 @@ pub struct ContainerRecord {
   /// Object only: high-water resume offset - the matched member's start, or the
   /// close `}`.
   pub object_resume: Option<u64>,
-  /// Array only: `(index, element_offset)` landmarks (one per stride multiple)
-  /// plus the resolved target, in ascending index order.
-  pub array_landmarks: Vec<(usize, u64)>,
+  /// Array only: `(index, element_offset)` array members (one per stride
+  /// multiple) plus the resolved target, in ascending index order.
+  pub array_members: Vec<(usize, u64)>,
 }
 
 /// Per-query resolver state, persisted across `ChunkMiss` retries so a long
@@ -71,7 +71,7 @@ pub struct ResolveState {
   /// Whether object members are tabled (object cap `> 0`). When `false`, object
   /// key decoding is skipped on the hot path even while arrays are collecting.
   record_objects: bool,
-  /// Element-index stride for array landmark sampling (`0` = no landmarks).
+  /// Element-index stride for array-member sampling (`0` = no array members).
   array_stride: usize,
 }
 
@@ -97,8 +97,8 @@ struct SegmentScan {
 
 impl ResolveState {
   /// Start resolving `path` from segment `segment_idx` at `start` (the value
-  /// start of container `path[..segment_idx]`), optionally seeded at a cache
-  /// landmark. Collects child offsets when `record_objects` or `array_stride > 0`.
+  /// start of container `path[..segment_idx]`), optionally seeded at a cached
+  /// array member. Collects child offsets when `record_objects` or `array_stride > 0`.
   pub fn resume(
     start: u64,
     segment_idx: usize,
@@ -154,7 +154,7 @@ pub fn resolve_step(
   while *segment_idx < path.len() {
     if segment_scan.is_none() {
       let (kind, value_start, ls) = if let Some(hint) = seed.take() {
-        // Seeded resume: kind and position come from the landmark, so the open
+        // Seeded resume: kind and position come from the array member, so the open
         // byte is never read. Only the first entered container is ever seeded.
         let ls = match hint {
           ResumePoint::Object { offset } => SegmentScan {
@@ -200,7 +200,7 @@ pub fn resolve_step(
           value_start,
           members: Vec::new(),
           object_resume: None,
-          array_landmarks: Vec::new(),
+          array_members: Vec::new(),
         });
       }
       *segment_scan = Some(ls);
@@ -210,7 +210,7 @@ pub fn resolve_step(
     let cs = scan_record.as_mut().and_then(|h| h.containers.last_mut());
     let descend = match (ls.kind, segment) {
       // Recording is gated per kind: objects skip it (and key decode) when the
-      // object cap is 0; arrays skip the landmark sink when the stride is 0.
+      // object cap is 0; arrays skip the array-member sink when the stride is 0.
       (ContainerKind::Object, Segment::Member(name)) => {
         step_object(walker, name, ls, if record_objects { cs } else { None })?
       }
@@ -364,9 +364,9 @@ fn step_array(
   mut cs: Option<&mut ContainerRecord>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
-  // per-element skip_value calls. When collecting, a `LandmarkSink` samples a
-  // landmark per stride multiple; the stride grid is absolute, so sampling is
-  // resume-safe.
+  // per-element skip_value calls. When collecting, an `ArrayMemberSink` samples
+  // an array member per stride multiple; the stride grid is absolute, so sampling
+  // is resume-safe.
   while state.index < target_index {
     let needed = target_index - state.index;
     let base_index = state.index;
@@ -374,10 +374,10 @@ fn step_array(
     let depth = state.depth;
     let carry = state.carry;
     let stop = {
-      let sink = cs.as_deref_mut().map(|cs| LandmarkSink {
+      let sink = cs.as_deref_mut().map(|cs| ArrayMemberSink {
         base_index,
         stride: array_stride,
-        out: &mut cs.array_landmarks,
+        out: &mut cs.array_members,
       });
       walker.advance_top_level_commas(from, depth, needed, carry, sink)?
     };
@@ -422,7 +422,7 @@ fn step_array(
     }
     if iter_index == target_index {
       if let Some(cs) = cs.as_deref_mut() {
-        cs.array_landmarks.push((target_index, offset));
+        cs.array_members.push((target_index, offset));
       }
       return Ok(Some(offset));
     }
@@ -690,7 +690,7 @@ mod tests {
   }
 
   #[test]
-  fn records_array_landmark() {
+  fn records_array_member() {
     let src = b"[10,20,30,40]";
     let win = full_window(src);
     let mut st = ResolveState::resume(0, 0, None, false, 16);
@@ -699,9 +699,9 @@ mod tests {
     let h = st.take_scan_record().expect("collecting");
     let cs = &h.containers[0];
     assert!(cs.members.is_empty());
-    // Stride 16 over 4 elements samples no grid landmark, just the resolved
+    // Stride 16 over 4 elements samples no grid array member, just the resolved
     // target. Element 2 ("30") starts at offset 7.
-    assert_eq!(cs.array_landmarks, vec![(2, 7)]);
+    assert_eq!(cs.array_members, vec![(2, 7)]);
   }
 
   #[test]
@@ -724,7 +724,7 @@ mod tests {
     assert_eq!(h.containers[1].seg, 1);
     assert_eq!(h.containers[2].seg, 2);
     assert_eq!(
-      h.containers[1].array_landmarks.last().map(|&(i, _)| i),
+      h.containers[1].array_members.last().map(|&(i, _)| i),
       Some(1)
     );
   }
