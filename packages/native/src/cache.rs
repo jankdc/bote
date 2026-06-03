@@ -67,6 +67,27 @@ impl ContainerBody {
     }
   }
 
+  /// How a hop along `segment` resolves.
+  fn hop(&self, segment: &Segment) -> Hop {
+    match (segment, self) {
+      (Segment::Member(name), ContainerBody::Object { resume, .. }) => {
+        match self.object_member(name) {
+          Some(vs) => Hop::Into(vs),
+          // The table covers the dense prefix `[open, resume]`, so an un-tabled
+          // member is at or after `resume` - resuming there is always correct.
+          None => Hop::Stop(Some(ResumePoint::Object { offset: *resume })),
+        }
+      }
+      (Segment::Element(idx), ContainerBody::Array { .. }) => Hop::Stop(
+        self
+          .nearest_array_member(*idx)
+          .map(|(index, offset)| ResumePoint::Array { index, offset }),
+      ),
+      // Kind/segment mismatch: resolve will return None; no seed.
+      _ => Hop::Stop(None),
+    }
+  }
+
   /// `value_start` of a tabled object member, or `None` (untabled, or array body).
   fn object_member(&self, name: &str) -> Option<u64> {
     match self {
@@ -90,26 +111,6 @@ impl ContainerBody {
     }
   }
 
-  /// How a hop along `segment` resolves.
-  fn hop(&self, segment: &Segment) -> Hop {
-    match (segment, self) {
-      (Segment::Member(name), ContainerBody::Object { resume, .. }) => {
-        match self.object_member(name) {
-          Some(vs) => Hop::Into(vs),
-          // The table covers the dense prefix `[open, resume]`, so an un-tabled
-          // member is at or after `resume` - resuming there is always correct.
-          None => Hop::Stop(Some(ResumePoint::Object { offset: *resume })),
-        }
-      }
-      (Segment::Element(idx), ContainerBody::Array { .. }) => Hop::Stop(
-        self
-          .nearest_array_member(*idx)
-          .map(|(index, offset)| ResumePoint::Array { index, offset }),
-      ),
-      // Kind/segment mismatch: resolve will return None; no seed.
-      _ => Hop::Stop(None),
-    }
-  }
 
   /// Merge object members (scan order) up to `cap`, advancing the resume offset to
   /// the high-water boundary (`resume_hint` = matched member's start, or the
