@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 
 import type { Result } from './cells.ts'
 import { arg } from './cli.ts'
-import { fmtNs } from './format.ts'
+import { fmtBytes, fmtNs } from './format.ts'
 
 const inPath = arg('--in')
 const outPath = arg('--out')
@@ -56,7 +56,7 @@ const rows = results.map((r) => {
 
 const sample = results.find((r) => !r.error)?.cell
 const caption = sample
-  ? `${sample.docShape}, ${sample.source} source, n=${sample.docSize.toLocaleString()}, cap=${sample.maxResidentChunks}`
+  ? `${sample.docShape}, ${sample.source} source, n=${sample.docSize.toLocaleString()}, chunk=${fmtBytes(sample.chunkBytes)}`
   : 'no cells'
 
 const md =

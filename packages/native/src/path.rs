@@ -1,10 +1,10 @@
 use napi::bindgen_prelude::Either;
 use serde::Deserialize;
 
-/// A single path step. `Deserialize` is `untagged` so a JSON `string` decodes
-/// to `Member` and a JSON `number` to `Element` - the wire form `select` IR
-/// uses (see [`crate::select`]).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// A single path step. Untagged `Deserialize` so a JSON `string` decodes to
+/// `Member` and a `number` to `Element` - the wire form `select` IR uses
+/// (see [`crate::select`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(untagged)]
 pub enum Segment {
   Member(String),

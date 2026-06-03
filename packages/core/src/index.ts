@@ -4,24 +4,17 @@ if (!(Symbol as { asyncDispose?: symbol }).asyncDispose) {
   ;(Symbol as { asyncDispose?: symbol }).asyncDispose = Symbol.for('Symbol.asyncDispose')
 }
 
-export type { CacheStats } from '@botejs/native'
+export { type IterOptions } from './args.ts'
 
-export {
-  ValidationError,
-  formatPath,
-  type Path,
-  type Segment,
-  type StandardSchemaV1
-} from './validate.ts'
+export { ValidationError, formatPath, type Path, type Segment, type StandardSchemaV1 } from './validate.ts'
 
 export {
   open,
   DEFAULT_ITER_BATCH,
   type Cursor,
   type RootCursor,
+  type OpenOptions,
   type IterIndex as IterKey,
-  type IterOptions,
-  type SessionOptions,
 } from './open.ts'
 
 export {

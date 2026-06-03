@@ -15,38 +15,9 @@ async function collect<T>(it: AsyncIterable<T[]>): Promise<T[]> {
   return out
 }
 
-test('iter_array_elements', async () => {
+test('iter_array_yields_elements', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
   assert.deepEqual(await collect(cursor.iter('xs')), [10, 20, 30, 40])
-})
-
-test('iter_on_object_target_throws', async () => {
-  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
-  await assert.rejects(
-    (async () => {
-      for await (const _ of cursor.iter('o')) void _
-    })(),
-    /walk\(\)/,
-  )
-})
-
-test('iter_non_container_yields_no_batches', async () => {
-  // Empty result means *zero* yields, not a single empty batch - keeps the
-  // happy-path consumer (`for await (const b of ...) for (const v of b)`)
-  // from observing a meaningless `[]`.
-  const cursor = await open(memorySource(enc('{"scalar":42}')))
-  const batches: unknown[][] = []
-  for await (const b of cursor.iter('scalar')) batches.push(b)
-  assert.deepEqual(batches, [])
-})
-
-test('iter_missing_path_yields_no_batches', async () => {
-  // Same total / non-throwing semantics as get/has/count: an unresolved path
-  // yields zero batches.
-  const cursor = await open(memorySource(enc('{"xs":[1,2]}')))
-  const batches: unknown[][] = []
-  for await (const b of cursor.iter('nope')) batches.push(b)
-  assert.deepEqual(batches, [])
 })
 
 test('iter_default_batch_size_is_DEFAULT_ITER_BATCH', async () => {
@@ -62,7 +33,6 @@ test('iter_default_batch_size_is_DEFAULT_ITER_BATCH', async () => {
 })
 
 test('iter_default_batch_flushes_partial_final_batch', async () => {
-  // Fewer items than the default batch: one yield, exactly that many items.
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
   const batches: number[][] = []
   for await (const batch of cursor.iter('xs')) batches.push(batch as number[])
@@ -116,14 +86,6 @@ test('iter_select_missing_sub_path_yields_null', async (t) => {
   assert.deepEqual(await collect(db.iter('orders', { select: ['nope'] })), [null, null, null, null, null])
 })
 
-test('iter_batch_override_yields_arrays', async (t) => {
-  const db = await open(memorySource(enc(ORDERS)))
-  t.after(() => db.close())
-  const sizes: number[] = []
-  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 })) sizes.push(batch.length)
-  assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
-})
-
 test('iter_select_batch_combined_byCountry_fold', async (t) => {
   // The doc's headline example: project, batch, fold in JS.
   const db = await open(memorySource(enc(ORDERS)))
@@ -144,12 +106,13 @@ test('iter_select_batch_combined_byCountry_fold', async (t) => {
   assert.equal(byCountry.size, 3)
 })
 
-test('iter_batch_rejects_non_positive', async (t) => {
-  const db = await open(memorySource(enc(ORDERS)))
+test('iter_select_batch_with_small_chunks_stays_correct', async (t) => {
+  const rows = Array.from({ length: 4000 }, (_, i) => `{"id":${i},"v":"value-${i}"}`)
+  const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256))
   t.after(() => db.close())
-  assert.throws(() => db.iter('orders', { batch: 0 }), RangeError)
-  assert.throws(() => db.iter('orders', { batch: -1 }), RangeError)
-  assert.throws(() => db.iter('orders', { batch: 1.5 }), RangeError)
+  let count = 0
+  for await (const batch of db.iter({ select: ['id'], batch: 256 })) count += batch.length
+  assert.equal(count, 4000)
 })
 
 test('iter_select_rejects_empty_map', async (t) => {
@@ -169,6 +132,22 @@ test('iter_select_rejects_empty_sub_path', async (t) => {
   t.after(() => db.close())
   assert.throws(() => db.iter('orders', { select: [] }), RangeError)
   assert.throws(() => db.iter('orders', { select: { whole: [] } }), RangeError)
+})
+
+test('iter_batch_override_yields_arrays', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const sizes: number[] = []
+  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 })) sizes.push(batch.length)
+  assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
+})
+
+test('iter_batch_rejects_non_positive', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.throws(() => db.iter('orders', { batch: 0 }), RangeError)
+  assert.throws(() => db.iter('orders', { batch: -1 }), RangeError)
+  assert.throws(() => db.iter('orders', { batch: 1.5 }), RangeError)
 })
 
 test('iter_withIndex_array_yields_index_value_tuples', async () => {
@@ -256,14 +235,31 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   ])
 })
 
-test('iter_select_batch_under_tight_budget_stays_bounded', async (t) => {
-  // Projecting + batching a big array under a tight cap stays under the ceiling.
-  const rows = Array.from({ length: 4000 }, (_, i) => `{"id":${i},"v":"value-${i}"}`)
-  const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256), { maxResidentChunks: 16 })
-  t.after(() => db.close())
-  let count = 0
-  for await (const batch of db.iter({ select: ['id'], batch: 256 })) count += batch.length
-  assert.equal(count, 4000)
-  const stats = db.cacheStats()
-  assert.ok(stats.residentBytes + stats.bitmapBytes <= stats.ceilingBytes)
+test('iter_non_container_yields_no_batches', async () => {
+  // Empty result means *zero* yields, not a single empty batch - keeps the
+  // happy-path consumer (`for await (const b of ...) for (const v of b)`)
+  // from observing a meaningless `[]`.
+  const cursor = await open(memorySource(enc('{"scalar":42}')))
+  const batches: unknown[][] = []
+  for await (const b of cursor.iter('scalar')) batches.push(b)
+  assert.deepEqual(batches, [])
+})
+
+test('iter_missing_path_yields_no_batches', async () => {
+  // Same total / non-throwing semantics as get/has/count: an unresolved path
+  // yields zero batches.
+  const cursor = await open(memorySource(enc('{"xs":[1,2]}')))
+  const batches: unknown[][] = []
+  for await (const b of cursor.iter('nope')) batches.push(b)
+  assert.deepEqual(batches, [])
+})
+
+test('iter_on_object_target_throws', async () => {
+  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
+  await assert.rejects(
+    (async () => {
+      for await (const _ of cursor.iter('o')) void _
+    })(),
+    /walk\(\)/,
+  )
 })

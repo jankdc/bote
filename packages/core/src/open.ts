@@ -1,19 +1,10 @@
-import { open as openNative, type CacheStats, type Cursor as NativeCursor } from '@botejs/native'
+import { open as openNative, type Cursor as NativeCursor } from '@botejs/native'
 
+import { validatePath } from './path.ts'
 import type { Source, SourceReader } from './sources.ts'
 import { runStandardSchema, validateItem, type Path, type Segment, type StandardSchemaV1 } from './validate.ts'
 
-export interface SessionOptions {
-  /**
-   * Maximum number of source chunks held resident at once. Each slot
-   * accounts for one chunk's bytes plus its bitmaps; the cache also
-   * enforces a derived byte ceiling at roughly `maxResidentChunks x
-   * source.chunkBytes x 2` to bound total native memory.
-   *
-   * Defaults to 512 chunks.
-   */
-  maxResidentChunks?: number
-}
+import { splitArgs, serializeSelect, normalizeIterTail, type IterOptions, type VariadicPathArgs } from './args.ts'
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
@@ -22,30 +13,39 @@ type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
 /** Zero-based index of an array element. */
 export type IterIndex = number
 
-/** Default batch size for `.iter()`. Each yield is an array of up to this many
- *  items; the final batch may be smaller. Sized to amortize the per-yield
- *  FFI/promise overhead across enough items that compute, not protocol, sets
- *  the cost. Override via `IterOptions.batch`. */
+export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
 
-export interface IterOptions {
-  select?: Segment | Path | Record<string, Segment | Path>
-  /** Override the default batch size of {@link DEFAULT_ITER_BATCH}. Must be a
-   *  positive integer. Larger amortizes FFI overhead further at the cost of
-   *  per-yield latency and transient JS-heap residency. */
-  batch?: number
-  /** Validate each yielded item against this schema (after `select`). */
-  schema?: StandardSchemaV1
-  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them, turning the schema into a filter. */
-  onInvalid?: 'throw' | 'skip'
-  /** Yield `[index, value]` tuples instead of bare values, where `index` is
-   *  the zero-based position of the element in the source array. Useful when
-   *  a `schema` with `onInvalid: 'skip'` has dropped items and the caller
-   *  needs the original index. */
-  withIndex?: boolean
+export interface OpenOptions {
+  /**
+   * Slot budget for the structural-index cache: one slot per cached container
+   * plus one per tabled object member. When a scan tips the cache over this
+   * budget, the deepest (least navigationally useful) containers are evicted
+   * first, LRU-tiebroken, keeping the shallow backbone that resumes future
+   * scans. Bounds resident cache memory regardless of document size. `0`
+   * disables the cache entirely. Omit for the native default (1024).
+   */
+  indexCacheEntries?: number
+  /**
+   * Max object members tabled per walked container in the structural-index
+   * cache. The table is a dense prefix; past the cap, lookups of later members
+   * resume-scan from the cap boundary. Lower trades cache memory for resume work
+   * on pathologically large objects. `0` disables object member indexing. Omit
+   * for the native default (unbounded).
+   */
+  objectMemberCap?: number
+  /**
+   * Element-index stride between sampled array members in the structural-index
+   * cache. A later index resumes from the nearest array member at or before it, so
+   * a smaller stride means denser array members (more memory, shorter resume
+   * scans). `0` disables array-member indexing. Omit for the native default (16).
+   *
+   * Setting both `objectMemberCap` and `arrayIndexInterval` to `0` disables the
+   * cache entirely (no source bytes are ever cached either way), as does
+   * `indexCacheEntries: 0`.
+   */
+  arrayIndexInterval?: number
 }
-
-type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail]
 
 export interface Cursor {
   /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
@@ -75,19 +75,9 @@ export interface Cursor {
   ): AsyncIterable<SelectMapShape<S>[]>
   iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
-
-  /** Stream child positions as cursors. */
   walk(...path: Segment[]): AsyncIterable<Cursor>
-
-  /** Live snapshot of the shared chunk-cache occupancy - the bounded-memory contract, observable from JS. */
-  cacheStats(): CacheStats
 }
 
-/**
- * The cursor returned by `open()`. Owns the underlying `Source` and exposes
- * both an explicit `close()` and `Symbol.asyncDispose` so callers can choose
- * between manual cleanup and `await using` scoping.
- */
 export interface RootCursor extends Cursor, AsyncDisposable {
   /** Close the underlying source. Idempotent. */
   close(): Promise<void>
@@ -96,29 +86,32 @@ export interface RootCursor extends Cursor, AsyncDisposable {
 /**
  * Open a cursor over a seekable source.
  *
- * Calls `source.open()` to acquire a reader, then constructs the native cursor
- * over it. The reader's `read(offset, buf)` is invoked with chunk-aligned
- * `offset` and a `buf` whose `byteLength` equals the configured chunk size;
- * the reader fills `buf` and resolves with `bytesRead`. `buf` is a view over
- * native-owned memory and **MUST** not be retained past the returned promise.
- *
  * The returned `RootCursor` owns the reader: `close()` (or `await using`)
  * drives the reader's own `close()` exactly once.
  */
-export async function open(source: Source, options?: SessionOptions): Promise<RootCursor> {
+export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
+  const { indexCacheEntries, objectMemberCap, arrayIndexInterval } = options ?? {}
+  for (const [name, value] of [
+    ['indexCacheEntries', indexCacheEntries],
+    ['objectMemberCap', objectMemberCap],
+    ['arrayIndexInterval', arrayIndexInterval],
+  ] as const) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+      throw new RangeError(`open: ${name} must be a non-negative integer (0 disables), got ${value}`)
+    }
+  }
   const reader = await source.open()
+  const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
   let native: NativeCursor
   try {
-    native = openNative(
-      {
-        size: reader.size,
-        chunkBytes: reader.chunkBytes,
-        read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
-      },
-      {
-        maxResidentChunks: options?.maxResidentChunks,
-      },
-    )
+    native = openNative({
+      size: reader.size,
+      chunkBytes,
+      indexCacheEntries,
+      objectMemberCap,
+      arrayIndexInterval,
+      read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
+    })
   } catch (err) {
     await closeReader(reader)
     throw err
@@ -139,84 +132,6 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
-/** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
- *  comfortably covers any in-memory JSON array. */
-const MAX_ARRAY_INDEX = 0xffffffff
-
-function validatePath(path: readonly unknown[]): asserts path is readonly Segment[] {
-  for (let i = 0; i < path.length; i++) {
-    const s = path[i]
-    if (typeof s === 'string') continue
-    if (typeof s === 'number' && Number.isInteger(s) && s >= 0 && s <= MAX_ARRAY_INDEX) continue
-    throw new TypeError(
-      `path segment ${i}: expected string or non-negative integer (<= ${MAX_ARRAY_INDEX}), got ${describeBadSegment(s)}`,
-    )
-  }
-}
-
-function describeBadSegment(s: unknown): string {
-  if (typeof s === 'number') return `${s}`
-  if (s === null) return 'null'
-  return typeof s
-}
-
-function splitArgs<TTail>(args: VariadicPathArgs<TTail>): { path: Segment[]; tail: TTail | undefined } {
-  let pathArgs: unknown[]
-  let tail: TTail | undefined
-  if (args.length === 0) {
-    pathArgs = []
-    tail = undefined
-  } else {
-    const last = args[args.length - 1]
-    if (last !== null && typeof last === 'object' && !Array.isArray(last)) {
-      pathArgs = args.slice(0, -1)
-      tail = last as TTail
-    } else {
-      pathArgs = args as unknown[]
-      tail = undefined
-    }
-  }
-  validatePath(pathArgs)
-  return { path: pathArgs as Segment[], tail }
-}
-
-function isSchema(value: unknown): value is StandardSchemaV1 {
-  return typeof value === 'object' && value !== null && '~standard' in value
-}
-
-function normalizeIterTail(tail: StandardSchemaV1 | IterOptions | undefined): IterOptions {
-  if (!tail) return {}
-  if (isSchema(tail)) return { schema: tail }
-  return tail
-}
-
-function serializeSelect(select: Segment | Path | Record<string, Segment | Path>): string {
-  if (typeof select === 'string' || typeof select === 'number') {
-    const one = [select]
-    validatePath(one)
-    return JSON.stringify({ one })
-  }
-  if (Array.isArray(select)) {
-    validatePath(select)
-    if (select.length === 0) {
-      throw new RangeError('iter: select sub-path must have at least one segment')
-    }
-    return JSON.stringify({ one: select })
-  }
-  const entries = Object.entries(select).map(([k, sub]) => {
-    const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
-    validatePath(path)
-    if (path.length === 0) {
-      throw new RangeError(`iter: select field ${JSON.stringify(k)} sub-path must have at least one segment`)
-    }
-    return [k, path] as const
-  })
-  if (entries.length === 0) {
-    throw new RangeError('iter: select must have at least one field')
-  }
-  return JSON.stringify({ map: entries })
-}
-
 function wrap(native: NativeCursor): Cursor {
   const cursor = {
     get key() {
@@ -232,10 +147,6 @@ function wrap(native: NativeCursor): Cursor {
     async get(...args: VariadicPathArgs<StandardSchemaV1>): Promise<unknown> {
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
       const value = await native.get(path)
-      // A missing path resolves to `undefined` (JSON values are never
-      // `undefined`, so this is unambiguous). There is nothing to validate, so
-      // return `undefined` rather than running the schema against it - matches
-      // the no-schema `get` and avoids a spurious ValidationError / silent pass.
       if (!schema || value === undefined) return value
       return runStandardSchema(schema, value, path)
     },
@@ -254,12 +165,6 @@ function wrap(native: NativeCursor): Cursor {
       const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: withIndex })
       if (!schema) return inner as AsyncIterable<unknown[]>
       const policy = onInvalid ?? 'throw'
-
-      // The native side has already shaped each item inside the batch:
-      // `value` when `!withIndex`, `[index, value]` when `withIndex`. Schema
-      // validation only ever runs against the value half; the index passes
-      // through unchanged. With `onInvalid: 'skip'` a batch may shrink or
-      // come back empty.
       return {
         async *[Symbol.asyncIterator]() {
           let i = 0
@@ -285,9 +190,6 @@ function wrap(native: NativeCursor): Cursor {
           }
         },
       }
-    },
-    cacheStats() {
-      return native.cacheStats()
     },
   }
 

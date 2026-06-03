@@ -16,8 +16,8 @@ const User = z.object({
   name: z.string(),
   email: z.string(),
   details: z.object({
-    lastLoggedIn: z.number()
-  })
+    lastLoggedIn: z.number(),
+  }),
 })
 
 type User = z.infer<typeof User>
@@ -38,15 +38,15 @@ for await (const batch of cursor.iter('users', User)) {
 }
 
 // pick several fields into a named object to avoid resolving big items
-for await (const batch of cursor.iter('users', { 
-  select: { 
-    id: 'id', 
-    logged: ['details', 'lastLoggedIn']
+for await (const batch of cursor.iter('users', {
+  select: {
+    id: 'id',
+    logged: ['details', 'lastLoggedIn'],
   },
   schema: z.object({
     id: User.shape.id,
-    logged: User.shape.details.lastLoggedIn
-  })
+    logged: User.shape.details.lastLoggedIn,
+  }),
 })) {
   // batch: { id: string, logged: number }[]
   for (const userLog of batch) {
@@ -55,10 +55,10 @@ for await (const batch of cursor.iter('users', {
 }
 
 // or pick a single field
-for await (const batch of cursor.iter('users', { 
+for await (const batch of cursor.iter('users', {
   select: 'name',
-  schema: User.shape.name
-})) { 
+  schema: User.shape.name,
+})) {
   // batch: string[]
   for (const name of batch) {
     console.log({ name })
@@ -68,7 +68,7 @@ for await (const batch of cursor.iter('users', {
 // for open-ended per-child work (e.g. conditional reads, recursive descent, nested
 // iters), `walk` yields a subcursor positioned at each child:
 for await (const metaCursor of cursor.walk('meta')) {
-  if (metaCursor.key === "details") {
+  if (metaCursor.key === 'details') {
     const detailsValue = await metaCursor.get()
     console.log(detailsValue)
   }
@@ -82,16 +82,16 @@ await cursor.close()
 
 given a **seekable** source (e.g. a file, an HTTP range) and a path, it can retrieve values in a JSON quickly, without loading the whole thing in-memory.
 
-here's a run (Apple M1 Pro 2021, 500MB JSON array file, cold-cache, default settings):
+here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default settings):
 
-| operation    | approach   |      time | js heap peak Δ | rust heap peak |
-| ------------ | ---------- | --------: | -------------: | -------------: |
-| items[0]     | JSON.parse |    1.75 s |        1.21 GB |            n/a |
-| items[len/2] | JSON.parse |    1.82 s |        1.21 GB |            n/a |
-| items[len-1] | JSON.parse |    1.76 s |        1.21 GB |            n/a |
-| items[0]     | bote       |   1.43 ms |        25.9 KB |        94.9 KB |
-| items[len/2] | bote       | 328.81 ms |         1.3 MB |        56.6 MB |
-| items[len-1] | bote       | 636.78 ms |         1.3 MB |        56.6 MB |
+| operation      | approach   |      time | js heap peak Δ | rust heap peak |
+| -------------- | ---------- | --------: | -------------: | -------------: |
+| items[0]       | JSON.parse | 616.02 ms |        1.03 GB |            n/a |
+| items[535399]  | JSON.parse | 604.63 ms |        1.03 GB |            n/a |
+| items[1070797] | JSON.parse | 600.68 ms |        1.03 GB |            n/a |
+| items[0]       | bote       | 527.80 µs |       291.6 KB |       130.4 KB |
+| items[535399]  | bote       | 187.24 ms |       742.3 KB |        36.7 MB |
+| items[1070797] | bote       | 371.61 ms |       828.7 KB |        37.1 MB |
 
 ## sources
 

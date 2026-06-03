@@ -22,10 +22,8 @@ export interface SourceReader {
 }
 
 /**
- * Describes how to obtain a seekable byte stream. Construction is cheap and
- * synchronous - no I/O happens until `open()` runs, which the top-level
- * `open()` API drives. Provide your own object implementing this interface to
- * plug in custom backends.
+ * Describes how to obtain a seekable byte stream. Provide your own object implementing
+ * this interface to plug in custom backends.
  */
 export interface Source {
   /** Acquire the stream. Resolves to a `SourceReader` that owns any underlying resources. */
@@ -59,8 +57,6 @@ export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptio
       Promise.resolve({
         size: view.byteLength,
         chunkBytes,
-        // Subarray, not slice: we share the underlying buffer (zero-copy)
-        // and rely on bote's promise that it copies before resolving.
         read: (offset, length) => Promise.resolve(view.subarray(offset, Math.min(offset + length, view.byteLength))),
       }),
   }

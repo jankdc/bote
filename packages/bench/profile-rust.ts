@@ -1,9 +1,9 @@
 // Heap profile of a full ingest of a large JSON doc.
 //
 // Requires `@botejs/native` built with `--features heap-profile`. Opens
-// the source with default chunk size and default `maxResidentChunks`,
-// then walks the whole doc to force every chunk through the cache +
-// bitmap store. Writes a heap-profile file to CWD (override with
+// the source with a 64 KiB chunk size, then walks the whole doc to force
+// every chunk through the streaming scan window. Writes a heap-profile file
+// to CWD (override with
 // `--out <path>`). The profile file format is whatever the native
 // crate's `heap-profile` feature emits; today that's a dhat-rs JSON
 // dump, viewable at https://nnethercote.github.io/dh_view.html - peak
@@ -41,15 +41,18 @@ async function iterAll(cursor: Cursor): Promise<number> {
 
 async function profile(path: string, docBytes: number, outPath: string): Promise<void> {
   console.log(`Doc: ${path}  (${fmtBytes(docBytes)})`)
-  console.log(`Defaults: chunkBytes = 64 KiB, maxResidentChunks = 512`)
+  console.log(`chunkBytes = 64 KiB; resident memory is the transient scan window only`)
   console.log(`Dumping heap profile to: ${outPath}`)
 
-  const source = await fileSource(path) // no chunkBytes → native default (64 KiB)
+  const CHUNK_BYTES = 64 * 1024
+  const source = await fileSource(path, CHUNK_BYTES)
   let peakBytes = 0
   try {
     heapProfileStart(outPath)
     try {
-      const cursor = open(source) // no options → default maxResidentChunks (512)
+      // Native `open` takes the source object only (chunkBytes lives on it); the
+      // streaming walk holds no configurable budget.
+      const cursor = open(source)
       const seen = await iterAll(cursor)
       // Read peak before stopping; stop tears the profiler down.
       peakBytes = heapProfilePeakBytes()

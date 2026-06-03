@@ -50,8 +50,21 @@ test('walk_subcursor_key_and_get_resolve_against_anchor', async () => {
     keys.push(user.key)
     names.push((await user.get('name')) as string)
   }
-  assert.deepEqual(keys, [0, 1]) // key reflects the parent step, even when nested
-  assert.deepEqual(names, ['Alice', 'Bob']) // relative get resolves against the child anchor
+  assert.deepEqual(keys, [0, 1])
+  assert.deepEqual(names, ['Alice', 'Bob'])
+})
+
+test('walk_large_array_with_small_chunks', async () => {
+  const items = Array.from({ length: 100 }, (_, i) => `{"id":${i},"name":"item-${i}"}`)
+  const data = enc('[' + items.join(',') + ']')
+  const cursor = await open(memorySource(data, 128))
+  const ids: number[] = []
+  for await (const item of cursor.walk()) {
+    ids.push((await item.get('id')) as number)
+  }
+  assert.equal(ids.length, 100)
+  assert.equal(ids[0], 0)
+  assert.equal(ids[99], 99)
 })
 
 test('walk_missing_path_yields_empty', async (t) => {
@@ -62,17 +75,4 @@ test('walk_missing_path_yields_empty', async (t) => {
   const seen: unknown[] = []
   for await (const sub of cursor.walk('missing')) seen.push(sub.key)
   assert.deepEqual(seen, [])
-})
-
-test('walk_large_array_under_tight_budget', async () => {
-  const items = Array.from({ length: 100 }, (_, i) => `{"id":${i},"name":"item-${i}"}`)
-  const data = enc('[' + items.join(',') + ']')
-  const cursor = await open(memorySource(data, 128), { maxResidentChunks: 16 })
-  const ids: number[] = []
-  for await (const item of cursor.walk()) {
-    ids.push((await item.get('id')) as number)
-  }
-  assert.equal(ids.length, 100)
-  assert.equal(ids[0], 0)
-  assert.equal(ids[99], 99)
 })

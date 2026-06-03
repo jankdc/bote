@@ -3,11 +3,10 @@
 export declare class Cursor {
   has(path: Array<string | number>): Promise<boolean>
   get(path: Array<string | number>): Promise<unknown>
-  count(path: Array<string | number>): Promise<number>
   get key(): string | number | null
+  count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): CursorWalk
-  cacheStats(): CacheStats
 }
 
 /**
@@ -30,28 +29,6 @@ export declare class CursorWalk {
   [Symbol.asyncIterator](): AsyncGenerator<Cursor, void, undefined>
 }
 
-export interface BoteOptions {
-  /**
-   * Maximum number of source chunks held resident at once. Each slot
-   * accounts for one chunk's bytes plus its bitmaps. Defaults to 512.
-   */
-  maxResidentChunks?: number
-}
-
-/**
- * Live snapshot of the session's chunk-cache occupancy. The cache is
- * shared by every cursor derived from one `open()` call, so any cursor
- * reports the same figures. `residentBytes + bitmapBytes` is the total
- * native memory held for source data and stays at or below `ceilingBytes`
- * regardless of document size - the library's bounded-memory contract.
- */
-export interface CacheStats {
-  residentBytes: number
-  bitmapBytes: number
-  residentChunks: number
-  ceilingBytes: number
-}
-
 export declare function heapProfilePeakBytes(): number
 
 export declare function heapProfileStart(filePath?: string | undefined | null): void
@@ -59,32 +36,36 @@ export declare function heapProfileStart(filePath?: string | undefined | null): 
 export declare function heapProfileStop(): void
 
 /**
- * Options for `iter`. A `#[napi(object)]` so the facade can grow it
- * without changing the method's arity.
+ * Options for `iter`. A `#[napi(object)]` so the facade can grow it without
+ * changing the method's arity.
  */
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /** Batch size: each yield is an array of up to this many items. */
+  /** Items yielded per iteration. */
   batch: number
-  /**
-   * Yield `[key, value]` tuples instead of bare values. The key is a string
-   * for object members and a number for array elements.
-   */
+  /** Yield `[key, value]` tuples instead of bare values. */
   withKey?: boolean
 }
 
 /**
- * Build a [`Cursor`] from a JS source object.
- *
- * The `source` argument must be a JS object with:
- *   - `size: number`                 total source size in bytes
- *   - `read(args): Promise<Uint8Array>` `args.offset: number`, `args.length: number`;
- *                                    JS resolves with a `Uint8Array` of bytes read
- *                                    (its `.byteLength` is the actual count, `<= length`)
- *   - `chunkBytes?: number`          preferred read granularity in bytes (multiple of 64, optional)
+ * Build a [`Cursor`] from a JS source object:
+ *   - `size: number` total source size in bytes
+ *   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
+ *     `.byteLength` is the actual count read, `<= length`
+ *   - `chunkBytes: number` read granularity (whole, multiple of 64)
+ *   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
+ *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
+ *   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
  */
-export declare function open(source: { size: number; chunkBytes?: number; read: (args: ReadArgs) => Promise<Uint8Array> }, options?: BoteOptions | undefined | null): Cursor
+export declare function open(source: {
+  size: number
+  chunkBytes: number
+  indexCacheEntries?: number
+  objectMemberCap?: number
+  arrayIndexInterval?: number
+  read: (args: ReadArgs) => Promise<Uint8Array>
+}): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

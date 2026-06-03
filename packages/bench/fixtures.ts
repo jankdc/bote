@@ -8,9 +8,9 @@ import { join } from 'node:path'
 
 export interface Source {
   size: number
-  /** Preferred read granularity (non-zero multiple of 64). Defaults to
-   *  64 KiB inside the native binding when omitted. */
-  chunkBytes?: number
+  /** Read granularity (non-zero multiple of 64). Required by the native
+   *  binding; this adapter feeds it straight through. */
+  chunkBytes: number
   /** Read up to `args.length` bytes at `args.offset` and resolve with a
    *  `Uint8Array` of bytes read. The returned `.byteLength` is the actual
    *  count, shorter only at end-of-source. The buffer is JS-owned; bote
@@ -21,7 +21,7 @@ export interface Source {
   close?(): Promise<void>
 }
 
-export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
+export function memorySource(data: Uint8Array, chunkBytes: number): Source {
   return {
     size: data.length,
     chunkBytes,
@@ -29,7 +29,7 @@ export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
   }
 }
 
-export async function fileSource(path: string, chunkBytes?: number): Promise<Source> {
+export async function fileSource(path: string, chunkBytes: number): Promise<Source> {
   const { open: fsOpen } = await import('node:fs/promises')
   const handle = await fsOpen(path, 'r')
   const stat = await handle.stat()
