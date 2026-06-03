@@ -62,25 +62,6 @@ pub struct Session {
   array_interval: usize,
 }
 
-/// Cap on the adaptive doubling burst. The resolver restarts from the anchor on
-/// every chunk fault, so unbounded restarts give O(N²) traversal for an N-chunk
-/// query; doubling (1, 2, 4, ..., capped here) lets short queries avoid
-/// over-fetch and long ones converge to ~one pass. Also the dominant bound on
-/// resident source memory: the window holds at most ~one burst between prunes.
-pub(crate) const MAX_BURST: u64 = 256;
-
-/// Adaptive doubling burst for drivers that don't know the value's extent up
-/// front (`run_locate`, `skip_value_at`, `count::children`). Stateful; use one
-/// per `Session::drive`.
-pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
-  let mut n = 1u64;
-  move |_off| {
-    let cur = n;
-    n = n.saturating_mul(2).min(MAX_BURST);
-    cur
-  }
-}
-
 impl Session {
   pub fn new(
     source: Arc<dyn ByteStream>,
@@ -124,18 +105,6 @@ impl Session {
 /// One-shot public queries. Each opens a transient window, resolves, and drops
 /// the window on return.
 impl Session {
-  pub async fn locate_at(
-    &self,
-    path: &[Segment],
-    anchor_start: u64,
-    base_depth: u32,
-  ) -> Result<Option<u64>, SessionError> {
-    let mut window = self.new_window();
-    self
-      .run_locate(path, anchor_start, base_depth, &mut window)
-      .await
-  }
-
   pub async fn has_at(
     &self,
     path: &[Segment],
@@ -167,29 +136,23 @@ impl Session {
     let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
     Ok(Some(serde_json::from_slice(&bytes)?))
   }
+
+  pub async fn locate_at(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    base_depth: u32,
+  ) -> Result<Option<u64>, SessionError> {
+    let mut window = self.new_window();
+    self
+      .run_locate(path, anchor_start, base_depth, &mut window)
+      .await
+  }
 }
 
 /// Cursor/iterator support, called from `cursor.rs`. These take a caller-owned,
 /// long-lived window that `cursor.rs` prunes to the scan frontier between yields.
 impl Session {
-  /// Open a child iterator over the container at `value_start`, or `Ok(None)` if
-  /// the value isn't an object or array.
-  pub async fn enter_container(
-    &self,
-    value_start: u64,
-    window: &mut ChunkWindow,
-  ) -> Result<Option<ContainerCursor>, SessionError> {
-    let min_reachable = AtomicU64::new(value_start);
-    self
-      .drive(
-        window,
-        &min_reachable,
-        |_| 1,
-        |walker| resolve::enter_container(walker, value_start),
-      )
-      .await
-  }
-
   /// Advance `cursor` to the next child entry.
   pub async fn next_child(
     &self,
@@ -217,6 +180,24 @@ impl Session {
   ) -> Result<serde_json::Value, SessionError> {
     let bytes = self.read_range(loc.start, loc.end, window).await?;
     Ok(serde_json::from_slice(&bytes)?)
+  }
+
+  /// Open a child iterator over the container at `value_start`, or `Ok(None)` if
+  /// the value isn't an object or array.
+  pub async fn enter_container(
+    &self,
+    value_start: u64,
+    window: &mut ChunkWindow,
+  ) -> Result<Option<ContainerCursor>, SessionError> {
+    let min_reachable = AtomicU64::new(value_start);
+    self
+      .drive(
+        window,
+        &min_reachable,
+        |_| 1,
+        |walker| resolve::enter_container(walker, value_start),
+      )
+      .await
   }
 }
 
@@ -308,6 +289,45 @@ impl Session {
     Ok(Some(ValueLocation { start, end }))
   }
 
+  pub(crate) async fn read_range(
+    &self,
+    from: u64,
+    to: u64,
+    window: &mut ChunkWindow,
+  ) -> Result<Vec<u8>, SessionError> {
+    let chunk_bytes = self.chunk_bytes;
+    // The range is known, so fetch the rest in one shot on a miss. It restarts
+    // from `from` on each retry, so min_reachable is `from`: all the value's
+    // chunks must be resident together to copy them out.
+    let min_reachable = AtomicU64::new(from);
+    self
+      .drive(
+        window,
+        &min_reachable,
+        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
+        |walker| walker.read_range(from, to).map_err(TraverseError::from),
+      )
+      .await
+  }
+
+  pub(crate) async fn skip_value_at(
+    &self,
+    from: u64,
+    window: &mut ChunkWindow,
+  ) -> Result<u64, SessionError> {
+    // SkipState commits at block boundaries, so min_reachable tracks the skip
+    // position and the window stays bounded even for a large value.
+    let mut state = SkipState::start(from);
+    let min_reachable = AtomicU64::new(from);
+    self
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
+        let r = walker::skip_value_step(walker, &mut state);
+        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
+        r
+      })
+      .await
+  }
+
   /// The container kind at `from`, or `None` if the value there is a scalar.
   /// One cheap byte read, usually hot.
   async fn peek_container_kind(
@@ -333,66 +353,23 @@ impl Session {
       )
       .await
   }
-
-  pub(crate) async fn skip_value_at(
-    &self,
-    from: u64,
-    window: &mut ChunkWindow,
-  ) -> Result<u64, SessionError> {
-    // SkipState commits at block boundaries, so min_reachable tracks the skip
-    // position and the window stays bounded even for a large value.
-    let mut state = SkipState::start(from);
-    let min_reachable = AtomicU64::new(from);
-    self
-      .drive(window, &min_reachable, doubling_burst(), |walker| {
-        let r = walker::skip_value_step(walker, &mut state);
-        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
-        r
-      })
-      .await
-  }
-
-  pub(crate) async fn read_range(
-    &self,
-    from: u64,
-    to: u64,
-    window: &mut ChunkWindow,
-  ) -> Result<Vec<u8>, SessionError> {
-    let chunk_bytes = self.chunk_bytes;
-    // The range is known, so fetch the rest in one shot on a miss. It restarts
-    // from `from` on each retry, so min_reachable is `from`: all the value's
-    // chunks must be resident together to copy them out.
-    let min_reachable = AtomicU64::new(from);
-    self
-      .drive(
-        window,
-        &min_reachable,
-        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
-        |walker| walker.read_range(from, to).map_err(TraverseError::from),
-      )
-      .await
-  }
 }
 
 /// Structural-index cache accessors (table logic itself lives in `cache.rs`).
 /// Each is a no-op when caching is disabled. Called from `count.rs` /
 /// `cursor.rs` as scans learn child counts, closes, and array members.
 impl Session {
-  /// Run `f` against the cache under the lock, skipping when caching is off. The
-  /// lock is never held across an `.await`.
-  fn with_cache<R>(&self, f: impl FnOnce(&mut StructuralIndex) -> R) -> Option<R> {
-    if !self.cache_enabled {
-      return None;
-    }
-    Some(f(&mut self.cache.lock().unwrap()))
-  }
-
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`/`walk`
-  /// learned it - lets a repeat `count` skip the scan.
-  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
-    self
-      .with_cache(|c| c.get(anchor, path)?.child_count())
-      .flatten()
+  /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
+  pub(crate) fn store_close(
+    &self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    close: u64,
+  ) {
+    self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
   }
 
   pub(crate) fn store_child_count(
@@ -407,17 +384,12 @@ impl Session {
     self.with_cache(|c| c.store_child_count(base_depth, anchor, path, kind, value_start, count));
   }
 
-  /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
-  pub(crate) fn store_close(
-    &self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    close: u64,
-  ) {
-    self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`/`walk`
+  /// learned it - lets a repeat `count` skip the scan.
+  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
+    self
+      .with_cache(|c| c.get(anchor, path)?.child_count())
+      .flatten()
   }
 
   /// Record an array resume-point member `(index, offset)` so a later random
@@ -434,6 +406,34 @@ impl Session {
     self.with_cache(|c| {
       c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)])
     });
+  }
+
+  /// Run `f` against the cache under the lock, skipping when caching is off. The
+  /// lock is never held across an `.await`.
+  fn with_cache<R>(&self, f: impl FnOnce(&mut StructuralIndex) -> R) -> Option<R> {
+    if !self.cache_enabled {
+      return None;
+    }
+    Some(f(&mut self.cache.lock().unwrap()))
+  }
+}
+
+/// Cap on the adaptive doubling burst. The resolver restarts from the anchor on
+/// every chunk fault, so unbounded restarts give O(N²) traversal for an N-chunk
+/// query; doubling (1, 2, 4, ..., capped here) lets short queries avoid
+/// over-fetch and long ones converge to ~one pass. Also the dominant bound on
+/// resident source memory: the window holds at most ~one burst between prunes.
+pub(crate) const MAX_BURST: u64 = 256;
+
+/// Adaptive doubling burst for drivers that don't know the value's extent up
+/// front (`run_locate`, `skip_value_at`, `count::children`). Stateful; use one
+/// per `Session::drive`.
+pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
+  let mut n = 1u64;
+  move |_off| {
+    let cur = n;
+    n = n.saturating_mul(2).min(MAX_BURST);
+    cur
   }
 }
 

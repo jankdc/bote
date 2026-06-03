@@ -42,8 +42,20 @@ impl ChunkWindow {
     (offset / self.chunk_bytes) * self.chunk_bytes
   }
 
+  pub fn clear(&mut self) {
+    self.chunks.clear();
+  }
+
   pub fn insert(&mut self, chunk_start: u64, bytes: Bytes) {
     self.chunks.insert(chunk_start, bytes);
+  }
+
+  /// Drop every chunk below the one containing `min_reachable`. Forward-only
+  /// traversal never revisits bytes below the committed position, so this keeps
+  /// the window bounded as the scan advances.
+  pub fn drop_below(&mut self, min_reachable: u64) {
+    let fc = self.chunk_start_of(min_reachable);
+    self.chunks.retain(|&off, _| off >= fc);
   }
 
   /// Resident-chunk count; only used to assert the bounded-memory invariant.
@@ -60,18 +72,6 @@ impl ChunkWindow {
   #[cfg(test)]
   pub fn contains(&self, chunk_start: u64) -> bool {
     self.chunks.contains_key(&chunk_start)
-  }
-
-  pub fn clear(&mut self) {
-    self.chunks.clear();
-  }
-
-  /// Drop every chunk below the one containing `min_reachable`. Forward-only
-  /// traversal never revisits bytes below the committed position, so this keeps
-  /// the window bounded as the scan advances.
-  pub fn drop_below(&mut self, min_reachable: u64) {
-    let fc = self.chunk_start_of(min_reachable);
-    self.chunks.retain(|&off, _| off >= fc);
   }
 
   /// Bytes of the chunk at chunk-aligned `chunk_start`, or `ChunkMiss` if not

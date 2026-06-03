@@ -61,57 +61,6 @@ impl<'a> Walker<'a> {
   }
 
   #[inline]
-  pub fn source_size(&self) -> u64 {
-    self.bytes.source_size()
-  }
-
-  #[inline]
-  pub fn chunk_bytes(&self) -> u64 {
-    self.bytes.chunk_bytes()
-  }
-
-  #[inline]
-  fn chunk_slice(&mut self, chunk_start: u64) -> Result<&'a [u8], ChunkMiss> {
-    if let Some(c) = self.cached {
-      if c.offset == chunk_start {
-        return Ok(c.data);
-      }
-    }
-    let data: &'a [u8] = self.bytes.chunk_for(chunk_start)?;
-    self.cached = Some(CachedChunk {
-      offset: chunk_start,
-      data,
-    });
-    Ok(data)
-  }
-
-  /// The 64-byte block at `offset` (aligned to `offset`, not a chunk boundary),
-  /// space-padding any tail past end-of-source. It straddles at most two chunks;
-  /// `ChunkMiss` names the lower absent one.
-  fn block_at(&mut self, offset: u64) -> Result<[u8; BLOCK_BYTES], ChunkMiss> {
-    let source_size = self.source_size();
-    let cs = self.chunk_bytes();
-    let mut block = [b' '; BLOCK_BYTES];
-    let end = (offset + BLOCK_BYTES as u64).min(source_size);
-    let mut o = offset;
-    while o < end {
-      let chunk_start = (o / cs) * cs;
-      let data = self.chunk_slice(chunk_start)?;
-      let chunk_end = chunk_start + data.len() as u64;
-      let take_end = end.min(chunk_start + cs).min(chunk_end);
-      if take_end <= o {
-        break; // short tail chunk; leave the rest padded
-      }
-      let local = (o - chunk_start) as usize;
-      let dst = (o - offset) as usize;
-      let n = (take_end - o) as usize;
-      block[dst..dst + n].copy_from_slice(&data[local..local + n]);
-      o = chunk_start + cs;
-    }
-    Ok(block)
-  }
-
-  #[inline]
   pub fn byte_at(&mut self, offset: u64) -> Result<Option<u8>, ChunkMiss> {
     let source_size = self.source_size();
     if offset >= source_size {
@@ -144,19 +93,21 @@ impl<'a> Walker<'a> {
     Ok(out)
   }
 
-  /// Advance from `from` while `pred` holds, stopping at the first failing byte,
-  /// end-of-source, or end-of-loaded-data.
   #[inline]
-  fn skip_while(&mut self, from: u64, pred: impl Fn(u8) -> bool) -> Result<u64, ChunkMiss> {
-    let mut offset = from;
-    while offset < self.source_size() {
-      match self.byte_at(offset)? {
-        None => return Ok(offset),
-        Some(b) if pred(b) => offset += 1,
-        Some(_) => return Ok(offset),
-      }
-    }
-    Ok(offset)
+  pub fn source_size(&self) -> u64 {
+    self.bytes.source_size()
+  }
+
+  #[inline]
+  pub fn chunk_bytes(&self) -> u64 {
+    self.bytes.chunk_bytes()
+  }
+
+  /// Skip the JSON value whose first byte is at `from` (whitespace already
+  /// consumed), returning the offset just after it.
+  pub fn skip_value(&mut self, from: u64) -> Result<u64, TraverseError> {
+    let mut state = SkipState::start(from);
+    skip_value_step(self, &mut state)
   }
 
   #[inline]
@@ -208,56 +159,6 @@ impl<'a> Walker<'a> {
       scan.carry = next;
     }
     Ok(None)
-  }
-
-  /// Skip the JSON value whose first byte is at `from` (whitespace already
-  /// consumed), returning the offset just after it.
-  pub fn skip_value(&mut self, from: u64) -> Result<u64, TraverseError> {
-    let mut state = SkipState::start(from);
-    skip_value_step(self, &mut state)
-  }
-
-  fn skip_container_step(&mut self, state: &mut ContainerSkipState) -> Result<u64, TraverseError> {
-    let open = state.open;
-    let close = state.close;
-    let source_size = self.source_size();
-    while state.offset < source_size {
-      // `state` is committed at the last block boundary, so a ChunkMiss `?`
-      // propagates without losing progress.
-      let block = self.block_at(state.offset)?;
-      let (in_string, next) = scan_block(&block, state.carry);
-      let opens = structural_word(&block, in_string, open);
-      let closes = structural_word(&block, in_string, close);
-
-      let c = closes.count_ones();
-      // Fast path: too few closes to exhaust depth here, so it can't hit zero -
-      // bulk-update instead of walking bit-by-bit.
-      if c < state.depth {
-        state.depth = state.depth + opens.count_ones() - c;
-      } else {
-        let mut bits = opens | closes;
-        while bits != 0 {
-          let bit_idx = bits.trailing_zeros();
-          let bit = 1u64 << bit_idx;
-          let abs = state.offset + bit_idx as u64;
-          if opens & bit != 0 {
-            state.depth += 1;
-          } else {
-            state.depth = state
-              .depth
-              .checked_sub(1)
-              .ok_or(TraverseError::Malformed(abs))?;
-            if state.depth == 0 {
-              return Ok(abs + 1);
-            }
-          }
-          bits &= bits - 1;
-        }
-      }
-      state.offset += BLOCK_BYTES as u64;
-      state.carry = next;
-    }
-    Err(TraverseError::UnexpectedEof(state.offset))
   }
 
   /// Advance past `needed` depth-0 (element-boundary) commas of the current
@@ -333,6 +234,272 @@ impl<'a> Walker<'a> {
       carry = next;
     }
     Err(TraverseError::UnexpectedEof(offset))
+  }
+
+  /// The 64-byte block at `offset` (aligned to `offset`, not a chunk boundary),
+  /// space-padding any tail past end-of-source. It straddles at most two chunks;
+  /// `ChunkMiss` names the lower absent one.
+  fn block_at(&mut self, offset: u64) -> Result<[u8; BLOCK_BYTES], ChunkMiss> {
+    let source_size = self.source_size();
+    let cs = self.chunk_bytes();
+    let mut block = [b' '; BLOCK_BYTES];
+    let end = (offset + BLOCK_BYTES as u64).min(source_size);
+    let mut o = offset;
+    while o < end {
+      let chunk_start = (o / cs) * cs;
+      let data = self.chunk_slice(chunk_start)?;
+      let chunk_end = chunk_start + data.len() as u64;
+      let take_end = end.min(chunk_start + cs).min(chunk_end);
+      if take_end <= o {
+        break; // short tail chunk; leave the rest padded
+      }
+      let local = (o - chunk_start) as usize;
+      let dst = (o - offset) as usize;
+      let n = (take_end - o) as usize;
+      block[dst..dst + n].copy_from_slice(&data[local..local + n]);
+      o = chunk_start + cs;
+    }
+    Ok(block)
+  }
+
+  /// Advance from `from` while `pred` holds, stopping at the first failing byte,
+  /// end-of-source, or end-of-loaded-data.
+  #[inline]
+  fn skip_while(&mut self, from: u64, pred: impl Fn(u8) -> bool) -> Result<u64, ChunkMiss> {
+    let mut offset = from;
+    while offset < self.source_size() {
+      match self.byte_at(offset)? {
+        None => return Ok(offset),
+        Some(b) if pred(b) => offset += 1,
+        Some(_) => return Ok(offset),
+      }
+    }
+    Ok(offset)
+  }
+
+  #[inline]
+  fn chunk_slice(&mut self, chunk_start: u64) -> Result<&'a [u8], ChunkMiss> {
+    if let Some(c) = self.cached {
+      if c.offset == chunk_start {
+        return Ok(c.data);
+      }
+    }
+    let data: &'a [u8] = self.bytes.chunk_for(chunk_start)?;
+    self.cached = Some(CachedChunk {
+      offset: chunk_start,
+      data,
+    });
+    Ok(data)
+  }
+
+  fn skip_container_step(&mut self, state: &mut ContainerSkipState) -> Result<u64, TraverseError> {
+    let open = state.open;
+    let close = state.close;
+    let source_size = self.source_size();
+    while state.offset < source_size {
+      // `state` is committed at the last block boundary, so a ChunkMiss `?`
+      // propagates without losing progress.
+      let block = self.block_at(state.offset)?;
+      let (in_string, next) = scan_block(&block, state.carry);
+      let opens = structural_word(&block, in_string, open);
+      let closes = structural_word(&block, in_string, close);
+
+      let c = closes.count_ones();
+      // Fast path: too few closes to exhaust depth here, so it can't hit zero -
+      // bulk-update instead of walking bit-by-bit.
+      if c < state.depth {
+        state.depth = state.depth + opens.count_ones() - c;
+      } else {
+        let mut bits = opens | closes;
+        while bits != 0 {
+          let bit_idx = bits.trailing_zeros();
+          let bit = 1u64 << bit_idx;
+          let abs = state.offset + bit_idx as u64;
+          if opens & bit != 0 {
+            state.depth += 1;
+          } else {
+            state.depth = state
+              .depth
+              .checked_sub(1)
+              .ok_or(TraverseError::Malformed(abs))?;
+            if state.depth == 0 {
+              return Ok(abs + 1);
+            }
+          }
+          bits &= bits - 1;
+        }
+      }
+      state.offset += BLOCK_BYTES as u64;
+      state.carry = next;
+    }
+    Err(TraverseError::UnexpectedEof(state.offset))
+  }
+}
+
+/// Outcome of [`Walker::advance_top_level_commas`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommaStop {
+  /// Target reached: `consumed == needed`, `offset_after_comma` is the target
+  /// element's first byte (before whitespace).
+  Found {
+    offset_after_comma: u64,
+    consumed: usize,
+  },
+  /// Array's terminating `]` reached before consuming `needed` commas.
+  ArrayClosed { consumed: usize },
+  /// Block-boundary commit; caller resumes with these values once the next
+  /// chunk loads.
+  Partial {
+    offset: u64,
+    depth: u32,
+    consumed: usize,
+    carry: ScanCarry,
+  },
+}
+
+/// Resumable position of an in-string scan: next block offset and the carry
+/// entering it. Threaded across faults so a long string isn't rescanned.
+#[derive(Debug, Clone, Copy)]
+pub struct StringScan {
+  pub offset: u64,
+  pub carry: ScanCarry,
+}
+
+/// Sink for array members sampled by [`Walker::advance_top_level_commas`].
+/// Records `(index, offset)` for every element whose absolute index is a
+/// multiple of `stride`, each snapped to an exact element boundary. The grid is
+/// anchored at index 0, so sampling is stateless across `ChunkMiss` resumes -
+/// the absolute index is recomputed from `base_index` each call.
+pub struct ArrayMemberSink<'a> {
+  /// Element index at the scan call's `from`. An element's absolute index is
+  /// `base_index + (depth-0 commas consumed before it)`.
+  pub base_index: usize,
+  /// Stride between array members (`> 0`).
+  pub stride: usize,
+  /// Collected array members, appended in ascending index order.
+  pub out: &'a mut Vec<(usize, u64)>,
+}
+
+impl ArrayMemberSink<'_> {
+  /// Record element `index` starting at `after`, but only when it lands on the
+  /// stride grid.
+  fn sample(&mut self, index: usize, after: u64) {
+    if index.is_multiple_of(self.stride) {
+      self.out.push((index, after));
+    }
+  }
+
+  /// Fast-path sampling: emit an array member for every stride multiple crossed by
+  /// this block's `commas`. `start = base_index + base_consumed` is the index at
+  /// the block's first comma; the j-th comma (1-based) ends element `start + j`.
+  /// Visiting only the j with `(start + j) % stride == 0` makes the work scale
+  /// with array-members-in-block, not commas.
+  fn sample_block(&mut self, commas: u64, offset: u64, base_consumed: usize) {
+    let c = commas.count_ones() as usize;
+    if c == 0 {
+      return;
+    }
+    let start = self.base_index + base_consumed;
+    // First j (1-based, in `1..=stride`) with `(start + j) % stride == 0`.
+    let mut j = self.stride - start % self.stride;
+    while j <= c {
+      // j-th set bit: clear the low `j - 1`, take the next.
+      let mut bits = commas;
+      for _ in 0..j - 1 {
+        bits &= bits - 1;
+      }
+      let bit_idx = bits.trailing_zeros() as u64;
+      self.out.push((start + j, offset + bit_idx + 1));
+      j += self.stride;
+    }
+  }
+}
+
+/// Resumable state for [`skip_value_step`], persisted across faults by
+/// [`crate::session::Session::drive`] so a long skip needn't restart.
+#[derive(Debug, Clone)]
+pub(crate) enum SkipState {
+  /// Need the opening byte at `from` to pick a kind.
+  Pending {
+    from: u64,
+  },
+  String(StringScan),
+  Primitive {
+    offset: u64,
+  },
+  Container(ContainerSkipState),
+}
+
+/// Resumable state for skipping a container: `(offset, depth)` plus the
+/// threaded `carry`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContainerSkipState {
+  offset: u64,
+  depth: u32,
+  carry: ScanCarry,
+  open: Structural,
+  close: Structural,
+}
+
+impl SkipState {
+  pub fn start(from: u64) -> Self {
+    SkipState::Pending { from }
+  }
+
+  /// Lowest offset a resumed step might still read - the byte window's retention
+  /// bound; nothing below is reachable again.
+  pub fn min_reachable(&self) -> u64 {
+    match self {
+      SkipState::Pending { from } => *from,
+      SkipState::String(s) => s.offset,
+      SkipState::Primitive { offset } => *offset,
+      SkipState::Container(c) => c.offset,
+    }
+  }
+}
+
+/// Drive a [`SkipState`] forward. Returns the offset just after the value, or
+/// propagates `ChunkMiss` with `state` committed so the next call resumes.
+pub(crate) fn skip_value_step(
+  walker: &mut Walker,
+  state: &mut SkipState,
+) -> Result<u64, TraverseError> {
+  if let SkipState::Pending { from } = *state {
+    let byte = walker
+      .byte_at(from)?
+      .ok_or(TraverseError::UnexpectedEof(from))?;
+    *state = match byte {
+      b'"' => SkipState::String(StringScan {
+        offset: from + 1,
+        carry: INSIDE_STRING,
+      }),
+      b'{' => SkipState::Container(ContainerSkipState {
+        offset: from + 1,
+        depth: 1,
+        carry: ScanCarry::default(),
+        open: Structural::LBrace,
+        close: Structural::RBrace,
+      }),
+      b'[' => SkipState::Container(ContainerSkipState {
+        offset: from + 1,
+        depth: 1,
+        carry: ScanCarry::default(),
+        open: Structural::LBracket,
+        close: Structural::RBracket,
+      }),
+      _ => SkipState::Primitive { offset: from },
+    };
+  }
+  match state {
+    SkipState::Pending { .. } => unreachable!("committed above"),
+    SkipState::String(scan) => {
+      let close = walker
+        .next_string_close_step(scan)?
+        .ok_or(TraverseError::UnexpectedEof(scan.offset))?;
+      Ok(close + 1)
+    }
+    SkipState::Primitive { offset } => Ok(walker.skip_primitive(*offset)?),
+    SkipState::Container(c) => walker.skip_container_step(c),
   }
 }
 
@@ -451,173 +618,6 @@ impl CommaScan {
     }
     BlockOutcome::Continue
   }
-}
-
-/// Sink for array members sampled by [`Walker::advance_top_level_commas`].
-/// Records `(index, offset)` for every element whose absolute index is a
-/// multiple of `stride`, each snapped to an exact element boundary. The grid is
-/// anchored at index 0, so sampling is stateless across `ChunkMiss` resumes -
-/// the absolute index is recomputed from `base_index` each call.
-pub struct ArrayMemberSink<'a> {
-  /// Element index at the scan call's `from`. An element's absolute index is
-  /// `base_index + (depth-0 commas consumed before it)`.
-  pub base_index: usize,
-  /// Stride between array members (`> 0`).
-  pub stride: usize,
-  /// Collected array members, appended in ascending index order.
-  pub out: &'a mut Vec<(usize, u64)>,
-}
-
-impl ArrayMemberSink<'_> {
-  /// Record element `index` starting at `after`, but only when it lands on the
-  /// stride grid.
-  fn sample(&mut self, index: usize, after: u64) {
-    if index.is_multiple_of(self.stride) {
-      self.out.push((index, after));
-    }
-  }
-
-  /// Fast-path sampling: emit an array member for every stride multiple crossed by
-  /// this block's `commas`. `start = base_index + base_consumed` is the index at
-  /// the block's first comma; the j-th comma (1-based) ends element `start + j`.
-  /// Visiting only the j with `(start + j) % stride == 0` makes the work scale
-  /// with array-members-in-block, not commas.
-  fn sample_block(&mut self, commas: u64, offset: u64, base_consumed: usize) {
-    let c = commas.count_ones() as usize;
-    if c == 0 {
-      return;
-    }
-    let start = self.base_index + base_consumed;
-    // First j (1-based, in `1..=stride`) with `(start + j) % stride == 0`.
-    let mut j = self.stride - start % self.stride;
-    while j <= c {
-      // j-th set bit: clear the low `j - 1`, take the next.
-      let mut bits = commas;
-      for _ in 0..j - 1 {
-        bits &= bits - 1;
-      }
-      let bit_idx = bits.trailing_zeros() as u64;
-      self.out.push((start + j, offset + bit_idx + 1));
-      j += self.stride;
-    }
-  }
-}
-
-/// Resumable position of an in-string scan: next block offset and the carry
-/// entering it. Threaded across faults so a long string isn't rescanned.
-#[derive(Debug, Clone, Copy)]
-pub struct StringScan {
-  pub offset: u64,
-  pub carry: ScanCarry,
-}
-
-/// Resumable state for [`skip_value_step`], persisted across faults by
-/// [`crate::session::Session::drive`] so a long skip needn't restart.
-#[derive(Debug, Clone)]
-pub(crate) enum SkipState {
-  /// Need the opening byte at `from` to pick a kind.
-  Pending {
-    from: u64,
-  },
-  String(StringScan),
-  Primitive {
-    offset: u64,
-  },
-  Container(ContainerSkipState),
-}
-
-/// Resumable state for skipping a container: `(offset, depth)` plus the
-/// threaded `carry`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ContainerSkipState {
-  offset: u64,
-  depth: u32,
-  carry: ScanCarry,
-  open: Structural,
-  close: Structural,
-}
-
-impl SkipState {
-  pub fn start(from: u64) -> Self {
-    SkipState::Pending { from }
-  }
-
-  /// Lowest offset a resumed step might still read - the byte window's retention
-  /// bound; nothing below is reachable again.
-  pub fn min_reachable(&self) -> u64 {
-    match self {
-      SkipState::Pending { from } => *from,
-      SkipState::String(s) => s.offset,
-      SkipState::Primitive { offset } => *offset,
-      SkipState::Container(c) => c.offset,
-    }
-  }
-}
-
-/// Drive a [`SkipState`] forward. Returns the offset just after the value, or
-/// propagates `ChunkMiss` with `state` committed so the next call resumes.
-pub(crate) fn skip_value_step(
-  walker: &mut Walker,
-  state: &mut SkipState,
-) -> Result<u64, TraverseError> {
-  if let SkipState::Pending { from } = *state {
-    let byte = walker
-      .byte_at(from)?
-      .ok_or(TraverseError::UnexpectedEof(from))?;
-    *state = match byte {
-      b'"' => SkipState::String(StringScan {
-        offset: from + 1,
-        carry: INSIDE_STRING,
-      }),
-      b'{' => SkipState::Container(ContainerSkipState {
-        offset: from + 1,
-        depth: 1,
-        carry: ScanCarry::default(),
-        open: Structural::LBrace,
-        close: Structural::RBrace,
-      }),
-      b'[' => SkipState::Container(ContainerSkipState {
-        offset: from + 1,
-        depth: 1,
-        carry: ScanCarry::default(),
-        open: Structural::LBracket,
-        close: Structural::RBracket,
-      }),
-      _ => SkipState::Primitive { offset: from },
-    };
-  }
-  match state {
-    SkipState::Pending { .. } => unreachable!("committed above"),
-    SkipState::String(scan) => {
-      let close = walker
-        .next_string_close_step(scan)?
-        .ok_or(TraverseError::UnexpectedEof(scan.offset))?;
-      Ok(close + 1)
-    }
-    SkipState::Primitive { offset } => Ok(walker.skip_primitive(*offset)?),
-    SkipState::Container(c) => walker.skip_container_step(c),
-  }
-}
-
-/// Outcome of [`Walker::advance_top_level_commas`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommaStop {
-  /// Target reached: `consumed == needed`, `offset_after_comma` is the target
-  /// element's first byte (before whitespace).
-  Found {
-    offset_after_comma: u64,
-    consumed: usize,
-  },
-  /// Array's terminating `]` reached before consuming `needed` commas.
-  ArrayClosed { consumed: usize },
-  /// Block-boundary commit; caller resumes with these values once the next
-  /// chunk loads.
-  Partial {
-    offset: u64,
-    depth: u32,
-    consumed: usize,
-    carry: ScanCarry,
-  },
 }
 
 #[inline]

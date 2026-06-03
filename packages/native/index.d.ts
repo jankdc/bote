@@ -3,8 +3,8 @@
 export declare class Cursor {
   has(path: Array<string | number>): Promise<boolean>
   get(path: Array<string | number>): Promise<unknown>
-  count(path: Array<string | number>): Promise<number>
   get key(): string | number | null
+  count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): CursorWalk
 }

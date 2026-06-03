@@ -31,13 +31,394 @@ use std::collections::{hash_map::Entry, HashMap};
 use crate::path::Segment;
 use crate::resolve::{ContainerKind, ResumePoint, ScanRecord, ValueLocation};
 
-/// How a cached hop along one path segment resolves.
-enum Hop {
-  /// O(1) jump into a tabled object member: chain on from `value_start`.
-  Into(u64),
-  /// Stop chaining; seed the resolver near the target (or `None` to scan from the
-  /// container open).
-  Stop(Option<ResumePoint>),
+/// A flat map of container nodes keyed by `(anchor, path)`, bounded by a global
+/// `slot_budget` with depth-first eviction. No invalidation (the source is
+/// immutable); nodes only leave via eviction.
+pub struct StructuralIndex {
+  /// Max combined slots before eviction kicks in; `0` disables the cache.
+  slot_budget: usize,
+  /// `sum(slot_cost)` across all nodes, tracked incrementally on every write.
+  slots_used: usize,
+  /// Monotonic recency clock; the largest value is the most-recently-used.
+  tick: u64,
+  /// Max tabled members per object (`usize::MAX` = unbounded; `0` tables none,
+  /// resume parks at the open).
+  object_member_cap: usize,
+  /// Element stride between sampled array members (`0` = none). Held for
+  /// `is_enabled`; the stride itself is applied at sampling time.
+  array_interval: usize,
+  nodes: HashMap<NodeKey, ContainerNode>,
+}
+
+impl StructuralIndex {
+  pub fn new(slot_budget: usize, object_member_cap: usize, array_interval: usize) -> Self {
+    Self {
+      slot_budget,
+      slots_used: 0,
+      tick: 0,
+      object_member_cap,
+      array_interval,
+      nodes: HashMap::new(),
+    }
+  }
+
+  pub fn is_enabled(&self) -> bool {
+    self.slot_budget > 0 && (self.object_member_cap > 0 || self.array_interval > 0)
+  }
+
+  pub fn get(&self, anchor: u64, path: &[Segment]) -> Option<&ContainerNode> {
+    self.nodes.get(&NodeKey::new(anchor, path))
+  }
+
+  /// Walk cached container hops from `anchor` along `path`, returning the deepest
+  /// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
+  /// member is an O(1) hop; the first uncached level returns its container's start
+  /// plus a resume point so the resolver picks up near the target, not at the open.
+  pub fn chain_hops(&mut self, anchor: u64, path: &[Segment]) -> (u64, usize, Option<ResumePoint>) {
+    let mut start = anchor;
+    let mut seg = 0;
+    while seg < path.len() {
+      let key = NodeKey::new(anchor, &path[..seg]);
+      let Some(hop) = self.nodes.get(&key).map(|n| n.hop_for(&path[seg])) else {
+        return (start, seg, None);
+      };
+      // Bump recency on the hit so hot containers outlive stale ones in their tier.
+      let tick = self.next_tick();
+      if let Some(node) = self.nodes.get_mut(&key) {
+        node.last_used = tick;
+      }
+      match hop {
+        Hop::Into(vs) => {
+          start = vs;
+          seg += 1;
+        }
+        Hop::Stop(seed) => return (start, seg, seed),
+      }
+    }
+    (start, seg, None) // whole path hopped: `start` is the resolved value
+  }
+
+  /// Record a container's matching-close offset (`}`/`]` + 1).
+  pub fn store_close(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    close: u64,
+  ) {
+    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
+      node.close = Some(close)
+    });
+  }
+
+  /// Write back an array scan: merge its `(index, offset)` array members into the
+  /// node's sorted set.
+  pub fn merge_array_scan(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    value_start: u64,
+    new_members: &[(usize, u64)],
+  ) {
+    self.merge_into(
+      base_depth,
+      anchor,
+      path,
+      ContainerKind::Array,
+      value_start,
+      |body| body.merge_array(new_members),
+    );
+  }
+
+  /// Write back an object scan: merge the members seen (scan order) up to the cap,
+  /// advancing the resume offset to the high-water boundary.
+  pub fn merge_object_scan(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    value_start: u64,
+    members: &[(Box<str>, u64, u64)],
+    resume: Option<u64>,
+  ) {
+    let cap = self.object_member_cap;
+    self.merge_into(
+      base_depth,
+      anchor,
+      path,
+      ContainerKind::Object,
+      value_start,
+      |body| body.merge_object(members, resume, cap),
+    );
+  }
+
+  /// Drain a scan's collected child offsets into the cache, one node per entered
+  /// container.
+  pub fn apply_scan_record(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    scan_record: &ScanRecord,
+  ) {
+    for cs in &scan_record.containers {
+      let prefix = &path[..cs.seg];
+      match cs.kind {
+        ContainerKind::Object => self.merge_object_scan(
+          base_depth,
+          anchor,
+          prefix,
+          cs.value_start,
+          &cs.members,
+          cs.object_resume,
+        ),
+        ContainerKind::Array => self.merge_array_scan(
+          base_depth,
+          anchor,
+          prefix,
+          cs.value_start,
+          &cs.array_members,
+        ),
+      }
+    }
+  }
+
+  pub fn store_child_count(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    count: u64,
+  ) {
+    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
+      node.child_count = Some(count)
+    });
+  }
+
+  fn next_tick(&mut self) -> u64 {
+    self.tick += 1;
+    self.tick
+  }
+
+  /// Get-or-create the `(anchor, path)` node and apply `merge` to its body,
+  /// keeping `slots_used` in step and evicting if the write tips over budget.
+  fn merge_into(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    merge: impl FnOnce(&mut ContainerBody),
+  ) {
+    if !self.is_enabled() {
+      return;
+    }
+    let depth = base_depth + path.len() as u32;
+    let tick = self.next_tick();
+    let delta = {
+      let (before, node) = match self.nodes.entry(NodeKey::new(anchor, path)) {
+        Entry::Occupied(e) => {
+          let n = e.into_mut();
+          (n.slot_cost(), n)
+        }
+        Entry::Vacant(e) => (
+          0,
+          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
+        ),
+      };
+      merge(&mut node.body);
+      node.last_used = tick;
+      node.slot_cost() - before
+    };
+    self.slots_used += delta;
+    self.evict_if_over_budget();
+  }
+
+  fn store_field(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    set: impl FnOnce(&mut ContainerNode),
+  ) {
+    if !self.is_enabled() {
+      return;
+    }
+    let depth = base_depth + path.len() as u32;
+    let tick = self.next_tick();
+    let delta = {
+      let (before, node) = match self.nodes.entry(NodeKey::new(anchor, path)) {
+        Entry::Occupied(e) => {
+          let n = e.into_mut();
+          (n.slot_cost(), n)
+        }
+        Entry::Vacant(e) => (
+          0,
+          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
+        ),
+      };
+      set(node);
+      node.last_used = tick;
+      node.slot_cost() - before
+    };
+    self.slots_used += delta;
+    self.evict_if_over_budget();
+  }
+
+  /// Depth-first batch eviction: when over `slot_budget`, drop nodes deepest-first
+  /// (LRU tiebreak) down to a low-water mark (~7/8 budget) in one sorted pass.
+  /// Batching keeps the amortized cost ~O(log n) per insert instead of an O(n)
+  /// victim scan per evicted node; shallow backbone nodes are shed last.
+  fn evict_if_over_budget(&mut self) {
+    if self.slot_budget == 0 || self.slots_used <= self.slot_budget {
+      return;
+    }
+    let low_water = self.slot_budget - self.slot_budget / 8;
+    // Best victim first: greatest depth, then least recently used within it.
+    let mut victims: Vec<(u32, u64, NodeKey)> = self
+      .nodes
+      .iter()
+      .map(|(k, n)| (n.depth, n.last_used, k.clone()))
+      .collect();
+    victims.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    for (_, _, key) in victims {
+      if self.slots_used <= low_water {
+        break;
+      }
+      if let Some(node) = self.nodes.remove(&key) {
+        self.slots_used -= node.slot_cost();
+      }
+    }
+  }
+
+  #[cfg(test)]
+  pub fn slots_used(&self) -> usize {
+    self.slots_used
+  }
+
+  #[cfg(test)]
+  pub fn node_count(&self) -> usize {
+    self.nodes.len()
+  }
+
+  /// Recompute `slots_used` from scratch, to check the incremental accounting.
+  #[cfg(test)]
+  fn recomputed_slots_used(&self) -> usize {
+    self.nodes.values().map(ContainerNode::slot_cost).sum()
+  }
+}
+
+/// A walked container: the offsets/scalars learned about it, plus its
+/// kind-specific [`ContainerBody`].
+#[derive(Debug)]
+pub struct ContainerNode {
+  value_start: u64,
+  close: Option<u64>,
+  child_count: Option<u64>,
+  /// Document-tree depth (`base_depth + path.len()`). Primary eviction key:
+  /// deepest evicted first.
+  depth: u32,
+  /// Recency clock at the last touch/write; LRU tiebreak within a depth.
+  last_used: u64,
+  body: ContainerBody,
+}
+
+impl ContainerNode {
+  fn new(kind: ContainerKind, value_start: u64, depth: u32, last_used: u64) -> Self {
+    Self {
+      value_start,
+      close: None,
+      child_count: None,
+      depth,
+      last_used,
+      body: ContainerBody::for_kind(kind, value_start),
+    }
+  }
+
+  /// The container's full `[start, end)` once its close is known.
+  pub fn location(&self) -> Option<ValueLocation> {
+    self.close.map(|end| ValueLocation {
+      start: self.value_start,
+      end,
+    })
+  }
+
+  pub fn child_count(&self) -> Option<u64> {
+    self.child_count
+  }
+
+  fn hop_for(&self, segment: &Segment) -> Hop {
+    self.body.hop(segment)
+  }
+
+  /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
+  /// member. Array members aren't counted - `array_interval` already bounds them.
+  fn slot_cost(&self) -> usize {
+    1 + match &self.body {
+      ContainerBody::Object { members, .. } => members.len(),
+      ContainerBody::Array { .. } => 0,
+    }
+  }
+
+  /// `value_start` of a tabled object member, or `None` if not in the table.
+  #[cfg(test)]
+  pub fn object_member(&self, name: &str) -> Option<u64> {
+    self.body.object_member(name)
+  }
+
+  /// Object high-water resume offset (a later member scan resumes here).
+  #[cfg(test)]
+  pub fn object_resume(&self) -> u64 {
+    match &self.body {
+      ContainerBody::Object { resume, .. } => *resume,
+      ContainerBody::Array { .. } => 0,
+    }
+  }
+
+  #[cfg(test)]
+  pub fn array_members(&self) -> &[(usize, u64)] {
+    match &self.body {
+      ContainerBody::Array { members } => members,
+      ContainerBody::Object { .. } => &[],
+    }
+  }
+
+  #[cfg(test)]
+  pub fn object_member_count(&self) -> usize {
+    match &self.body {
+      ContainerBody::Object { members, .. } => members.len(),
+      ContainerBody::Array { .. } => 0,
+    }
+  }
+
+  /// The greatest array member with `index <= target`, if any.
+  #[cfg(test)]
+  pub fn nearest_array_member(&self, target: usize) -> Option<(usize, u64)> {
+    self.body.nearest_array_member(target)
+  }
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+struct NodeKey {
+  anchor: u64,
+  path: Box<[Segment]>,
+}
+
+impl NodeKey {
+  fn new(anchor: u64, path: &[Segment]) -> Self {
+    Self {
+      anchor,
+      path: path.into(),
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -111,6 +492,20 @@ impl ContainerBody {
     }
   }
 
+  /// Merge `new` array members into the sorted set (dedup by index). Unbounded
+  /// here: the bounding stride is applied upstream at sampling time. No-op on an
+  /// object body.
+  fn merge_array(&mut self, new: &[(usize, u64)]) {
+    let ContainerBody::Array { members } = self else {
+      return;
+    };
+    if new.is_empty() {
+      return;
+    }
+    members.extend_from_slice(new);
+    members.sort_unstable_by_key(|&(i, _)| i);
+    members.dedup_by_key(|&mut (i, _)| i);
+  }
 
   /// Merge object members (scan order) up to `cap`, advancing the resume offset to
   /// the high-water boundary (`resume_hint` = matched member's start, or the
@@ -142,411 +537,15 @@ impl ContainerBody {
     }
     *resume = resume_off;
   }
-
-  /// Merge `new` array members into the sorted set (dedup by index). Unbounded
-  /// here: the bounding stride is applied upstream at sampling time. No-op on an
-  /// object body.
-  fn merge_array(&mut self, new: &[(usize, u64)]) {
-    let ContainerBody::Array { members } = self else {
-      return;
-    };
-    if new.is_empty() {
-      return;
-    }
-    members.extend_from_slice(new);
-    members.sort_unstable_by_key(|&(i, _)| i);
-    members.dedup_by_key(|&mut (i, _)| i);
-  }
 }
 
-/// A walked container: the offsets/scalars learned about it, plus its
-/// kind-specific [`ContainerBody`].
-#[derive(Debug)]
-pub struct ContainerNode {
-  value_start: u64,
-  close: Option<u64>,
-  child_count: Option<u64>,
-  /// Document-tree depth (`base_depth + path.len()`). Primary eviction key:
-  /// deepest evicted first.
-  depth: u32,
-  /// Recency clock at the last touch/write; LRU tiebreak within a depth.
-  last_used: u64,
-  body: ContainerBody,
-}
-
-impl ContainerNode {
-  fn new(kind: ContainerKind, value_start: u64, depth: u32, last_used: u64) -> Self {
-    Self {
-      value_start,
-      close: None,
-      child_count: None,
-      depth,
-      last_used,
-      body: ContainerBody::for_kind(kind, value_start),
-    }
-  }
-
-  pub fn child_count(&self) -> Option<u64> {
-    self.child_count
-  }
-
-  /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
-  /// member. Array members aren't counted - `array_interval` already bounds them.
-  fn slot_cost(&self) -> usize {
-    1 + match &self.body {
-      ContainerBody::Object { members, .. } => members.len(),
-      ContainerBody::Array { .. } => 0,
-    }
-  }
-
-  fn hop_for(&self, segment: &Segment) -> Hop {
-    self.body.hop(segment)
-  }
-
-  /// `value_start` of a tabled object member, or `None` if not in the table.
-  #[cfg(test)]
-  pub fn object_member(&self, name: &str) -> Option<u64> {
-    self.body.object_member(name)
-  }
-
-  /// The greatest array member with `index <= target`, if any.
-  #[cfg(test)]
-  pub fn nearest_array_member(&self, target: usize) -> Option<(usize, u64)> {
-    self.body.nearest_array_member(target)
-  }
-
-  /// The container's full `[start, end)` once its close is known.
-  pub fn location(&self) -> Option<ValueLocation> {
-    self.close.map(|end| ValueLocation {
-      start: self.value_start,
-      end,
-    })
-  }
-
-  /// Object high-water resume offset (a later member scan resumes here).
-  #[cfg(test)]
-  pub fn object_resume(&self) -> u64 {
-    match &self.body {
-      ContainerBody::Object { resume, .. } => *resume,
-      ContainerBody::Array { .. } => 0,
-    }
-  }
-
-  #[cfg(test)]
-  pub fn array_members(&self) -> &[(usize, u64)] {
-    match &self.body {
-      ContainerBody::Array { members } => members,
-      ContainerBody::Object { .. } => &[],
-    }
-  }
-
-  #[cfg(test)]
-  pub fn object_member_count(&self) -> usize {
-    match &self.body {
-      ContainerBody::Object { members, .. } => members.len(),
-      ContainerBody::Array { .. } => 0,
-    }
-  }
-}
-
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
-struct NodeKey {
-  anchor: u64,
-  path: Box<[Segment]>,
-}
-
-impl NodeKey {
-  fn new(anchor: u64, path: &[Segment]) -> Self {
-    Self {
-      anchor,
-      path: path.into(),
-    }
-  }
-}
-
-/// A flat map of container nodes keyed by `(anchor, path)`, bounded by a global
-/// `slot_budget` with depth-first eviction. No invalidation (the source is
-/// immutable); nodes only leave via eviction.
-pub struct StructuralIndex {
-  /// Max combined slots before eviction kicks in; `0` disables the cache.
-  slot_budget: usize,
-  /// `sum(slot_cost)` across all nodes, tracked incrementally on every write.
-  slots_used: usize,
-  /// Monotonic recency clock; the largest value is the most-recently-used.
-  tick: u64,
-  /// Max tabled members per object (`usize::MAX` = unbounded; `0` tables none,
-  /// resume parks at the open).
-  object_member_cap: usize,
-  /// Element stride between sampled array members (`0` = none). Held for
-  /// `is_enabled`; the stride itself is applied at sampling time.
-  array_interval: usize,
-  nodes: HashMap<NodeKey, ContainerNode>,
-}
-
-impl StructuralIndex {
-  pub fn new(slot_budget: usize, object_member_cap: usize, array_interval: usize) -> Self {
-    Self {
-      slot_budget,
-      slots_used: 0,
-      tick: 0,
-      object_member_cap,
-      array_interval,
-      nodes: HashMap::new(),
-    }
-  }
-
-  pub fn is_enabled(&self) -> bool {
-    self.slot_budget > 0 && (self.object_member_cap > 0 || self.array_interval > 0)
-  }
-
-  fn next_tick(&mut self) -> u64 {
-    self.tick += 1;
-    self.tick
-  }
-
-  pub fn get(&self, anchor: u64, path: &[Segment]) -> Option<&ContainerNode> {
-    self.nodes.get(&NodeKey::new(anchor, path))
-  }
-
-  /// Walk cached container hops from `anchor` along `path`, returning the deepest
-  /// `(start, segment_idx, hint)` to seed the resolver with. Each tabled object
-  /// member is an O(1) hop; the first uncached level returns its container's start
-  /// plus a resume point so the resolver picks up near the target, not at the open.
-  pub fn chain_hops(&mut self, anchor: u64, path: &[Segment]) -> (u64, usize, Option<ResumePoint>) {
-    let mut start = anchor;
-    let mut seg = 0;
-    while seg < path.len() {
-      let key = NodeKey::new(anchor, &path[..seg]);
-      let Some(hop) = self.nodes.get(&key).map(|n| n.hop_for(&path[seg])) else {
-        return (start, seg, None);
-      };
-      // Bump recency on the hit so hot containers outlive stale ones in their tier.
-      let tick = self.next_tick();
-      if let Some(node) = self.nodes.get_mut(&key) {
-        node.last_used = tick;
-      }
-      match hop {
-        Hop::Into(vs) => {
-          start = vs;
-          seg += 1;
-        }
-        Hop::Stop(seed) => return (start, seg, seed),
-      }
-    }
-    (start, seg, None) // whole path hopped: `start` is the resolved value
-  }
-
-  /// Drain a scan's collected child offsets into the cache, one node per entered
-  /// container.
-  pub fn apply_scan_record(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    scan_record: &ScanRecord,
-  ) {
-    for cs in &scan_record.containers {
-      let prefix = &path[..cs.seg];
-      match cs.kind {
-        ContainerKind::Object => self.merge_object_scan(
-          base_depth,
-          anchor,
-          prefix,
-          cs.value_start,
-          &cs.members,
-          cs.object_resume,
-        ),
-        ContainerKind::Array => self.merge_array_scan(
-          base_depth,
-          anchor,
-          prefix,
-          cs.value_start,
-          &cs.array_members,
-        ),
-      }
-    }
-  }
-
-  /// Write back an object scan: merge the members seen (scan order) up to the cap,
-  /// advancing the resume offset to the high-water boundary.
-  pub fn merge_object_scan(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    value_start: u64,
-    members: &[(Box<str>, u64, u64)],
-    resume: Option<u64>,
-  ) {
-    let cap = self.object_member_cap;
-    self.merge_into(
-      base_depth,
-      anchor,
-      path,
-      ContainerKind::Object,
-      value_start,
-      |body| body.merge_object(members, resume, cap),
-    );
-  }
-
-  /// Write back an array scan: merge its `(index, offset)` array members into the
-  /// node's sorted set.
-  pub fn merge_array_scan(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    value_start: u64,
-    new_members: &[(usize, u64)],
-  ) {
-    self.merge_into(
-      base_depth,
-      anchor,
-      path,
-      ContainerKind::Array,
-      value_start,
-      |body| body.merge_array(new_members),
-    );
-  }
-
-  /// Get-or-create the `(anchor, path)` node and apply `merge` to its body,
-  /// keeping `slots_used` in step and evicting if the write tips over budget.
-  fn merge_into(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    merge: impl FnOnce(&mut ContainerBody),
-  ) {
-    if !self.is_enabled() {
-      return;
-    }
-    let depth = base_depth + path.len() as u32;
-    let tick = self.next_tick();
-    let delta = {
-      let (before, node) = match self.nodes.entry(NodeKey::new(anchor, path)) {
-        Entry::Occupied(e) => {
-          let n = e.into_mut();
-          (n.slot_cost(), n)
-        }
-        Entry::Vacant(e) => (
-          0,
-          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
-        ),
-      };
-      merge(&mut node.body);
-      node.last_used = tick;
-      node.slot_cost() - before
-    };
-    self.slots_used += delta;
-    self.evict_if_over_budget();
-  }
-
-  /// Depth-first batch eviction: when over `slot_budget`, drop nodes deepest-first
-  /// (LRU tiebreak) down to a low-water mark (~7/8 budget) in one sorted pass.
-  /// Batching keeps the amortized cost ~O(log n) per insert instead of an O(n)
-  /// victim scan per evicted node; shallow backbone nodes are shed last.
-  fn evict_if_over_budget(&mut self) {
-    if self.slot_budget == 0 || self.slots_used <= self.slot_budget {
-      return;
-    }
-    let low_water = self.slot_budget - self.slot_budget / 8;
-    // Best victim first: greatest depth, then least recently used within it.
-    let mut victims: Vec<(u32, u64, NodeKey)> = self
-      .nodes
-      .iter()
-      .map(|(k, n)| (n.depth, n.last_used, k.clone()))
-      .collect();
-    victims.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    for (_, _, key) in victims {
-      if self.slots_used <= low_water {
-        break;
-      }
-      if let Some(node) = self.nodes.remove(&key) {
-        self.slots_used -= node.slot_cost();
-      }
-    }
-  }
-
-  /// Record a container's matching-close offset (`}`/`]` + 1).
-  pub fn store_close(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    close: u64,
-  ) {
-    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
-      node.close = Some(close)
-    });
-  }
-
-  pub fn store_child_count(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-  ) {
-    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
-      node.child_count = Some(count)
-    });
-  }
-
-  fn store_field(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    set: impl FnOnce(&mut ContainerNode),
-  ) {
-    if !self.is_enabled() {
-      return;
-    }
-    let depth = base_depth + path.len() as u32;
-    let tick = self.next_tick();
-    let delta = {
-      let (before, node) = match self.nodes.entry(NodeKey::new(anchor, path)) {
-        Entry::Occupied(e) => {
-          let n = e.into_mut();
-          (n.slot_cost(), n)
-        }
-        Entry::Vacant(e) => (
-          0,
-          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
-        ),
-      };
-      set(node);
-      node.last_used = tick;
-      node.slot_cost() - before
-    };
-    self.slots_used += delta;
-    self.evict_if_over_budget();
-  }
-
-  #[cfg(test)]
-  pub fn node_count(&self) -> usize {
-    self.nodes.len()
-  }
-
-  #[cfg(test)]
-  pub fn slots_used(&self) -> usize {
-    self.slots_used
-  }
-
-  /// Recompute `slots_used` from scratch, to check the incremental accounting.
-  #[cfg(test)]
-  fn recomputed_slots_used(&self) -> usize {
-    self.nodes.values().map(ContainerNode::slot_cost).sum()
-  }
+/// How a cached hop along one path segment resolves.
+enum Hop {
+  /// O(1) jump into a tabled object member: chain on from `value_start`.
+  Into(u64),
+  /// Stop chaining; seed the resolver near the target (or `None` to scan from the
+  /// container open).
+  Stop(Option<ResumePoint>),
 }
 
 #[cfg(test)]

@@ -11,15 +11,6 @@ use napi::bindgen_prelude::{Promise, Uint8Array};
 use napi::threadsafe_function::ThreadsafeFunction;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum SourceError {
-  #[cfg(test)]
-  #[error("read offset {offset} is past end of source (size {size})")]
-  OutOfBounds { offset: u64, size: u64 },
-  #[error("source I/O error: {0}")]
-  Io(String),
-}
-
 #[async_trait]
 pub trait ByteStream: Send + Sync {
   fn size(&self) -> u64;
@@ -29,36 +20,13 @@ pub trait ByteStream: Send + Sync {
   async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError>;
 }
 
-/// In-memory source backed by an owned buffer. Test fixture only; production
-/// feeds bytes in via [`JsByteStream`].
-#[cfg(test)]
-pub struct InMemoryStream {
-  data: Bytes,
-}
-
-#[cfg(test)]
-impl InMemoryStream {
-  pub fn new(data: impl Into<Bytes>) -> Self {
-    Self { data: data.into() }
-  }
-}
-
-#[cfg(test)]
-#[async_trait]
-impl ByteStream for InMemoryStream {
-  fn size(&self) -> u64 {
-    self.data.len() as u64
-  }
-
-  async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
-    let size = self.size();
-    if offset > size {
-      return Err(SourceError::OutOfBounds { offset, size });
-    }
-    let start = offset as usize;
-    let end = start.saturating_add(length).min(self.data.len());
-    Ok(self.data.slice(start..end))
-  }
+#[derive(Debug, Error)]
+pub enum SourceError {
+  #[cfg(test)]
+  #[error("read offset {offset} is past end of source (size {size})")]
+  OutOfBounds { offset: u64, size: u64 },
+  #[error("source I/O error: {0}")]
+  Io(String),
 }
 
 /// Arguments passed to the JS `read(args)` callback.
@@ -132,6 +100,38 @@ impl ByteStream for JsByteStream {
     }
     // Copy out so `Bytes` owns its allocation; don't carry the JS view further.
     Ok(Bytes::copy_from_slice(&view[..view_len]))
+  }
+}
+
+/// In-memory source backed by an owned buffer. Test fixture only; production
+/// feeds bytes in via [`JsByteStream`].
+#[cfg(test)]
+pub struct InMemoryStream {
+  data: Bytes,
+}
+
+#[cfg(test)]
+impl InMemoryStream {
+  pub fn new(data: impl Into<Bytes>) -> Self {
+    Self { data: data.into() }
+  }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ByteStream for InMemoryStream {
+  fn size(&self) -> u64 {
+    self.data.len() as u64
+  }
+
+  async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+    let size = self.size();
+    if offset > size {
+      return Err(SourceError::OutOfBounds { offset, size });
+    }
+    let start = offset as usize;
+    let end = start.saturating_add(length).min(self.data.len());
+    Ok(self.data.slice(start..end))
   }
 }
 

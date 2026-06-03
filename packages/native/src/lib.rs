@@ -109,6 +109,22 @@ pub fn open(
 }
 
 #[napi]
+pub fn heap_profile_stop() -> napi::Result<()> {
+  #[cfg(feature = "heap-profile")]
+  {
+    let mut guard = PROFILER.lock().unwrap();
+    if guard.take().is_none() {
+      return Err(napi::Error::from_reason("heap profiler was not started"));
+    }
+    Ok(())
+  }
+  #[cfg(not(feature = "heap-profile"))]
+  Err(napi::Error::from_reason(
+    "native built without `heap-profile` feature; rebuild with `--features heap-profile`",
+  ))
+}
+
+#[napi]
 pub fn heap_profile_start(file_path: Option<String>) -> napi::Result<()> {
   #[cfg(feature = "heap-profile")]
   {
@@ -138,22 +154,6 @@ pub fn heap_profile_peak_bytes() -> napi::Result<f64> {
   {
     let stats = dhat::HeapStats::get();
     Ok(stats.max_bytes as f64)
-  }
-  #[cfg(not(feature = "heap-profile"))]
-  Err(napi::Error::from_reason(
-    "native built without `heap-profile` feature; rebuild with `--features heap-profile`",
-  ))
-}
-
-#[napi]
-pub fn heap_profile_stop() -> napi::Result<()> {
-  #[cfg(feature = "heap-profile")]
-  {
-    let mut guard = PROFILER.lock().unwrap();
-    if guard.take().is_none() {
-      return Err(napi::Error::from_reason("heap profiler was not started"));
-    }
-    Ok(())
   }
   #[cfg(not(feature = "heap-profile"))]
   Err(napi::Error::from_reason(

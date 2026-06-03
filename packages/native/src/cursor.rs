@@ -20,22 +20,6 @@ use crate::resolve::{ChildEntry, ContainerCursor, ContainerKind, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
-fn map_err(e: SessionError) -> NapiError {
-  NapiError::from_reason(e.to_string())
-}
-
-/// Options for `iter`. A `#[napi(object)]` so the facade can grow it without
-/// changing the method's arity.
-#[napi(object)]
-pub struct IterArgs {
-  /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
-  pub select_ir: Option<String>,
-  /// Items yielded per iteration.
-  pub batch: f64,
-  /// Yield `[key, value]` tuples instead of bare values.
-  pub with_key: Option<bool>,
-}
-
 #[napi]
 pub struct Cursor {
   session: Arc<Session>,
@@ -103,6 +87,15 @@ impl Cursor {
       .map_err(map_err)
   }
 
+  #[napi(getter)]
+  pub fn key(&self) -> Option<Either<String, u32>> {
+    match &self.entry {
+      None => None,
+      Some(ChildEntry::Member { key, .. }) => Some(Either::A(key.clone())),
+      Some(ChildEntry::Element { index, .. }) => Some(Either::B(*index as u32)),
+    }
+  }
+
   #[napi(ts_args_type = "path: Array<string | number>")]
   pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
     crate::count::at(
@@ -114,15 +107,6 @@ impl Cursor {
     .await
     .map(|n| n as f64)
     .map_err(map_err)
-  }
-
-  #[napi(getter)]
-  pub fn key(&self) -> Option<Either<String, u32>> {
-    match &self.entry {
-      None => None,
-      Some(ChildEntry::Member { key, .. }) => Some(Either::A(key.clone())),
-      Some(ChildEntry::Element { index, .. }) => Some(Either::B(*index as u32)),
-    }
   }
 
   #[napi(ts_args_type = "path: Array<string | number>, options: IterArgs")]
@@ -149,117 +133,16 @@ impl Cursor {
   }
 }
 
-/// State shared by `iter` and `walk`: the lazily-resolved container cursor plus
-/// the byte window carried across yields. Awaits happen with the lock held
-/// (tokio Mutex).
-struct StreamCore {
-  path: Vec<Segment>,
-  anchor_start: u64,
-  /// Document depth of `anchor_start`; children sit at `base_depth + path.len() + 1`.
-  base_depth: u32,
-  initialized: bool,
-  /// Set after first `next()`. `None` if the path didn't resolve or resolved to a
-  /// non-container (iteration yields nothing).
-  child_cursor: Option<ContainerCursor>,
-  /// `value_start` of the base container, once resolved. Where the stream records
-  /// `close`/`child_count`/resume-point array members.
-  base_value_start: Option<u64>,
-  /// Children yielded so far - the child count once iteration runs to the end.
-  yielded: u64,
-  /// At rest holds at most the chunk covering `next_offset` so the next yield's
-  /// first read hits; everything else is pruned per yield, bounding resident
-  /// chunks to ~1 between yields.
-  window: ChunkWindow,
-}
-
-impl StreamCore {
-  fn new(session: &Session, path: Vec<Segment>, anchor_start: u64, base_depth: u32) -> Self {
-    Self {
-      path,
-      anchor_start,
-      base_depth,
-      initialized: false,
-      child_cursor: None,
-      base_value_start: None,
-      yielded: 0,
-      window: session.new_window(),
-    }
-  }
-}
-
-/// `iter`-only state: [`StreamCore`] plus projection, batching, and key-wrapping.
-/// `walk` uses [`StreamCore`] directly.
-struct IterState {
-  core: StreamCore,
-  select_ir: Option<String>,
-  /// Compiled lazily from `select_ir` on first `next()`. `None` yields the whole child.
-  select: Option<CompiledSelect>,
-  batch: usize,
-  with_key: bool,
-}
-
-impl IterState {
-  fn new(
-    session: &Session,
-    path: Vec<Segment>,
-    anchor_start: u64,
-    base_depth: u32,
-    select_ir: Option<String>,
-    batch: usize,
-    with_key: bool,
-  ) -> Self {
-    Self {
-      core: StreamCore::new(session, path, anchor_start, base_depth),
-      select_ir,
-      select: None,
-      batch,
-      with_key,
-    }
-  }
-}
-
-/// Resolve the path and open its container cursor, pruning to the scan position so
-/// the first yield's read is hot. Shared by `iter` and `walk`.
-async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
-  if let Some(start) = session
-    .locate_at(&core.path, core.anchor_start, core.base_depth)
-    .await?
-  {
-    core.base_value_start = Some(start);
-    core.child_cursor = session.enter_container(start, &mut core.window).await?;
-    if let Some(w) = &core.child_cursor {
-      session.prune_window(&mut core.window, w.next_offset);
-    } else {
-      core.window.clear();
-    }
-  }
-  core.initialized = true;
-  Ok(())
-}
-
-/// Record an array resume point on early termination so a later `get([base, N])`
-/// resumes near the stop point. Arrays only: an object resume_point would claim
-/// its prefix members are tabled, but the streaming path doesn't table them.
-/// No-op before any element boundary is passed.
-fn record_early_break(session: &Session, core: &StreamCore) {
-  if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
-    if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
-      session.store_array_resume_point(
-        core.base_depth,
-        core.anchor_start,
-        &core.path,
-        vs,
-        w.index,
-        w.next_offset,
-      );
-    }
-  }
-}
-
-/// Release the window held by an iterator on early termination (`complete`).
-fn release_core(core: &mut StreamCore) {
-  core.window.clear();
-  core.child_cursor = None;
+/// Options for `iter`. A `#[napi(object)]` so the facade can grow it without
+/// changing the method's arity.
+#[napi(object)]
+pub struct IterArgs {
+  /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
+  pub select_ir: Option<String>,
+  /// Items yielded per iteration.
+  pub batch: f64,
+  /// Yield `[key, value]` tuples instead of bare values.
+  pub with_key: Option<bool>,
 }
 
 #[napi(async_iterator)]
@@ -291,13 +174,6 @@ impl CursorIter {
       session,
       state: Arc::new(AsyncMutex::new(state)),
     }
-  }
-}
-
-fn child_key_json(child: &ChildEntry) -> serde_json::Value {
-  match child {
-    ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
-    ChildEntry::Element { index, .. } => serde_json::Value::Number((*index as u64).into()),
   }
 }
 
@@ -532,6 +408,130 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
       record_early_break(&session, &guard);
       release_core(&mut guard);
       Ok(None)
+    }
+  }
+}
+
+/// `iter`-only state: [`StreamCore`] plus projection, batching, and key-wrapping.
+/// `walk` uses [`StreamCore`] directly.
+struct IterState {
+  core: StreamCore,
+  select_ir: Option<String>,
+  /// Compiled lazily from `select_ir` on first `next()`. `None` yields the whole child.
+  select: Option<CompiledSelect>,
+  batch: usize,
+  with_key: bool,
+}
+
+impl IterState {
+  fn new(
+    session: &Session,
+    path: Vec<Segment>,
+    anchor_start: u64,
+    base_depth: u32,
+    select_ir: Option<String>,
+    batch: usize,
+    with_key: bool,
+  ) -> Self {
+    Self {
+      core: StreamCore::new(session, path, anchor_start, base_depth),
+      select_ir,
+      select: None,
+      batch,
+      with_key,
+    }
+  }
+}
+
+/// State shared by `iter` and `walk`: the lazily-resolved container cursor plus
+/// the byte window carried across yields. Awaits happen with the lock held
+/// (tokio Mutex).
+struct StreamCore {
+  path: Vec<Segment>,
+  anchor_start: u64,
+  /// Document depth of `anchor_start`; children sit at `base_depth + path.len() + 1`.
+  base_depth: u32,
+  initialized: bool,
+  /// Set after first `next()`. `None` if the path didn't resolve or resolved to a
+  /// non-container (iteration yields nothing).
+  child_cursor: Option<ContainerCursor>,
+  /// `value_start` of the base container, once resolved. Where the stream records
+  /// `close`/`child_count`/resume-point array members.
+  base_value_start: Option<u64>,
+  /// Children yielded so far - the child count once iteration runs to the end.
+  yielded: u64,
+  /// At rest holds at most the chunk covering `next_offset` so the next yield's
+  /// first read hits; everything else is pruned per yield, bounding resident
+  /// chunks to ~1 between yields.
+  window: ChunkWindow,
+}
+
+impl StreamCore {
+  fn new(session: &Session, path: Vec<Segment>, anchor_start: u64, base_depth: u32) -> Self {
+    Self {
+      path,
+      anchor_start,
+      base_depth,
+      initialized: false,
+      child_cursor: None,
+      base_value_start: None,
+      yielded: 0,
+      window: session.new_window(),
+    }
+  }
+}
+
+fn map_err(e: SessionError) -> NapiError {
+  NapiError::from_reason(e.to_string())
+}
+
+/// Release the window held by an iterator on early termination (`complete`).
+fn release_core(core: &mut StreamCore) {
+  core.window.clear();
+  core.child_cursor = None;
+}
+
+fn child_key_json(child: &ChildEntry) -> serde_json::Value {
+  match child {
+    ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
+    ChildEntry::Element { index, .. } => serde_json::Value::Number((*index as u64).into()),
+  }
+}
+
+/// Resolve the path and open its container cursor, pruning to the scan position so
+/// the first yield's read is hot. Shared by `iter` and `walk`.
+async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<(), SessionError> {
+  if let Some(start) = session
+    .locate_at(&core.path, core.anchor_start, core.base_depth)
+    .await?
+  {
+    core.base_value_start = Some(start);
+    core.child_cursor = session.enter_container(start, &mut core.window).await?;
+    if let Some(w) = &core.child_cursor {
+      session.prune_window(&mut core.window, w.next_offset);
+    } else {
+      core.window.clear();
+    }
+  }
+  core.initialized = true;
+  Ok(())
+}
+
+/// Record an array resume point on early termination so a later `get([base, N])`
+/// resumes near the stop point. Arrays only: an object resume_point would claim
+/// its prefix members are tabled, but the streaming path doesn't table them.
+/// No-op before any element boundary is passed.
+fn record_early_break(session: &Session, core: &StreamCore) {
+  if let (Some(w), Some(vs)) = (core.child_cursor.as_ref(), core.base_value_start) {
+    if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
+      session.store_array_resume_point(
+        core.base_depth,
+        core.anchor_start,
+        &core.path,
+        vs,
+        w.index,
+        w.next_offset,
+      );
     }
   }
 }

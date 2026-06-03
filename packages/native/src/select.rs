@@ -19,14 +19,14 @@ pub enum CompiledSelect {
   Map(Vec<(String, Vec<Segment>)>),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SelectError {
-  #[error("invalid select JSON: {0}")]
-  Json(String),
-}
-
 impl CompiledSelect {
   pub fn parse(json: &str) -> Result<Self, SelectError> {
     serde_json::from_str(json).map_err(|e| SelectError::Json(e.to_string()))
   }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SelectError {
+  #[error("invalid select JSON: {0}")]
+  Json(String),
 }

@@ -63,34 +63,6 @@ async fn children(
     .await
 }
 
-/// Persisted across `ChunkMiss` retries so a fault mid-count resumes at the
-/// last committed block boundary instead of recounting from the container start.
-struct CountState {
-  /// Next byte to scan: the byte past the opener before the peek, a
-  /// block-boundary commit point from `Partial` after.
-  offset: u64,
-  /// Nesting depth at `offset`, relative to the container being counted.
-  depth: u32,
-  /// String-scan carry at `offset`, threaded across `Partial` commits.
-  carry: ScanCarry,
-  /// Depth-0 commas counted so far across resumes.
-  consumed: u64,
-  /// Set once the container is confirmed non-empty.
-  peeked: bool,
-}
-
-impl CountState {
-  fn new(start: u64) -> Self {
-    Self {
-      offset: start,
-      depth: 0,
-      carry: ScanCarry::default(),
-      consumed: 0,
-      peeked: false,
-    }
-  }
-}
-
 /// Sync step for [`children`]: returns the child count once the container's
 /// close is reached, or surfaces `ChunkMiss` via `?` to fault the next chunk.
 /// `state` carries progress across faults.
@@ -140,6 +112,34 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
         state.depth = 0;
         state.carry = ScanCarry::default();
       }
+    }
+  }
+}
+
+/// Persisted across `ChunkMiss` retries so a fault mid-count resumes at the
+/// last committed block boundary instead of recounting from the container start.
+struct CountState {
+  /// Next byte to scan: the byte past the opener before the peek, a
+  /// block-boundary commit point from `Partial` after.
+  offset: u64,
+  /// Nesting depth at `offset`, relative to the container being counted.
+  depth: u32,
+  /// String-scan carry at `offset`, threaded across `Partial` commits.
+  carry: ScanCarry,
+  /// Depth-0 commas counted so far across resumes.
+  consumed: u64,
+  /// Set once the container is confirmed non-empty.
+  peeked: bool,
+}
+
+impl CountState {
+  fn new(start: u64) -> Self {
+    Self {
+      offset: start,
+      depth: 0,
+      carry: ScanCarry::default(),
+      consumed: 0,
+      peeked: false,
     }
   }
 }
