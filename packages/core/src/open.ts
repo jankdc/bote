@@ -50,9 +50,6 @@ export interface OpenOptions {
 }
 
 export interface Cursor {
-  /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
-  readonly key: string | number | null
-
   hop(...path: Segment[]): Promise<Cursor | null>
 
   has(...path: Segment[]): Promise<boolean>

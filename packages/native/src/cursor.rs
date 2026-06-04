@@ -49,19 +49,11 @@ impl Cursor {
     }
   }
 
-  /// A cursor anchored at an already-resolved `location`. `entry` carries the
-  /// key/index this cursor reports (the path's last segment), `None` for a hop
-  /// over an empty path (which lands back on the anchor, keyless like the root).
-  fn at(
-    session: Arc<Session>,
-    location: ValueLocation,
-    entry: Option<ChildEntry>,
-    depth: u32,
-  ) -> Self {
+  /// A cursor anchored at an already-resolved `location` reached by `hop`.
+  fn at(session: Arc<Session>, location: ValueLocation, depth: u32) -> Self {
     Self {
       session,
       anchor: Some(location),
-      entry,
       depth,
     }
   }
@@ -155,23 +147,7 @@ impl Cursor {
       return Ok(None);
     };
     let depth = self.depth + segments.len() as u32;
-    let entry = match segments.last() {
-      Some(Segment::Member(name)) => Some(ChildEntry::Member {
-        key: name.clone(),
-        location,
-      }),
-      Some(Segment::Element(idx)) => Some(ChildEntry::Element {
-        index: *idx,
-        location,
-      }),
-      None => self.entry.clone(),
-    };
-    Ok(Some(Cursor::at(
-      self.session.clone(),
-      location,
-      entry,
-      depth,
-    )))
+    Ok(Some(Cursor::at(self.session.clone(), location, depth)))
   }
 }
 

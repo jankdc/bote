@@ -6,7 +6,6 @@ export declare class Cursor {
   count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): AsyncIterable<[string, Cursor]>
-  walk(path: Array<string | number>): CursorWalk
   hop(path: Array<string | number>): Promise<Cursor | null>
 }
 
@@ -26,7 +25,9 @@ export declare class CursorIter {
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
  */
-export declare class CursorWalk {}
+export declare class CursorWalk {
+
+}
 
 export declare function heapProfilePeakBytes(): number
 
