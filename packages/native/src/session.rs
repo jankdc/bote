@@ -23,7 +23,8 @@ use crate::cache::StructuralIndex;
 use crate::chunks::{ChunkMiss, ChunkReader, ChunkWindow, ReaderError};
 use crate::path::Segment;
 use crate::resolve::{
-  self, ChildEntry, ContainerCursor, ContainerKind, ResolveState, ValueLocation,
+  self, ChildEntry, ContainerCursor, ContainerKind, PathFault, ResolveState, Resolved,
+  ValueLocation,
 };
 use crate::select::SelectError;
 use crate::source::ByteStream;
@@ -46,6 +47,11 @@ pub enum SessionError {
   Json(#[from] serde_json::Error),
   #[error(transparent)]
   Select(#[from] SelectError),
+  /// A path that contradicts the document shape. The `bote.PathError:` prefix is
+  /// a sentinel the facade matches to rethrow a `PathError` carrying the path.
+  /// TODO: Improve this as this is a bit hacky
+  #[error("bote.PathError: {0}")]
+  Path(PathFault),
 }
 
 pub struct Session {
@@ -112,12 +118,26 @@ impl Session {
     base_depth: u32,
   ) -> Result<bool, SessionError> {
     let mut window = self.new_window();
-    Ok(
-      self
-        .run_resolve(path, anchor_start, base_depth, &mut window)
-        .await?
-        .is_some(),
-    )
+    // Locate-only (presence), not run_resolve (extent): `has` answers presence
+    // structurally and never validates the target's bytes, so a malformed leaf
+    // value (e.g. an unterminated string) at the target still reports `true`. A
+    // shape-contradicting path is "not present", not an error.
+    match self
+      .run_locate(path, anchor_start, base_depth, &mut window)
+      .await
+    {
+      Ok(Some(start)) => {
+        // Confirm a value byte actually exists at the located start (an empty or
+        // truncated document has none) without walking the value's extent, so a
+        // malformed leaf (e.g. an unterminated string) at the target still
+        // reports present. peek errors with UnexpectedEof when there's no byte.
+        self.peek_container_kind(start, &mut window).await?;
+        Ok(true)
+      }
+      Ok(None) => Ok(false),
+      Err(SessionError::Path(_)) => Ok(false),
+      Err(e) => Err(e),
+    }
   }
 
   pub async fn get_at(
@@ -249,7 +269,7 @@ impl Session {
       self.array_interval,
     );
     let min_reachable = AtomicU64::new(start);
-    let result = self
+    let resolved = self
       .drive(window, &min_reachable, doubling_burst(), |walker| {
         let r = resolve::resolve_step(walker, path, &mut state);
         min_reachable.store(state.min_reachable(), Ordering::Relaxed);
@@ -263,7 +283,11 @@ impl Session {
         .unwrap()
         .apply_scan_record(base_depth, anchor_start, path, &scan_record);
     }
-    Ok(result)
+    match resolved {
+      Resolved::Found(start) => Ok(Some(start)),
+      Resolved::Absent => Ok(None),
+      Resolved::NotNavigable(fault) => Err(SessionError::Path(fault)),
+    }
   }
 
   /// Resolve `path` to a full `[start, end)` byte range.

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open, DEFAULT_ITER_BATCH } from '../src/index.ts'
+import { open, DEFAULT_ITER_BATCH, MAX_ITER_BATCH, PathError } from '../src/index.ts'
 import { memorySource, enc, ORDERS } from './fixtures.ts'
 
 // iter_ iteration over containers, plus the select (projection) and batch options.
@@ -134,6 +134,42 @@ test('iter_select_rejects_empty_sub_path', async (t) => {
   assert.throws(() => db.iter('orders', { select: { whole: [] } }), RangeError)
 })
 
+test('iter_select_rejects_non_path_values', async (t) => {
+  // A non-segment/path select (null, boolean) or a field mapped to one used to
+  // leak a raw `Object.entries(null)` / `Cannot read properties` deref or a
+  // native serde error. The facade rejects them with a clean TypeError.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  // @ts-expect-error select must be a segment, path, or field map
+  assert.throws(() => db.iter('orders', { select: null }), TypeError)
+  // @ts-expect-error
+  assert.throws(() => db.iter('orders', { select: true }), TypeError)
+  // @ts-expect-error a field value must be a segment or path
+  assert.throws(() => db.iter('orders', { select: { a: null } }), TypeError)
+  // @ts-expect-error a nested object is not a path
+  assert.throws(() => db.iter('orders', { select: { a: { nested: 1 } } }), TypeError)
+})
+
+test('iter_rejects_non_boolean_withIndex', async (t) => {
+  // A non-boolean withIndex used to surface a raw napi error leaking the internal
+  // field name 'withKey'; the facade rejects it with a TypeError naming withIndex.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  // @ts-expect-error withIndex must be a boolean
+  assert.throws(() => db.iter('orders', { withIndex: 'yes' }), /iter: withIndex must be a boolean/)
+})
+
+test('iter_rejects_invalid_onInvalid', async (t) => {
+  // onInvalid was type-only: a typo like 'SKIP' silently fell through to 'throw'.
+  // It is now runtime-validated like its sibling knobs.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  // @ts-expect-error onInvalid must be 'throw' or 'skip'
+  assert.throws(() => db.iter('orders', { onInvalid: 'SKIP' }), /onInvalid must be/)
+  // @ts-expect-error
+  assert.throws(() => db.iter('orders', { onInvalid: 'bogus' }), /onInvalid must be/)
+})
+
 test('iter_batch_override_yields_arrays', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
@@ -148,6 +184,18 @@ test('iter_batch_rejects_non_positive', async (t) => {
   assert.throws(() => db.iter('orders', { batch: 0 }), RangeError)
   assert.throws(() => db.iter('orders', { batch: -1 }), RangeError)
   assert.throws(() => db.iter('orders', { batch: 1.5 }), RangeError)
+})
+
+test('iter_batch_rejects_above_max', async (t) => {
+  // An unbounded batch reserves a native Vec of that capacity, so a huge value
+  // could over-allocate or abort the process. The facade caps it first.
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.throws(() => db.iter('orders', { batch: MAX_ITER_BATCH + 1 }), RangeError)
+  assert.throws(() => db.iter('orders', { batch: 1e9 }), RangeError)
+  assert.throws(() => db.iter('orders', { batch: 2 ** 53 }), RangeError)
+  // The cap itself is accepted (constructing the iterator must not throw).
+  assert.doesNotThrow(() => db.iter('orders', { batch: MAX_ITER_BATCH }))
 })
 
 test('iter_withIndex_array_yields_index_value_tuples', async () => {
@@ -235,19 +283,21 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   ])
 })
 
-test('iter_non_container_yields_no_batches', async () => {
-  // Empty result means *zero* yields, not a single empty batch - keeps the
-  // happy-path consumer (`for await (const b of ...) for (const v of b)`)
-  // from observing a meaningless `[]`.
+test('iter_scalar_target_throws_PathError', async () => {
+  // A container operation aimed at a present scalar is a shape error, surfaced
+  // on first iteration (like the iter-on-object / walk-on-array gates).
   const cursor = await open(memorySource(enc('{"scalar":42}')))
-  const batches: unknown[][] = []
-  for await (const b of cursor.iter('scalar')) batches.push(b)
-  assert.deepEqual(batches, [])
+  await assert.rejects(
+    (async () => {
+      for await (const _ of cursor.iter('scalar')) void _
+    })(),
+    PathError,
+  )
 })
 
 test('iter_missing_path_yields_no_batches', async () => {
-  // Same total / non-throwing semantics as get/has/count: an unresolved path
-  // yields zero batches.
+  // A clean miss (unresolved path) yields zero batches - the not-found sentinel
+  // for iter, distinct from a present-scalar target which throws.
   const cursor = await open(memorySource(enc('{"xs":[1,2]}')))
   const batches: unknown[][] = []
   for await (const b of cursor.iter('nope')) batches.push(b)

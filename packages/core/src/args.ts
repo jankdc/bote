@@ -59,8 +59,14 @@ export function serializeSelect(select: Segment | Path | Record<string, Segment 
     }
     return JSON.stringify({ one: select })
   }
+  if (select === null || typeof select !== 'object') {
+    throw new TypeError(`iter: select must be a segment, path, or field map, got ${describeSelect(select)}`)
+  }
   const entries = Object.entries(select).map(([k, sub]) => {
     const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
+    if (!Array.isArray(path)) {
+      throw new TypeError(`iter: select field ${JSON.stringify(k)} must be a segment or path, got ${describeSelect(sub)}`)
+    }
     validatePath(path)
     if (path.length === 0) {
       throw new RangeError(`iter: select field ${JSON.stringify(k)} sub-path must have at least one segment`)
@@ -71,4 +77,9 @@ export function serializeSelect(select: Segment | Path | Record<string, Segment 
     throw new RangeError('iter: select must have at least one field')
   }
   return JSON.stringify({ map: entries })
+}
+
+function describeSelect(value: unknown): string {
+  if (value === null) return 'null'
+  return Array.isArray(value) ? 'array' : typeof value
 }

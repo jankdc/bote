@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, PathError } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // walk_ yields a [key, cursor] pair per object member: the key is the member name
@@ -40,12 +40,14 @@ test('walk_on_array_target_throws', async () => {
   )
 })
 
-test('walk_non_container_yields_empty', async () => {
-  // A scalar target yields nothing (not an error), matching iter and get/has/count.
+test('walk_scalar_target_throws_PathError', async () => {
   const cursor = await open(memorySource(enc('{"scalar":42}')))
-  const seen: unknown[] = []
-  for await (const [key] of cursor.walk('scalar')) seen.push(key)
-  assert.deepEqual(seen, [])
+  await assert.rejects(
+    (async () => {
+      for await (const _ of cursor.walk('scalar')) void _
+    })(),
+    PathError,
+  )
 })
 
 test('walk_subcursor_key_and_get_resolve_against_anchor', async () => {

@@ -87,10 +87,23 @@ test('schema_get_async_awaits_validator', async (t) => {
   await assert.rejects(() => cursor.get('meta', 'enabled', asyncStringSchema()), ValidationError)
 })
 
-test('schema_get_missing_path_returns_undefined_without_validating', async (t) => {
+test('schema_get_missing_path_runs_schema_on_undefined', async (t) => {
   const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
   t.after(() => cursor.close())
-  assert.equal(await cursor.get('does', 'not', 'exist', userSchema()), undefined)
+  await assert.rejects(() => cursor.get('does', 'not', 'exist', userSchema()), ValidationError)
+})
+
+test('schema_get_missing_path_passes_optional_schema', async (t) => {
+  const optional: StandardSchemaV1<unknown, undefined> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (value) => (value === undefined ? { value: undefined } : { issues: [{ message: 'expected absent' }] }),
+    },
+  }
+  const cursor = await open(memorySource(enc(USERS_WITH_INVALID)))
+  t.after(() => cursor.close())
+  assert.equal(await cursor.get('does', 'not', 'exist', optional), undefined)
 })
 
 test('schema_get_throws_on_invalid', async (t) => {

@@ -16,7 +16,7 @@ use napi_derive::napi;
 
 use crate::chunks::ChunkWindow;
 use crate::path::{self, Segment};
-use crate::resolve::{ChildEntry, ContainerCursor, ContainerKind, ValueLocation};
+use crate::resolve::{ChildEntry, ContainerCursor, ContainerKind, PathFault, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 
@@ -220,9 +220,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         if let Some(w) = guard.core.child_cursor.as_ref() {
           if w.kind == ContainerKind::Object {
             release_core(&mut guard.core);
-            return Err(NapiError::from_reason(
-              "iter target is an object; use walk() to iterate object members".to_string(),
-            ));
+            return Err(map_err(SessionError::Path(PathFault::IterOnObject)));
           }
         }
       }
@@ -367,9 +365,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         if let Some(w) = guard.child_cursor.as_ref() {
           if w.kind == ContainerKind::Array {
             release_core(&mut guard);
-            return Err(NapiError::from_reason(
-              "walk target is an array; use iter() to iterate array elements".to_string(),
-            ));
+            return Err(map_err(SessionError::Path(PathFault::WalkOnArray)));
           }
         }
       }
@@ -539,6 +535,8 @@ async fn locate_and_enter(session: &Session, core: &mut StreamCore) -> Result<()
       session.prune_window(&mut core.window, w.next_offset);
     } else {
       core.window.clear();
+      core.initialized = true;
+      return Err(SessionError::Path(PathFault::ScalarTarget));
     }
   }
   core.initialized = true;

@@ -2,9 +2,24 @@ import { open as openNative, type Cursor as NativeCursor } from '@botejs/native'
 
 import { validatePath } from './path.ts'
 import type { Source, SourceReader } from './sources.ts'
-import { runStandardSchema, validateItem, type Path, type Segment, type StandardSchemaV1 } from './validate.ts'
 
-import { splitArgs, serializeSelect, normalizeIterTail, type IterOptions, type VariadicPathArgs } from './args.ts'
+import {
+  runStandardSchema,
+  validateItem,
+  PathError,
+  type Path,
+  type Segment,
+  type StandardSchemaV1,
+} from './validate.ts'
+
+import {
+  splitArgs,
+  isSchema,
+  serializeSelect,
+  normalizeIterTail,
+  type IterOptions,
+  type VariadicPathArgs,
+} from './args.ts'
 
 type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : never
 
@@ -17,6 +32,7 @@ export type WalkEntry = [key: string, cursor: Cursor]
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
+export const MAX_ITER_BATCH = 1_000_000
 
 export interface OpenOptions {
   /**
@@ -99,7 +115,7 @@ export async function open(source: Source, options?: OpenOptions): Promise<RootC
     ['objectMemberCap', objectMemberCap],
     ['arrayIndexInterval', arrayIndexInterval],
   ] as const) {
-    if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
       throw new RangeError(`open: ${name} must be a non-negative integer (0 disables), got ${value}`)
     }
   }
@@ -107,6 +123,15 @@ export async function open(source: Source, options?: OpenOptions): Promise<RootC
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES
   let native: NativeCursor
   try {
+    if (!Number.isInteger(reader.size) || reader.size < 0) {
+      throw new RangeError(`open: source size must be a non-negative integer, got ${reader.size}`)
+    }
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) {
+      throw new RangeError(`open: chunkBytes must be a positive integer, got ${chunkBytes}`)
+    }
+    if (chunkBytes % 64 !== 0) {
+      throw new RangeError(`open: chunkBytes must be a multiple of 64, got ${chunkBytes}`)
+    }
     native = openNative({
       size: reader.size,
       chunkBytes,
@@ -116,16 +141,22 @@ export async function open(source: Source, options?: OpenOptions): Promise<RootC
       read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
     })
   } catch (err) {
-    await closeReader(reader)
+    // Don't let a failing cleanup mask the original open error; attach it as cause.
+    try {
+      await closeReader(reader)
+    } catch (closeErr) {
+      if (err instanceof Error) (err as { cause?: unknown }).cause ??= closeErr
+    }
     throw err
   }
-  let closed = false
+
+  const state: CursorState = { closed: false }
   const close = async (): Promise<void> => {
-    if (closed) return
-    closed = true
+    if (state.closed) return
+    state.closed = true
     await closeReader(reader)
   }
-  return Object.assign(wrap(native), {
+  return Object.assign(wrap(native, state), {
     close,
     [Symbol.asyncDispose]: close,
   }) as RootCursor
@@ -135,66 +166,138 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
-function wrap(native: NativeCursor): Cursor {
+/** Sentinel the native layer prefixes onto shape-contradiction errors (see
+ *  `session.rs` `SessionError::Path`). */
+const NATIVE_PATH_ERROR_PREFIX = 'bote.PathError: '
+
+/** Rethrow a native shape-contradiction error as a `PathError` carrying the
+ *  caller's path; pass anything else through unchanged. */
+function asPathError(err: unknown, path: Path): unknown {
+  if (err instanceof Error && !(err instanceof PathError) && err.message.startsWith(NATIVE_PATH_ERROR_PREFIX)) {
+    return new PathError(err.message.slice(NATIVE_PATH_ERROR_PREFIX.length), path)
+  }
+  return err
+}
+
+type CursorState = { closed: boolean }
+
+/** Throw a uniform error for any operation on a closed cursor, so use-after-close
+ *  is one defined contract regardless of source (some readers' reads keep working
+ *  after close, others throw an opaque I/O error). */
+function ensureOpen(state: CursorState): void {
+  if (state.closed) throw new Error('bote: cursor is closed')
+}
+
+function wrap(native: NativeCursor, state: CursorState): Cursor {
   const cursor = {
+    async hop(...path: Segment[]): Promise<Cursor | null> {
+      ensureOpen(state)
+      validatePath(path)
+      let child: NativeCursor | null
+      try {
+        child = await native.hop(path)
+      } catch (err) {
+        throw asPathError(err, path)
+      }
+      return child ? wrap(child, state) : null
+    },
     async has(...args: VariadicPathArgs<StandardSchemaV1>): Promise<boolean> {
+      ensureOpen(state)
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
+      if (schema !== undefined && !isSchema(schema)) {
+        throw new TypeError('has: expected a Standard Schema as the trailing argument')
+      }
       if (!schema) return native.has(path)
       if (!(await native.has(path))) return false
       const result = await validateItem(schema, await native.get(path), path, 'skip')
       return !('skip' in result)
     },
     async get(...args: VariadicPathArgs<StandardSchemaV1>): Promise<unknown> {
+      ensureOpen(state)
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
-      const value = await native.get(path)
-      if (!schema || value === undefined) return value
+      if (schema !== undefined && !isSchema(schema)) {
+        throw new TypeError('get: expected a Standard Schema as the trailing argument')
+      }
+      let value: unknown
+      try {
+        value = await native.get(path)
+      } catch (err) {
+        throw asPathError(err, path)
+      }
+      if (!schema) return value
       return runStandardSchema(schema, value, path)
     },
-    count(...path: Segment[]): Promise<number> {
+    async count(...path: Segment[]): Promise<number> {
+      ensureOpen(state)
       validatePath(path)
-      return native.count(path)
+      try {
+        return await native.count(path)
+      } catch (err) {
+        throw asPathError(err, path)
+      }
     },
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): AsyncIterable<unknown[]> {
+      ensureOpen(state)
       const { path, tail } = splitArgs<StandardSchemaV1 | IterOptions>(args)
       const { schema, select, batch, onInvalid, withIndex } = normalizeIterTail(tail)
-      if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0)) {
-        throw new RangeError(`iter: batch must be a positive integer, got ${batch}`)
+      if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0 || batch > MAX_ITER_BATCH)) {
+        throw new RangeError(`iter: batch must be an integer in 1..=${MAX_ITER_BATCH}, got ${batch}`)
+      }
+      if (withIndex !== undefined && typeof withIndex !== 'boolean') {
+        throw new TypeError(`iter: withIndex must be a boolean, got ${typeof withIndex}`)
+      }
+      if (onInvalid !== undefined && onInvalid !== 'throw' && onInvalid !== 'skip') {
+        throw new RangeError(`iter: onInvalid must be "throw" or "skip", got ${JSON.stringify(onInvalid)}`)
       }
       const resolvedBatch = batch ?? DEFAULT_ITER_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
       const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: withIndex })
-      if (!schema) return inner as AsyncIterable<unknown[]>
+      if (!schema) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            try {
+              for await (const b of inner) yield b
+            } catch (err) {
+              throw asPathError(err, path)
+            }
+          },
+        } as AsyncIterable<unknown[]>
+      }
       const policy = onInvalid ?? 'throw'
       return {
         async *[Symbol.asyncIterator]() {
           let i = 0
-          for await (const b of inner) {
-            const out: unknown[] = []
-            for (const v of b as unknown[]) {
-              const value = withIndex ? (v as [IterIndex, unknown])[1] : v
-              const result = await validateItem(schema, value, [...path, i++], policy)
-              if ('skip' in result) continue
-              out.push(withIndex ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
+          try {
+            for await (const b of inner) {
+              const out: unknown[] = []
+              for (const v of b as unknown[]) {
+                const value = withIndex ? (v as [IterIndex, unknown])[1] : v
+                const result = await validateItem(schema, value, [...path, i++], policy)
+                if ('skip' in result) continue
+                out.push(withIndex ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
+              }
+              yield out
             }
-            yield out
+          } catch (err) {
+            throw asPathError(err, path)
           }
         },
       }
     },
     walk(...path: Segment[]): AsyncIterable<WalkEntry> {
+      ensureOpen(state)
       validatePath(path)
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const [key, child] of native.walk(path)) {
-            yield [key, wrap(child)]
+          try {
+            for await (const [key, child] of native.walk(path)) {
+              yield [key, wrap(child, state)]
+            }
+          } catch (err) {
+            throw asPathError(err, path)
           }
         },
       }
-    },
-    async hop(...path: Segment[]): Promise<Cursor | null> {
-      validatePath(path)
-      const child = await native.hop(path)
-      return child ? wrap(child) : null
     },
   }
 

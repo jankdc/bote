@@ -272,4 +272,5 @@ test('knobs_open_rejects_invalid_cache_knobs', async () => {
   await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: 1.5 }), RangeError)
   await assert.rejects(() => open(memorySource(enc('{}')), { arrayIndexInterval: -1 }), RangeError)
   await assert.rejects(() => open(memorySource(enc('{}')), { arrayIndexInterval: Number.NaN }), RangeError)
+  await assert.rejects(() => open(memorySource(enc('{}')), { indexCacheEntries: 1e21 }), RangeError)
 })

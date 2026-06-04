@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, PathError } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 // Point lookups: get_ (value retrieval), has_ (presence). Path segments are
@@ -92,14 +92,26 @@ test('get_missing_returns_undefined_distinct_from_json_null', async () => {
   assert.equal(await cursor.has('b'), true)
 })
 
-test('get_type_mismatch_is_missing_not_error', async (t) => {
-  // Member-name against an array, or numeric index against an object, both
-  // resolve to nothing rather than throwing - same total / non-throwing
-  // shape as `has` and `count`.
+test('has_wrong_segment_kind_is_false_not_error', async (t) => {
+  // Member-name against an array, or numeric index against an object: `has` is
+  // the total presence predicate, so a shape-contradicting path is `false`, not
+  // a PathError (unlike get/count/hop/iter/walk, which throw - see below).
   const cursor = await open(memorySource(enc('{"xs":[10,20],"obj":{"k":"v"}}')))
   t.after(() => cursor.close())
   assert.equal(await cursor.has('xs', 'name'), false)
   assert.equal(await cursor.has('obj', 0), false)
+})
+
+test('get_through_scalar_and_wrong_kind_throw_PathError', async (t) => {
+  // A path that contradicts the shape throws; a clean miss / present scalar do not.
+  const cursor = await open(memorySource(enc('{"a":1,"xs":[10,20],"obj":{"k":"v"}}')))
+  t.after(() => cursor.close())
+  await assert.rejects(() => cursor.get('a', 'b'), PathError) // traverse through scalar
+  await assert.rejects(() => cursor.get('xs', 'name'), PathError) // member into array
+  await assert.rejects(() => cursor.get('obj', 0), PathError) // index into object
+  // Contrast: a clean miss is undefined, and a present scalar returns its value.
+  assert.equal(await cursor.get('missing'), undefined)
+  assert.equal(await cursor.get('a'), 1)
 })
 
 test('get_rejects_fractional_negative_nan_and_non_string_number_segments', async (t) => {
@@ -113,6 +125,19 @@ test('get_rejects_fractional_negative_nan_and_non_string_number_segments', async
   await assert.rejects(() => cursor.get('xs', Number.NaN), TypeError)
   // @ts-expect-error a non-string/non-number segment is rejected
   await assert.rejects(() => cursor.get('xs', null), TypeError)
+})
+
+test('get_and_has_reject_non_schema_trailing_object', async (t) => {
+  // A trailing object is only ever a Standard Schema for get/has; a plain object
+  // must throw a clean TypeError rather than crashing on `obj['~standard'].validate`.
+  const cursor = await open(memorySource(enc('{"a":1}')))
+  t.after(() => cursor.close())
+  // @ts-expect-error a non-schema object is not a valid trailing argument
+  await assert.rejects(() => cursor.get('a', {}), TypeError)
+  // @ts-expect-error
+  await assert.rejects(() => cursor.get('a', { foo: 1 }), TypeError)
+  // @ts-expect-error
+  await assert.rejects(() => cursor.has('a', {}), TypeError)
 })
 
 test('has_presence_and_absence', async () => {

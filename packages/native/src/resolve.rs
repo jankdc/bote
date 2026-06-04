@@ -1,9 +1,7 @@
 //! Path evaluator.
 //!
 //! Walks a [`&[Segment]`] over a scan-aligned [`Walker`], descending one segment
-//! at a time into objects (by member name) and arrays (by index). Returns the
-//! byte range covering the resolved value or `None`, when any segment along the
-//! path doesn't address an existing member.
+//! at a time into objects (by member name) and arrays (by index).
 
 use crate::path::Segment;
 use crate::simd::ScanCarry;
@@ -14,7 +12,7 @@ pub fn resolve_step(
   walker: &mut Walker,
   path: &[Segment],
   state: &mut ResolveState,
-) -> Result<Option<u64>, TraverseError> {
+) -> Result<Resolved, TraverseError> {
   // Destructure for disjoint field borrows: `segment_scan` and `scan_record` are
   // mutated together below. The `Copy` config fields are read out first.
   let record_objects = state.record_objects;
@@ -58,7 +56,11 @@ pub fn resolve_step(
         let kind = match b {
           b'{' => ContainerKind::Object,
           b'[' => ContainerKind::Array,
-          _ => return Ok(None),
+          _ => {
+            return Ok(Resolved::NotNavigable(PathFault::ThroughScalar {
+              segment: *segment_idx,
+            }))
+          }
         };
         let ls = SegmentScan {
           kind,
@@ -97,9 +99,11 @@ pub fn resolve_step(
         array_stride,
         if array_stride > 0 { cs } else { None },
       )?,
-      // Type mismatch (member into array, index into object) is a miss, not an
-      // error - mirrors RFC 6901, where `/0` against an object resolves to nothing.
-      _ => return Ok(None),
+      _ => {
+        return Ok(Resolved::NotNavigable(PathFault::WrongKind {
+          segment: *segment_idx,
+        }))
+      }
     };
     match descend {
       Some(vs) => {
@@ -107,10 +111,10 @@ pub fn resolve_step(
         *segment_idx += 1;
         *segment_scan = None;
       }
-      None => return Ok(None),
+      None => return Ok(Resolved::Absent),
     }
   }
-  Ok(Some(*start))
+  Ok(Resolved::Found(*start))
 }
 
 impl ResolveState {
@@ -585,6 +589,59 @@ fn next_array_element(
   }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFault {
+  /// A segment tried to descend into a value that isn't a container.
+  ThroughScalar { segment: usize },
+  /// A member-name segment addressed an array, or an index segment an object.
+  WrongKind { segment: usize },
+  /// A container operation (`count`/`iter`/`walk`) was aimed at a scalar target.
+  ScalarTarget,
+  /// `iter` was aimed at an object (steer the caller to `walk`).
+  IterOnObject,
+  /// `walk` was aimed at an array (steer the caller to `iter`).
+  WalkOnArray,
+}
+
+impl std::fmt::Display for PathFault {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::ThroughScalar { segment } => {
+        write!(
+          f,
+          "path traverses a non-container value at segment {segment}"
+        )
+      }
+      Self::WrongKind { segment } => {
+        write!(
+          f,
+          "path segment {segment} does not match the container kind"
+        )
+      }
+      Self::ScalarTarget => write!(f, "target value is not a container"),
+      Self::IterOnObject => write!(
+        f,
+        "iter target is an object; use walk() to iterate object members"
+      ),
+      Self::WalkOnArray => write!(
+        f,
+        "walk target is an array; use iter() to iterate array elements"
+      ),
+    }
+  }
+}
+
+/// Outcome of resolving a path to its value's start offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved {
+  /// The resolved value's start offset.
+  Found(u64),
+  /// A clean miss: a well-formed path addressed a member/index that isn't there.
+  Absent,
+  /// The path contradicts the document shape; see [`PathFault`].
+  NotNavigable(PathFault),
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -607,7 +664,10 @@ mod tests {
 
   fn resolve_once(win: &ChunkWindow, path: &[Segment], state: &mut ResolveState) -> Option<u64> {
     let mut w = Walker::new(win);
-    resolve_step(&mut w, path, state).expect("all chunks resident: no miss, no error")
+    match resolve_step(&mut w, path, state).expect("all chunks resident: no miss, no error") {
+      Resolved::Found(off) => Some(off),
+      Resolved::Absent | Resolved::NotNavigable(_) => None,
+    }
   }
 
   fn member(name: &str) -> Segment {

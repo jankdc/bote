@@ -14,8 +14,9 @@ use crate::simd::ScanCarry;
 use crate::walker::{CommaStop, TraverseError, Walker};
 
 /// Count the children of the container `path` resolves to, with no
-/// materialization. A missing path or a non-container value is `0` (total and
-/// non-throwing, like `has`).
+/// materialization. A clean miss (missing key / OOB index) is `0`; a present
+/// scalar target is a [`PathFault::ScalarTarget`](crate::resolve::PathFault)
+/// error (a container operation can't apply to a scalar).
 pub async fn at(
   session: &Session,
   path: &[Segment],
@@ -36,7 +37,7 @@ pub async fn at(
     return Ok(0);
   };
   let Some(cursor) = session.enter_container(start, &mut q.window).await? else {
-    return Ok(0);
+    return Err(SessionError::Path(crate::resolve::PathFault::ScalarTarget));
   };
   let kind = cursor.kind;
   let count = children(session, cursor.next_offset, &mut q.window).await?;
