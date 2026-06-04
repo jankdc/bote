@@ -6,6 +6,8 @@ export declare class Cursor {
   count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): AsyncIterable<[string, Cursor]>
+  walk(path: Array<string | number>): CursorWalk
+  hop(path: Array<string | number>): Promise<Cursor | null>
 }
 
 /**
@@ -55,14 +57,7 @@ export interface IterArgs {
  *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
  *   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
  */
-export declare function open(source: {
-  size: number
-  chunkBytes: number
-  indexCacheEntries?: number
-  objectMemberCap?: number
-  arrayIndexInterval?: number
-  read: (args: ReadArgs) => Promise<Uint8Array>
-}): Cursor
+export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

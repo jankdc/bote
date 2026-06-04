@@ -66,6 +66,23 @@ for await (const [name, account] of cursor.walk()) {
 
 see [`recursive.js`](./examples/recursive.js) for advanced use-cases.
 
+## hopping
+
+`hop` resolves a path once and hands back a **cursor** anchored at that value (or `null` if the path isn't there):
+
+```ts
+// e.g. { report: { sections: [{ rows: [...] }, ...] } }
+await using cursor = await open(fromFile('./report.json'))
+
+const section = await cursor.hop('report', 'sections', 0)
+if (section) {
+  console.log(await section.count('rows'))
+  for await (const rows of section.iter('rows')) {
+    console.log(rows)
+  }
+}
+```
+
 ## validation
 
 `get`, and `iter` takes a [Standard Schema](https://standardschema.dev) validator as their last argument (for `iter`, can also be passed in an `options` object). the value is validated and the return type is inferred from the schema, so reads come back typed instead of `unknown`:
