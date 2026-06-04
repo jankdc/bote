@@ -1,0 +1,29 @@
+import { open, fromFile } from '@botejs/core'
+import { User } from './schemas'
+
+await using cursor = await open(fromFile('./users.json'))
+
+// pass an options object as the last argument to tune what comes back.
+for await (const users of cursor.iter('users', {
+  // how many items are materialised and yielded per step. larger batches read
+  // fewer times but hold more in memory at once. (number, default: native)
+  batch: 100,
+  // project a sub-path out of each item instead of the whole value. a single
+  // segment/path narrows to one value; a record reshapes each item into
+  // { field: value }, scanning only those paths.
+  // (Segment | Path | Record<string, Path>, default: none)
+  select: { id: 'id', email: ['contact', 'email'] },
+  // validate each item (after select) and infer its type. see validation below.
+  // (Standard Schema, default: none)
+  schema: User,
+  // what to do with an item that fails schema: surface the error, or silently
+  // drop it from the batch. ('throw' | 'skip', default: 'throw')
+  onInvalid: 'skip',
+  // yield [index, value] tuples instead of bare values, where index is the
+  // element's zero-based position in the source array. (boolean, default: false)
+  withIndex: true,
+})) {
+  for (const [index, user] of users) {
+    console.log(index, user.id, user.email)
+  }
+}
