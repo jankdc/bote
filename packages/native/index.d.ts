@@ -3,7 +3,12 @@
 export declare class Cursor {
   has(path: Array<string | number>): Promise<boolean>
   get(path: Array<string | number>): Promise<unknown>
-  get key(): string | number | null
+  /**
+   * The object-member name this cursor was yielded under by `walk`; `None` for the
+   * root cursor. Internal: the facade folds it into the `[key, cursor]` walk entry
+   * rather than re-exposing it on the public `Cursor`.
+   */
+  get key(): string | null
   count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): CursorWalk

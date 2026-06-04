@@ -24,7 +24,7 @@ use crate::session::{Session, SessionError};
 pub struct Cursor {
   session: Arc<Session>,
   anchor: Option<ValueLocation>,
-  /// The child entry `walk` yielded this cursor as (key/index + location).
+  /// The child entry `walk` yielded this cursor as (member key + location).
   /// `None` for the root cursor.
   entry: Option<ChildEntry>,
   /// Document-tree depth of this cursor's anchor (root = 0). Threaded to the cache
@@ -87,12 +87,14 @@ impl Cursor {
       .map_err(map_err)
   }
 
+  /// The object-member name this cursor was yielded under by `walk`; `None` for the
+  /// root cursor. Internal: the facade folds it into the `[key, cursor]` walk entry
+  /// rather than re-exposing it on the public `Cursor`.
   #[napi(getter)]
-  pub fn key(&self) -> Option<Either<String, u32>> {
+  pub fn key(&self) -> Option<String> {
     match &self.entry {
-      None => None,
-      Some(ChildEntry::Member { key, .. }) => Some(Either::A(key.clone())),
-      Some(ChildEntry::Element { index, .. }) => Some(Either::B(*index as u32)),
+      Some(ChildEntry::Member { key, .. }) => Some(key.clone()),
+      _ => None,
     }
   }
 
@@ -348,6 +350,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         locate_and_enter(&session, &mut guard)
           .await
           .map_err(map_err)?;
+        if let Some(w) = guard.child_cursor.as_ref() {
+          if w.kind == ContainerKind::Array {
+            release_core(&mut guard);
+            return Err(NapiError::from_reason(
+              "walk target is an array; use iter() to iterate array elements".to_string(),
+            ));
+          }
+        }
       }
       let StreamCore {
         child_cursor,
@@ -371,13 +381,13 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
       session.prune_window(window, child_cursor.next_offset);
       let Some(child) = entry else {
         // Exhausted: child_cursor sits AT the close. Record child count + close on
-        // the base node - works for both object and array bases.
+        // the base object (walk only ever runs over objects; arrays gated above).
         if let Some(vs) = *base_value_start {
           session.store_child_count(
             base_depth,
             *anchor_start,
             path,
-            child_cursor.kind,
+            ContainerKind::Object,
             vs,
             *yielded,
           );
@@ -385,7 +395,7 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
             base_depth,
             *anchor_start,
             path,
-            child_cursor.kind,
+            ContainerKind::Object,
             vs,
             child_cursor.next_offset + 1,
           );
@@ -402,10 +412,8 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
     _value: Option<Self::Return>,
   ) -> impl std::future::Future<Output = napi::Result<Option<Self::Yield>>> + Send + 'static {
     let state = self.state.clone();
-    let session = self.session.clone();
     async move {
       let mut guard = state.lock().await;
-      record_early_break(&session, &guard);
       release_core(&mut guard);
       Ok(None)
     }
@@ -573,6 +581,34 @@ mod tests {
     .unwrap()
   }
 
+  /// `{"items":{"k0000":{"name":"i0000",...}, ...}}` - an object whose members
+  /// span many chunks, so a walk over `items` pins a real frontier chunk.
+  fn object_doc(items: usize) -> Vec<u8> {
+    let mut doc = String::from("{\"items\":{");
+    for i in 0..items {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!(
+        "\"k{i:04}\":{{\"name\":\"i{i:04}\",\"total\":{i}}}"
+      ));
+    }
+    doc.push_str("}}");
+    doc.into_bytes()
+  }
+
+  fn object_session(items: usize, chunk_bytes: usize) -> Arc<Session> {
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(object_doc(items)));
+    Session::new(
+      source,
+      chunk_bytes,
+      crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
+      crate::session::DEFAULT_OBJECT_MEMBER_CAP,
+      crate::session::DEFAULT_ARRAY_INDEX_INTERVAL,
+    )
+    .unwrap()
+  }
+
   /// One burst of chunks plus a small slack is the resident-window bound.
   fn window_bound() -> usize {
     MAX_BURST as usize + 4
@@ -580,14 +616,14 @@ mod tests {
 
   #[tokio::test]
   async fn pins_walk_released_on_complete() {
-    let s = session(500, 256);
+    let s = object_session(500, 256);
     let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
     for _ in 0..3 {
       assert!(w.next(None).await.unwrap().is_some());
     }
     assert!(
       !w.state.lock().await.window.is_empty(),
-      "walk should hold a resume_point chunk between yields"
+      "walk should hold the frontier chunk between yields"
     );
 
     w.complete(None).await.unwrap();
@@ -605,7 +641,7 @@ mod tests {
 
   #[tokio::test]
   async fn pins_walk_safe_when_child_escapes() {
-    let s = session(500, 256);
+    let s = object_session(500, 256);
     let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
     let child = w.next(None).await.unwrap().expect("first child");
 
@@ -621,7 +657,7 @@ mod tests {
 
   #[tokio::test]
   async fn pins_walk_abandoned_stay_bounded() {
-    let s = session(2000, 256);
+    let s = object_session(2000, 256);
     let bound = window_bound();
     let mut abandoned = Vec::new();
     for _ in 0..64 {
@@ -688,6 +724,27 @@ mod tests {
         "window held {len} chunks while batching (bound {bound})"
       );
     }
+  }
+
+  #[tokio::test]
+  async fn walk_on_array_target_throws() {
+    let s = session(50, 256);
+    let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
+    let err = match w.next(None).await {
+      Ok(_) => panic!("array target must throw"),
+      Err(e) => e,
+    };
+    assert!(
+      err.reason.contains("use iter()"),
+      "error should steer the caller to iter(), got: {}",
+      err.reason
+    );
+    let guard = w.state.lock().await;
+    assert!(guard.window.is_empty(), "gate must release the window");
+    assert!(
+      guard.child_cursor.is_none(),
+      "gate must drop the child_cursor"
+    );
   }
 
   #[tokio::test]

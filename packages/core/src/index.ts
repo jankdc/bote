@@ -14,6 +14,7 @@ export {
   type Cursor,
   type RootCursor,
   type OpenOptions,
+  type WalkEntry,
   type IterIndex as IterKey,
 } from './open.ts'
 

@@ -51,16 +51,16 @@ pass an options object as the last argument to tune what comes back: `batch`, `s
 
 ## object access
 
-`walk` steps over the members of an object (or the elements of an array) at a path, yielding a **cursor** per child rather than a materialized value. each child cursor is first-class: it outlives the loop, exposes its `.key` (the member name or array index it was yielded under), and can be `walk`ed again, which is what lets you descend a tree of unknown depth:
+`walk` steps over the members of an object at a path, yielding a **`[key, cursor]`** pair per member. the key is the member name, the cursor is anchored at its value. each child cursor is first-class: it outlives the loop and can be `walk`ed again, which is what lets you descend a tree of unknown depth.
 
 ```ts
 // e.g. { alice: { role: 'admin' }, bob: { role: 'guest' }, ... }
 await using cursor = await open(fromFile('./accounts.json'))
 
-for await (const account of cursor.walk()) {
-  // account.key is the member name ('alice', 'bob', ...)
+for await (const [name, account] of cursor.walk()) {
+  // name is the member name ('alice', 'bob', ...)
   const role = await account.get('role')
-  console.log(`${account.key}: ${role}`)
+  console.log(`${name}: ${role}`)
 }
 ```
 

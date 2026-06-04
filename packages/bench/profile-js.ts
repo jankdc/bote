@@ -22,7 +22,7 @@
 
 import { open, fromFile } from '@botejs/core'
 
-import { withTempDoc } from './fixtures.ts'
+import { withTempDoc, withTempObjectDoc } from './fixtures.ts'
 import { fmtBytes } from './format.ts'
 
 const gc = (globalThis as { gc?: () => void }).gc
@@ -75,7 +75,7 @@ async function weakRefPhase(path: string): Promise<{ total: number; alive: numbe
   await using cursor = await open(fromFile(path))
   const refs: WeakRef<object>[] = []
   let seen = 0
-  for await (const child of cursor.walk('items')) {
+  for await (const [, child] of cursor.walk('items')) {
     await child.get('name')
     refs.push(new WeakRef(child))
     seen += 1
@@ -124,7 +124,7 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(
     `\n[phase 2] WeakRef liveness - collecting ${WEAKREF_ITEMS.toLocaleString()} refs, forcing GC, checking deref\n`,
   )
-  const wr = await weakRefPhase(path)
+  const wr = await withTempObjectDoc(WEAKREF_ITEMS, PAD_WIDTH, (objPath) => weakRefPhase(objPath))
   console.log(
     `  ${(wr.total - wr.alive).toLocaleString()} of ${wr.total.toLocaleString()} collected, ${wr.alive.toLocaleString()} still alive`,
   )
