@@ -24,9 +24,6 @@ use crate::session::{Session, SessionError};
 pub struct Cursor {
   session: Arc<Session>,
   anchor: Option<ValueLocation>,
-  /// The child entry `walk` yielded this cursor as (member key + location).
-  /// `None` for the root cursor.
-  entry: Option<ChildEntry>,
   /// Document-tree depth of this cursor's anchor (root = 0). Threaded to the cache
   /// as `base_depth` so nodes carry their true depth (the eviction key); the
   /// re-anchored relative path can't express it.
@@ -38,16 +35,16 @@ impl Cursor {
     Self {
       session,
       anchor: None,
-      entry: None,
       depth: 0,
     }
   }
 
-  fn child(session: Arc<Session>, entry: ChildEntry, depth: u32) -> Self {
+  /// A sub-cursor anchored at a child value. `walk` carries the member key in the
+  /// yielded `(key, cursor)` tuple, so the cursor itself no longer holds its key.
+  fn child(session: Arc<Session>, anchor: ValueLocation, depth: u32) -> Self {
     Self {
       session,
-      anchor: Some(entry.location()),
-      entry: Some(entry),
+      anchor: Some(anchor),
       depth,
     }
   }
@@ -87,17 +84,6 @@ impl Cursor {
       .map_err(map_err)
   }
 
-  /// The object-member name this cursor was yielded under by `walk`; `None` for the
-  /// root cursor. Internal: the facade folds it into the `[key, cursor]` walk entry
-  /// rather than re-exposing it on the public `Cursor`.
-  #[napi(getter)]
-  pub fn key(&self) -> Option<String> {
-    match &self.entry {
-      Some(ChildEntry::Member { key, .. }) => Some(key.clone()),
-      _ => None,
-    }
-  }
-
   #[napi(ts_args_type = "path: Array<string | number>")]
   pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
     crate::count::at(
@@ -124,7 +110,13 @@ impl Cursor {
     )
   }
 
-  #[napi(ts_args_type = "path: Array<string | number>")]
+  // napi-derive can't typegen a tuple async-iterator yield (it only records a
+  // `Type::Path` Yield), so the generated `CursorWalk` is an untyped empty class.
+  // Override the return type with the real runtime shape: `[key, cursor]` steps.
+  #[napi(
+    ts_args_type = "path: Array<string | number>",
+    ts_return_type = "AsyncIterable<[string, Cursor]>"
+  )]
   pub fn walk(&self, path: Vec<Either<String, u32>>) -> CursorWalk {
     CursorWalk::new(
       self.session.clone(),
@@ -332,9 +324,7 @@ impl CursorWalk {
 
 #[napi]
 impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
-  // napi-rs's ToNapiValue wraps the yielded Cursor into a JS class instance when
-  // `next()` finalizes the yield on the JS thread.
-  type Yield = Cursor;
+  type Yield = (String, Cursor);
   type Next = ();
   type Return = ();
 
@@ -403,7 +393,13 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorWalk {
         return Ok(None);
       };
       *yielded += 1;
-      Ok(Some(Cursor::child(session.clone(), child, child_depth)))
+      // Gated to objects above, so every entry is a member; the key rides the tuple.
+      let key = match &child {
+        ChildEntry::Member { key, .. } => key.clone(),
+        ChildEntry::Element { index, .. } => index.to_string(),
+      };
+      let cursor = Cursor::child(session.clone(), child.location(), child_depth);
+      Ok(Some((key, cursor)))
     }
   }
 
@@ -643,7 +639,8 @@ mod tests {
   async fn pins_walk_safe_when_child_escapes() {
     let s = object_session(500, 256);
     let mut w = CursorWalk::new(s.clone(), items_path(), 0, 0);
-    let child = w.next(None).await.unwrap().expect("first child");
+    let (key, child) = w.next(None).await.unwrap().expect("first child");
+    assert_eq!(key, "k0000");
 
     w.complete(None).await.unwrap();
 

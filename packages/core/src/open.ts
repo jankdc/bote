@@ -182,8 +182,8 @@ function wrap(native: NativeCursor): Cursor {
       validatePath(path)
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const child of native.walk(path)) {
-            yield [child.key as string, wrap(child)]
+          for await (const [key, child] of native.walk(path)) {
+            yield [key, wrap(child)]
           }
         },
       }
