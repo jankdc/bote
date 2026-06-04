@@ -144,7 +144,7 @@ impl StructuralIndex {
     members: &[(Box<str>, u64, u64)],
     resume: Option<u64>,
   ) {
-    let cap = self.object_member_cap;
+    let cap = self.object_member_cap.min(self.member_ceiling());
     self.merge_into(
       base_depth,
       anchor,
@@ -203,6 +203,13 @@ impl StructuralIndex {
   fn next_tick(&mut self) -> u64 {
     self.tick += 1;
     self.tick
+  }
+
+  /// Most members a single object may table before its node would exceed the
+  /// global budget (the node itself is one slot). A wider object caches a dense
+  /// prefix of this size instead of a full table it could never keep.
+  fn member_ceiling(&self) -> usize {
+    self.slot_budget.saturating_sub(1)
   }
 
   /// Get-or-create the `(anchor, path)` node and apply `merge` to its body,
@@ -424,7 +431,7 @@ impl NodeKey {
 #[derive(Debug)]
 enum ContainerBody {
   Object {
-    members: Vec<(Box<str>, u64)>,
+    members: HashMap<Box<str>, u64>,
     // High-water member offset: a later member scan resumes here.
     resume: u64,
   },
@@ -439,7 +446,7 @@ impl ContainerBody {
     match kind {
       // Fresh resume = just past the open `{`, i.e. scan from the container start.
       ContainerKind::Object => ContainerBody::Object {
-        members: Vec::new(),
+        members: HashMap::new(),
         resume: value_start + 1,
       },
       ContainerKind::Array => ContainerBody::Array {
@@ -472,11 +479,8 @@ impl ContainerBody {
   /// `value_start` of a tabled object member, or `None` (untabled, or array body).
   fn object_member(&self, name: &str) -> Option<u64> {
     match self {
-      ContainerBody::Object { members, .. } => members
-        .iter()
-        .find(|(n, _)| n.as_ref() == name)
-        .map(|(_, vs)| *vs),
       ContainerBody::Array { .. } => None,
+      ContainerBody::Object { members, .. } => members.get(name).copied(),
     }
   }
 
@@ -518,7 +522,7 @@ impl ContainerBody {
     let mut resume_off = *resume;
     let mut capped = false;
     for (name, key_start, value_start) in new {
-      if members.iter().any(|(n, _)| n.as_ref() == name.as_ref()) {
+      if members.contains_key(name.as_ref()) {
         continue; // already tabled (a prior scan's prefix)
       }
       if members.len() >= cap {
@@ -526,7 +530,7 @@ impl ContainerBody {
         capped = true;
         break;
       }
-      members.push((name.clone(), *value_start));
+      members.insert(name.clone(), *value_start);
     }
     if !capped {
       if let Some(t) = resume_hint {
