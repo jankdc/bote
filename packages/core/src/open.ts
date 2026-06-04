@@ -50,6 +50,8 @@ export interface OpenOptions {
 }
 
 export interface Cursor {
+  hop(...path: Segment[]): Promise<Cursor | null>
+
   has(...path: Segment[]): Promise<boolean>
   has(...args: [...Segment[], StandardSchemaV1]): Promise<boolean>
 
@@ -76,6 +78,7 @@ export interface Cursor {
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
 
   walk(...path: Segment[]): AsyncIterable<WalkEntry>
+  walk(...path: Segment[]): AsyncIterable<Cursor>
 }
 
 export interface RootCursor extends Cursor, AsyncDisposable {
@@ -187,6 +190,11 @@ function wrap(native: NativeCursor): Cursor {
           }
         },
       }
+    },
+    async hop(...path: Segment[]): Promise<Cursor | null> {
+      validatePath(path)
+      const child = await native.hop(path)
+      return child ? wrap(child) : null
     },
   }
 

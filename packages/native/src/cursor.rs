@@ -49,6 +49,15 @@ impl Cursor {
     }
   }
 
+  /// A cursor anchored at an already-resolved `location` reached by `hop`.
+  fn at(session: Arc<Session>, location: ValueLocation, depth: u32) -> Self {
+    Self {
+      session,
+      anchor: Some(location),
+      depth,
+    }
+  }
+
   fn anchor_start(&self) -> u64 {
     self.anchor.map(|a| a.start).unwrap_or(0)
   }
@@ -124,6 +133,21 @@ impl Cursor {
       self.anchor_start(),
       self.depth,
     )
+  }
+
+  #[napi(ts_args_type = "path: Array<string | number>")]
+  pub async fn hop(&self, path: Vec<Either<String, u32>>) -> napi::Result<Option<Cursor>> {
+    let segments = path::from_napi(path);
+    let Some(location) = self
+      .session
+      .resolve_at(&segments, self.anchor_start(), self.depth)
+      .await
+      .map_err(map_err)?
+    else {
+      return Ok(None);
+    };
+    let depth = self.depth + segments.len() as u32;
+    Ok(Some(Cursor::at(self.session.clone(), location, depth)))
   }
 }
 

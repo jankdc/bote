@@ -148,6 +148,18 @@ impl Session {
       .run_locate(path, anchor_start, base_depth, &mut window)
       .await
   }
+
+  pub async fn resolve_at(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    base_depth: u32,
+  ) -> Result<Option<ValueLocation>, SessionError> {
+    let mut window = self.new_window();
+    self
+      .run_resolve(path, anchor_start, base_depth, &mut window)
+      .await
+  }
 }
 
 /// Cursor/iterator support, called from `cursor.rs`. These take a caller-owned,
