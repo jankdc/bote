@@ -111,7 +111,8 @@ export function defaultCells(): Cell[] {
       }
     }
     // Traversal: walk-all (count children), iter-all (materialize values),
-    // walk-get-name (walk + per-child get; closer to real usage).
+    // walk-get-name (walk + per-child get; closer to real usage). walk runs over
+    // the object-keyed shape (objects-only); iter over the array shape.
     for (const [op, ap] of [
       ['walk', 'walk-all'],
       ['iter', 'iter-all'],
@@ -122,7 +123,7 @@ export function defaultCells(): Cell[] {
           ...base,
           op,
           source: 'memory',
-          docShape: 'array-of-objects',
+          docShape: op === 'walk' ? 'object-of-objects' : 'array-of-objects',
           docSize,
           accessPattern: ap,
           samples: 5,
@@ -153,7 +154,7 @@ export function defaultCells(): Cell[] {
       ...base,
       op: 'walk',
       source: 'file',
-      docShape: 'array-of-objects',
+      docShape: 'object-of-objects',
       docSize: 100_000,
       accessPattern: 'walk-get-name',
       samples: 3,
@@ -161,8 +162,8 @@ export function defaultCells(): Cell[] {
     }),
   )
 
-  // First-child latency guard. Walks `/items` and stops after one element, on a
-  // doc far larger than the resident window so the array can't be fully resident.
+  // First-child latency guard. Walks `/items` and stops after one member, on a
+  // doc far larger than the resident window so the object can't be fully resident.
   // Time-to-first-child must stay ~flat: a regression that resolves the
   // container's full extent before yielding the first child would make this
   // O(doc) and balloon min_ns. File source so chunks fault like real usage.
@@ -171,7 +172,7 @@ export function defaultCells(): Cell[] {
       ...base,
       op: 'walk',
       source: 'file',
-      docShape: 'array-of-objects',
+      docShape: 'object-of-objects',
       docSize: 500_000,
       accessPattern: 'walk-first',
       samples: 8,
@@ -248,7 +249,8 @@ export function commonCells(): Cell[] {
     ['iter', 'iter-all'],
     ['walk', 'walk-get-name'],
   ] as Array<[Operation, AccessPattern]>) {
-    cells.push(mk({ ...shared, op, accessPattern: ap, samples: 5, iterations: 1 }))
+    const docShape = op === 'walk' ? ('object-of-objects' as DocShape) : shared.docShape
+    cells.push(mk({ ...shared, op, docShape, accessPattern: ap, samples: 5, iterations: 1 }))
   }
   return cells
 }

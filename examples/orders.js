@@ -15,19 +15,18 @@ for await (const orders of cursor.iter('orders', {
       }
 
       const restock = []
-      for await (const line of cursor.walk('orders', index, 'items')) {
+      for await (const [sku, line] of cursor.walk('orders', index, 'items')) {
         if (!(await line.has('backorder'))) {
           continue
         }
 
-        const sku = await line.get('sku')
         const short = await line.get('backorder', 'shortfall')
 
         const sources = []
-        for await (const warehouse of line.walk('availability')) {
-          const onHand = await warehouse.get()
+        for await (const [warehouse, stock] of line.walk('availability')) {
+          const onHand = await stock.get()
           if (onHand > 0) {
-            sources.push({ warehouse: warehouse.key, onHand })
+            sources.push({ warehouse, onHand })
           }
         }
 

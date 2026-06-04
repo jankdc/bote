@@ -129,7 +129,7 @@ function detailViewAt(idx: number): (c: Cur) => Promise<number> {
     let sink = 0
     sink += Number(await c.get('meta', 'version'))
     sink += String(await c.get('records', idx, 'name')).length
-    for await (const _field of c.walk('records', idx)) sink += 1
+    for await (const _entry of c.walk('records', idx)) sink += 1
     for await (const batch of c.iter('records', idx, 'tags')) sink += batch.length
     return sink
   }

@@ -12,6 +12,8 @@ type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
 
 /** Zero-based index of an array element. */
 export type IterIndex = number
+/** One `walk` step: the member's key paired with a cursor anchored at its value. */
+export type WalkEntry = [key: string, cursor: Cursor]
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
@@ -48,9 +50,6 @@ export interface OpenOptions {
 }
 
 export interface Cursor {
-  /** Object-member key or array-element index that this cursor was yielded under by `walk`. `null` on the root cursor. */
-  readonly key: string | number | null
-
   has(...path: Segment[]): Promise<boolean>
   has(...args: [...Segment[], StandardSchemaV1]): Promise<boolean>
 
@@ -75,7 +74,8 @@ export interface Cursor {
   ): AsyncIterable<SelectMapShape<S>[]>
   iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
-  walk(...path: Segment[]): AsyncIterable<Cursor>
+
+  walk(...path: Segment[]): AsyncIterable<WalkEntry>
 }
 
 export interface RootCursor extends Cursor, AsyncDisposable {
@@ -134,9 +134,6 @@ async function closeReader(reader: SourceReader): Promise<void> {
 
 function wrap(native: NativeCursor): Cursor {
   const cursor = {
-    get key() {
-      return native.key
-    },
     async has(...args: VariadicPathArgs<StandardSchemaV1>): Promise<boolean> {
       const { path, tail: schema } = splitArgs<StandardSchemaV1>(args)
       if (!schema) return native.has(path)
@@ -181,12 +178,12 @@ function wrap(native: NativeCursor): Cursor {
         },
       }
     },
-    walk(...path: Segment[]) {
+    walk(...path: Segment[]): AsyncIterable<WalkEntry> {
       validatePath(path)
       return {
         async *[Symbol.asyncIterator]() {
-          for await (const child of native.walk(path)) {
-            yield wrap(child)
+          for await (const [key, child] of native.walk(path)) {
+            yield [key, wrap(child)]
           }
         },
       }

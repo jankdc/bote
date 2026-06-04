@@ -61,19 +61,19 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
     case 'walk': {
       let n = 0
       if (cell.accessPattern === 'walk-get-name') {
-        for await (const child of cursor.walk(p)) {
+        for await (const [, child] of cursor.walk(p)) {
           await child.get(['name'])
           n += 1
         }
       } else if (cell.accessPattern === 'walk-first') {
         // Stop after the first child: this times time-to-first-child, not a
         // full traversal.
-        for await (const _child of cursor.walk(p)) {
+        for await (const _entry of cursor.walk(p)) {
           n = 1
           break
         }
       } else {
-        for await (const _child of cursor.walk(p)) n += 1
+        for await (const _entry of cursor.walk(p)) n += 1
       }
       return n
     }
