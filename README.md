@@ -8,79 +8,17 @@ npm install @botejs/core
 
 ```ts
 import { open, fromFile } from '@botejs/core'
+import { publish } from './message-bus'
 
-import * as z from 'zod' // or bring your own Standard Schema validator
+// e.g. { items: [...] }
+await using cursor = await open(fromFile('./some-large.json'))
 
-const User = z.object({
-  id: z.string(),
-  name: z.string(),
-  email: z.string(),
-  details: z.object({
-    lastLoggedIn: z.number(),
-  }),
-})
-
-type User = z.infer<typeof User>
-
-await using cursor = await open(fromFile('./your-big.json'))
-
-// users[1000].name
-const desc0: unknown = await cursor.get('users', 1000, 'name')
-// for .get and .iter, you can supply a validator as the last argument
-const desc1: string = await cursor.get('users', 1000, 'name', User.shape.name)
-
-// iterate an array in batches
-for await (const batch of cursor.iter('users', User)) {
-  // batch: User[]
-  for (const user of batch) {
-    console.log(user)
-  }
-}
-
-// pick several fields into a named object to avoid resolving big items
-for await (const batch of cursor.iter('users', {
-  select: {
-    id: 'id',
-    logged: ['details', 'lastLoggedIn'],
-  },
-  schema: z.object({
-    id: User.shape.id,
-    logged: User.shape.details.lastLoggedIn,
-  }),
-})) {
-  // batch: { id: string, logged: number }[]
-  for (const userLog of batch) {
-    console.log(userLog)
-  }
-}
-
-// or pick a single field
-for await (const batch of cursor.iter('users', {
-  select: 'name',
-  schema: User.shape.name,
-})) {
-  // batch: string[]
-  for (const name of batch) {
-    console.log({ name })
-  }
-}
-
-// for open-ended per-child work (e.g. conditional reads, recursive descent, nested
-// iters), `walk` yields a subcursor positioned at each child:
-for await (const metaCursor of cursor.walk('meta')) {
-  if (metaCursor.key === 'details') {
-    const detailsValue = await metaCursor.get()
-    console.log(detailsValue)
-  }
-}
-
-// 'await using' would normally clean up resources for you
-// when it goes out of lexical scope. if you hate that,
-// you can do it explicitly as well.
-await cursor.close()
+// items[0]
+const first = await cursor.get('items', 0)
+console.log(`first item: ${first}`)
 ```
 
-given a **seekable** source (e.g. a file, an HTTP range) and a path, it can retrieve values in a JSON quickly, without loading the whole thing in-memory.
+given a **seekable** source (e.g. a file, an HTTP range) and a path, it retrieves values out of a JSON quickly, without loading the whole thing in-memory.
 
 here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default settings):
 
@@ -93,9 +31,81 @@ here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default set
 | items[535399]  | bote       | 187.24 ms |       742.3 KB |        36.7 MB |
 | items[1070797] | bote       | 371.61 ms |       828.7 KB |        37.1 MB |
 
+## array access
+
+`iter` streams the elements of an array at a path, **a batch at a time**, so you never hold the whole collection in memory and not wait for the heat death of the universe if this yielded individually. each `for await` step yields an array of items (use `walk` to step over the members of an object):
+
+```ts
+// e.g. [{ id: 'user-1' }, { id: 'user-2' }, ...]
+await using cursor = await open(fromFile('./users.json'))
+
+// root is an array
+for await (const users of cursor.iter()) {
+  for (const user of users) {
+    console.log(user)
+  }
+}
+```
+
+pass an options object as the last argument to tune what comes back: `batch`, `select`, `schema`, `onInvalid`, and `withIndex`. if you want to know more of the options, see [`arrays.js`](./examples/arrays.js).
+
+## object access
+
+`walk` steps over the members of an object (or the elements of an array) at a path, yielding a **cursor** per child rather than a materialized value. each child cursor is first-class: it outlives the loop, exposes its `.key` (the member name or array index it was yielded under), and can be `walk`ed again, which is what lets you descend a tree of unknown depth:
+
+```ts
+// e.g. { alice: { role: 'admin' }, bob: { role: 'guest' }, ... }
+await using cursor = await open(fromFile('./accounts.json'))
+
+for await (const account of cursor.walk()) {
+  // account.key is the member name ('alice', 'bob', ...)
+  const role = await account.get('role')
+  console.log(`${account.key}: ${role}`)
+}
+```
+
+see [`recursive.js`](./examples/recursive.js) for advanced use-cases.
+
+## validation
+
+`get`, and `iter` takes a [Standard Schema](https://standardschema.dev) validator as their last argument (for `iter`, can also be passed in an `options` object). the value is validated and the return type is inferred from the schema, so reads come back typed instead of `unknown`:
+
+```ts
+import { open, fromFile } from '@botejs/core'
+import * as z from 'zod' // or any Standard Schema validator
+
+// a downstream API that wants a typed list of recipients
+declare function sendNewsletter(recipients: string[]): Promise<void>
+
+const User = z.object({
+  id: z.string(),
+  name: z.string(),
+  email: z.string(),
+})
+
+const cursor = await open(fromFile('./users.json'))
+
+// name: string
+const name = await cursor.get('users', 1000, 'name', User.shape.name)
+
+for await (const users of cursor.iter('users', User)) {
+  // user: User[]
+  const emails = users.map((user) => user.email)
+  await sendNewsletter(emails)
+}
+
+await cursor.close()
+```
+
+## memory
+
+bote keeps a small **structural-index** cache: as scans walk containers (arrays and object), it remembers where members live, so a later query that lands in an already walked container resumes near the target instead of from the top. it caches structure, never source bytes, so it can't grow unbounded with document size.
+
+the defaults are good, but `open` takes a few knobs: `indexCacheEntries`, `objectMemberCap`, and `arrayIndexInterval`. to bound memory tighter or turn the cache off. see [`memory.js`](./examples/memory.js) for what each does.
+
 ## sources
 
-bote currently only has `fromFile` and `fromHttpRange` as pre-built sources. create your own by implementing the `Source` interface. see [./packages/core/src/sources.ts](./packages/core/src/sources.ts) on how it works.
+bote ships `fromFile`, `fromHttpRange`, and `fromBuffer` as pre-built sources. create your own by implementing the `Source` interface. see [`sources-custom.ts`](./examples/sources-custom.ts) or [./packages/core/src/sources.ts](./packages/core/src/sources.ts) for how it works.
 
 ## status
 
