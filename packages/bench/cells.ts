@@ -8,7 +8,6 @@ import type { DocShape, FixturePattern } from './fixtures.ts'
 
 export type Operation = 'get' | 'has' | 'walk' | 'iter'
 export type AccessPattern = FixturePattern
-export type SourceKind = 'memory' | 'file'
 export { type DocShape }
 
 export interface Cell {
@@ -21,7 +20,6 @@ export interface Cell {
   op: Operation
   padWidth: number
   samples: number
-  source: SourceKind
 }
 
 export interface Timing {
@@ -30,9 +28,6 @@ export interface Timing {
   mean_ns: number
   samples: number
   iters_per_sample: number
-  /** For walk/iter: `min_ns / items_per_invocation` (lower is better). */
-  ns_per_item?: number
-  items_per_invocation?: number
   /** For the `walk-first` pattern: ns to yield the *first* child (min over
    *  samples). Guards against an entry path that scans the whole container
    *  before the first element - that cost is O(doc) here, ~flat when lazy. */
@@ -41,19 +36,9 @@ export interface Timing {
   cv: number
 }
 
-export interface Reference {
-  /** Fastest ns/op for the op-equivalent `JSON.parse(...)` work (parse +
-   *  the same logical lookup/traversal) on the same source.
-   */
-  parse_ns: number
-  /** `timing.min_ns / reference.parse_ns`. */
-  ratio: number
-}
-
 export interface Result {
   cell: Cell
   timing: Timing
-  reference?: Reference
   error?: string
   meta?: {
     sha: string
@@ -66,18 +51,14 @@ export interface Result {
 }
 
 function mk(c: Omit<Cell, 'id'>): Cell {
-  const id = `${c.op}.${c.accessPattern}.${c.docShape}.${c.source}.n${c.docSize}.cs${c.chunkBytes}`
+  const id = `${c.op}.${c.accessPattern}.${c.docShape}.n${c.docSize}.cs${c.chunkBytes}`
   return { ...c, id }
 }
 
-// Tuned so each batch lands in the 50–500 ms window. Point-access
-// micro-times scale with depth, so deep cells get fewer iters than shallow.
 function iterCount(scale: number, ap: AccessPattern): number {
   switch (ap) {
     case 'shallow':
       return 1000
-    case 'mid':
-      return 100
     case 'deep':
       return scale >= 100_000 ? 5 : scale >= 10_000 ? 50 : 100
     default:
@@ -88,169 +69,50 @@ function iterCount(scale: number, ap: AccessPattern): number {
 const CHUNK_SIZE = 64 * 1024
 const PAD_WIDTH = 6
 
+const WALK = 10_000
+const ITER = 100_000
+const SMALL = 10_000
+const LARGE = 1_000_000
+
 export function defaultCells(): Cell[] {
   const cells: Cell[] = []
   const base = { chunkBytes: CHUNK_SIZE, padWidth: PAD_WIDTH }
-
-  // array-of-objects, memory source: full sweep - the workhorse path.
-  for (const docSize of [10_000, 100_000]) {
-    for (const op of ['get', 'has'] as Operation[]) {
-      for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
-        cells.push(
-          mk({
-            ...base,
-            op,
-            source: 'memory',
-            docShape: 'array-of-objects',
-            docSize,
-            accessPattern: ap,
-            samples: 8,
-            iterations: iterCount(docSize, ap),
-          }),
-        )
-      }
-    }
-    // Traversal: walk-all (count children), iter-all (materialize values),
-    // walk-get-name (walk + per-child get; closer to real usage). walk runs over
-    // the object-keyed shape (objects-only); iter over the array shape.
-    for (const [op, ap] of [
-      ['walk', 'walk-all'],
-      ['iter', 'iter-all'],
-      ['walk', 'walk-get-name'],
-    ] as Array<[Operation, AccessPattern]>) {
-      cells.push(
-        mk({
-          ...base,
-          op,
-          source: 'memory',
-          docShape: op === 'walk' ? 'object-of-objects' : 'array-of-objects',
-          docSize,
-          accessPattern: ap,
-          samples: 5,
-          iterations: 1,
-        }),
-      )
-    }
+  const point = (docShape: DocShape, ap: AccessPattern, docSize: number, op: Operation = 'get'): void => {
+    cells.push(mk({ ...base, op, docShape, docSize, accessPattern: ap, samples: 8, iterations: iterCount(docSize, ap) }))
+  }
+  const traverse = (docShape: DocShape, op: Operation, ap: AccessPattern, docSize: number): void => {
+    cells.push(mk({ ...base, op, docShape, docSize, accessPattern: ap, samples: 8, iterations: 1 }))
   }
 
-  // File source: largest doc, patterns that drive distinct chunk-load behavior
-  // (cold-shallow, cold-deep, full traversal).
-  for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
-    cells.push(
-      mk({
-        ...base,
-        op: 'get',
-        source: 'file',
-        docShape: 'array-of-objects',
-        docSize: 100_000,
-        accessPattern: ap,
-        samples: 8,
-        iterations: iterCount(100_000, ap),
-      }),
-    )
-  }
-  cells.push(
-    mk({
-      ...base,
-      op: 'walk',
-      source: 'file',
-      docShape: 'object-of-objects',
-      docSize: 100_000,
-      accessPattern: 'walk-get-name',
-      samples: 3,
-      iterations: 1,
-    }),
-  )
+  // array-of-objects (the workhorse): O(1) entry once at LARGE; deep scan-to-last
+  // at both magnitudes (the deep LARGE scan faults a long run of chunks); array
+  // iter throughput once.
+  point('array-of-objects', 'shallow', LARGE)
+  point('array-of-objects', 'deep', SMALL)
+  point('array-of-objects', 'deep', LARGE)
+  point('array-of-objects', 'deep', LARGE, 'has') // has parallels get; one scale to confirm it stays gated
+  traverse('array-of-objects', 'iter', 'iter-all', ITER)
 
-  // First-child latency guard. Walks `/items` and stops after one member, on a
-  // doc far larger than the resident window so the object can't be fully resident.
-  // Time-to-first-child must stay ~flat: a regression that resolves the
-  // container's full extent before yielding the first child would make this
-  // O(doc) and balloon min_ns. File source so chunks fault like real usage.
-  cells.push(
-    mk({
-      ...base,
-      op: 'walk',
-      source: 'file',
-      docShape: 'object-of-objects',
-      docSize: 500_000,
-      accessPattern: 'walk-first',
-      samples: 8,
-      iterations: 1,
-    }),
-  )
+  // object-of-objects: the walk workhorse (walk is object-only). Keyed traversal
+  // and walk + per-child get, each over WALK members.
+  traverse('object-of-objects', 'walk', 'walk-all', WALK)
+  traverse('object-of-objects', 'walk', 'walk-get-name', WALK)
 
-  // Deep-nested: depth 500 stresses pointer-walking overhead. Point access only.
-  for (const ap of ['shallow', 'mid', 'deep'] as AccessPattern[]) {
-    cells.push(
-      mk({
-        ...base,
-        op: 'get',
-        source: 'memory',
-        docShape: 'deep-nested',
-        docSize: 500,
-        accessPattern: ap,
-        samples: 8,
-        iterations: ap === 'shallow' ? 1000 : ap === 'mid' ? 200 : 100,
-      }),
-    )
-  }
+  // deep-nested: depth (not count) stresses pointer-walking. shallow vs deep
+  // brackets the per-level cost; no middle point.
+  point('deep-nested', 'shallow', 500)
+  cells.push(mk({ ...base, op: 'get', docShape: 'deep-nested', docSize: 500, accessPattern: 'deep', samples: 8, iterations: 100 }))
 
-  // Wide-flat: 100k top-level keys (~2.5 MB doc, ~40 chunks at 64 KB).
-  for (const ap of ['shallow', 'deep'] as AccessPattern[]) {
-    cells.push(
-      mk({
-        ...base,
-        op: 'get',
-        source: 'memory',
-        docShape: 'wide-flat',
-        docSize: 100_000,
-        accessPattern: ap,
-        samples: 8,
-        iterations: iterCount(100_000, ap),
-      }),
-    )
-  }
-  cells.push(
-    mk({
-      ...base,
-      op: 'walk',
-      source: 'memory',
-      docShape: 'wide-flat',
-      docSize: 100_000,
-      accessPattern: 'walk-all',
-      samples: 3,
-      iterations: 1,
-    }),
-  )
+  // wide-flat: worst-case linear key scan to the last member (the class PR#11
+  // regressed) plus keyed traversal over a wide root.
+  point('wide-flat', 'deep', LARGE)
+  traverse('wide-flat', 'walk', 'walk-all', WALK)
 
-  return cells
-}
+  // First-child latency guard: walk-first must yield the first child without
+  // resolving the whole container (O(1), not O(doc))- a regression there
+  // balloons first_item_ns. The 500k doc exceeds the resident window so the
+  // container can't fully reside.
+  cells.push(mk({ ...base, op: 'walk', docShape: 'object-of-objects', docSize: 500_000, accessPattern: 'walk-first', samples: 8, iterations: 1 }))
 
-/** A small, stable subset for the CI PR report */
-export function commonCells(): Cell[] {
-  const base = { chunkBytes: CHUNK_SIZE, padWidth: PAD_WIDTH }
-  const shared = {
-    ...base,
-    source: 'memory' as SourceKind,
-    docShape: 'array-of-objects' as DocShape,
-    docSize: 100_000,
-  }
-  const cells: Cell[] = []
-  for (const [op, ap] of [
-    ['get', 'shallow'],
-    ['get', 'deep'],
-    ['has', 'shallow'],
-  ] as Array<[Operation, AccessPattern]>) {
-    cells.push(mk({ ...shared, op, accessPattern: ap, samples: 8, iterations: iterCount(shared.docSize, ap) }))
-  }
-  for (const [op, ap] of [
-    ['walk', 'walk-all'],
-    ['iter', 'iter-all'],
-    ['walk', 'walk-get-name'],
-  ] as Array<[Operation, AccessPattern]>) {
-    const docShape = op === 'walk' ? ('object-of-objects' as DocShape) : shared.docShape
-    cells.push(mk({ ...shared, op, docShape, accessPattern: ap, samples: 5, iterations: 1 }))
-  }
   return cells
 }

@@ -21,14 +21,6 @@ export interface Source {
   close?(): Promise<void>
 }
 
-export function memorySource(data: Uint8Array, chunkBytes: number): Source {
-  return {
-    size: data.length,
-    chunkBytes,
-    read: ({ offset, length }) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
-  }
-}
-
 export async function fileSource(path: string, chunkBytes: number): Promise<Source> {
   const { open: fsOpen } = await import('node:fs/promises')
   const handle = await fsOpen(path, 'r')

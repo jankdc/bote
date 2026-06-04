@@ -1,5 +1,5 @@
-// Render a matrix run (matrix.ts JSONL) as a markdown table for a PR
-// comment.
+// Render a matrix run (matrix.ts JSONL) as an aligned markdown table for a
+// PR comment.
 //
 //   --in <path>   read JSONL from <path> instead of stdin
 //   --out <path>  write markdown to <path> instead of stdout
@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 
 import type { Result } from './cells.ts'
-import { arg } from './cli.ts'
+import { arg, parseJsonl } from './cli.ts'
 import { fmtBytes, fmtNs } from './format.ts'
 
 const inPath = arg('--in')
@@ -17,54 +17,48 @@ function readInput(): string {
   return inPath ? readFileSync(inPath, 'utf8') : readFileSync(0, 'utf8')
 }
 
-function parseJsonl(text: string): Result[] {
-  const out: Result[] = []
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      out.push(JSON.parse(trimmed) as Result)
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return out
-}
+const results = parseJsonl<Result>(readInput())
 
-// Keep small sub-1 ratios legible (a point op can be ~0.001x of a
-// full-doc parse) instead of rounding to "0.00".
-function fmtRatio(r: number): string {
-  if (r >= 1) return r.toFixed(2)
-  return r.toPrecision(2).replace(/\.?0+$/, '')
-}
+const sorted = [...results].sort(
+  (a, b) =>
+    a.cell.op.localeCompare(b.cell.op) ||
+    a.cell.accessPattern.localeCompare(b.cell.accessPattern) ||
+    a.cell.docShape.localeCompare(b.cell.docShape) ||
+    a.cell.docSize - b.cell.docSize,
+)
 
-const results = parseJsonl(readInput())
+const header = ['operation', 'document', 'bote'] as const
 
-const rows = results.map((r) => {
-  const label = `${r.cell.op} · ${r.cell.accessPattern}`
-  if (r.error) return `| ${label} | — | — | ⚠️ error |`
-  const streaming = r.cell.op === 'walk' || r.cell.op === 'iter'
-  const bote = r.timing.first_item_ns
-    ? `${fmtNs(r.timing.first_item_ns)} to 1st`
-    : streaming && r.timing.ns_per_item
-      ? `${fmtNs(r.timing.ns_per_item)}/item`
-      : fmtNs(r.timing.p50_ns)
-  const parse = r.reference ? fmtNs(r.reference.parse_ns) : '—'
-  const ratio = r.reference ? `${fmtRatio(r.reference.ratio)}x` : '—'
-  return `| ${label} | ${bote} | ${parse} | ${ratio} |`
+const rows = sorted.map((r): string[] => {
+  const op = `${r.cell.op} · ${r.cell.accessPattern}`
+  const doc = `${r.cell.docShape} · n=${r.cell.docSize.toLocaleString()}`
+  if (r.error) return [op, doc, '⚠️ error']
+  let bote = fmtNs(r.timing.min_ns)
+  if (r.timing.first_item_ns) bote += ' _(to 1st)_'
+  return [op, doc, bote]
 })
 
-const sample = results.find((r) => !r.error)?.cell
-const caption = sample
-  ? `${sample.docShape}, ${sample.source} source, n=${sample.docSize.toLocaleString()}, chunk=${fmtBytes(sample.chunkBytes)}`
-  : 'no cells'
+const widths = header.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i].length)))
+const tableRow = (cols: readonly string[]): string => `| ${cols.map((c, i) => c.padEnd(widths[i])).join(' | ')} |`
+const sep = `| ${widths.map((w) => '-'.repeat(w)).join(' | ')} |`
 
-const md =
-  `_${caption}._\n\n` +
-  `| operation | bote | JSON.parse | bote/parse |\n` +
-  `| --- | --- | --- | --- |\n` +
-  rows.join('\n') +
-  '\n'
+const chunk = results.find((r) => !r.error)?.cell.chunkBytes
+const caption = chunk ? `file source, chunk=${fmtBytes(chunk)}` : 'no cells'
 
-if (outPath) writeFileSync(outPath, md)
-else process.stdout.write(md)
+// Column legend (moved here from the matrix driver): the table is the report,
+// so explain its columns next to it rather than the raw cell-id format.
+const legend = [
+  '`operation` - `<op> · <access>`: op is get | has | walk | iter; access is how far the lookup reaches (shallow/deep) or the traversal kind (iter-all/walk-all/walk-get-name/walk-first).',
+  '`document` - `<shape> · n=<size>`: shape is the JSON document shape; n is the array/object member or key count, or nesting depth for deep-nested.',
+  '`bote` - fastest-sample whole-operation wall-clock (compare across runs on the same machine); `_(to 1st)_` marks time to the first child (walk-first).',
+]
+  .map((l) => `- ${l}`)
+  .join('\n')
+
+const md = `_${caption}._\n\n` + [tableRow(header), sep, ...rows.map(tableRow)].join('\n') + `\n\n${legend}\n`
+
+if (outPath) {
+  writeFileSync(outPath, md)
+} else {
+  process.stdout.write(md)
+}

@@ -123,22 +123,30 @@ async function runOnce(approach: string, file: string, idx: number): Promise<num
   throw new Error(`unknown approach: ${approach}`)
 }
 
-function renderTable(results: RunResult[]): void {
-  const headers = ['operation', 'JSON.parse', 'bote']
-  const approaches = ['json-parse', 'bote']
-  const byOp = new Map<string, Record<string, string>>()
+function renderTable(results: RunResult[], cold: boolean): void {
+  const headers = ['operation', 'JSON.parse', 'bote', 'bote speedup']
+  const byOp = new Map<string, Map<string, RunResult>>()
   const order: string[] = []
   for (const r of results) {
     if (!byOp.has(r.op)) {
-      byOp.set(r.op, {})
+      byOp.set(r.op, new Map())
       order.push(r.op)
     }
-    byOp.get(r.op)![r.approach] = r.error !== null ? `FAILED - ${r.error}` : fmtNs(r.time_ns ?? 0)
+    byOp.get(r.op)!.set(r.approach, r)
   }
-  const data = order.map((op) => [op, ...approaches.map((a) => byOp.get(op)![a] ?? '-')])
+  const cell = (r: RunResult | undefined): string =>
+    r === undefined ? '-' : r.error !== null ? `FAILED - ${r.error}` : fmtNs(r.time_ns ?? 0)
+  const speedup = (op: string): string => {
+    const parse = byOp.get(op)!.get('json-parse')
+    const bote = byOp.get(op)!.get('bote')
+    if (!parse?.time_ns || !bote?.time_ns) return '-'
+    return `${(parse.time_ns / bote.time_ns).toFixed(1)}×`
+  }
+  const data = order.map((op) => [op, cell(byOp.get(op)!.get('json-parse')), cell(byOp.get(op)!.get('bote')), speedup(op)])
   const widths = headers.map((h, i) => Math.max(h.length, ...data.map((row) => row[i].length)))
   const pad = (row: string[]): string => row.map((c, i) => c.padEnd(widths[i])).join('  ')
   console.log('')
+  console.log(cold ? 'COLD start (OS page cache purged before each cell)' : 'WARM (OS cache left primed — NOT a cold-start result)')
   console.log(pad(headers))
   console.log(widths.map((w) => '─'.repeat(w)).join('  '))
   for (const row of data) console.log(pad(row))
@@ -231,5 +239,5 @@ for (const { op, index } of cells) {
   }
 }
 
-renderTable(results)
+renderTable(results, !skipPurge)
 process.exit(0)

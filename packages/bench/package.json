@@ -8,7 +8,7 @@
     "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
   },
   "scripts": {
-    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning bench.ts",
+    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning matrix.ts | node --experimental-strip-types --no-warnings=ExperimentalWarning report.ts",
     "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning matrix.ts",
     "bench:report": "node --experimental-strip-types --no-warnings=ExperimentalWarning report.ts",
     "bench:cache": "node --experimental-strip-types --no-warnings=ExperimentalWarning cache.ts",
