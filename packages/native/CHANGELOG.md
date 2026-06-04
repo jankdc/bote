@@ -1,5 +1,35 @@
 # @botejs/native
 
+## 0.3.0
+
+### Minor Changes
+
+- 893751a: Make the API's unhappy paths consistent.
+
+  **Breaking:** new `PathError` (exported from `@botejs/core`, carries `path`) is thrown for a path that contradicts the document's shape:
+
+  - traversing through a non-container, a wrong-kind segment (member name against an array, index against an object), a container op (`count`/`iter`/`walk`) on a present scalar, and `iter`-on-an-object / `walk`-on-an-array (was a plain `Error`).
+  - A clean miss (missing key, out-of-bounds index) still returns the not-found sentinel: `get`->`undefined`, `count`->`0`, `hop`->`null`, `iter`/`walk`->empty.
+  - `has` returns `false` for any miss or shape mismatch and never throws on navigation; it is now presence-only, so a malformed leaf value at the resolved path reports `true`.
+  - `select` sub-paths that don't match an element's shape yield `null`.
+
+  Other changes:
+
+  - `get(path, schema)` runs the schema against a missing key (required schema -> `ValidationError`, optional -> `undefined`).
+  - Knob/option validation moved to the facade with uniform types: `RangeError` for `batch`, the cache knobs, `chunkBytes`, `size`, `onInvalid`; `TypeError` for `withIndex`, a non-Standard-Schema trailing object, and bad `select` field values.
+  - `iter`'s `batch` is capped at `MAX_ITER_BATCH` (1,000,000).
+  - A source `read()` returning 0 bytes for an in-bounds request now errors instead of hanging.
+  - `get`/`has` no longer crash on a non-schema trailing object.
+  - A failing reader `close()` during a failed `open()` no longer masks the original error (attached as `error.cause`).
+  - `close()` invalidates the cursor uniformly (any later call throws `bote: cursor is closed`); sub-cursors from `walk`/`hop` share the root's closed state.
+
+- 52fe8be: Add `Cursor.hop(...path)`: resolves a path once and returns a cursor anchored at that value (or `null` if absent), so later relative reads start from its anchor.
+- 7a49177: `walk` is now object-only and yields `[key, cursor]` tuples. Pointing it at an array throws (use `iter`), and the standalone `Cursor.key` getter is removed.
+
+### Patch Changes
+
+- 7243a60: Fix a severe slowdown on repeated deep reads into a very wide object. The structural-index cache built its object member table with a linear scan (O(members²)) and could mint a table larger than the cache budget, only to evict it immediately and rebuild it on the next read. Member tables are now hash-backed (O(1) lookup/dedup) and clamped to the budget.
+
 ## 0.2.0
 
 ### Minor Changes
