@@ -17,6 +17,16 @@ export class ValidationError extends Error {
   }
 }
 
+export class PathError extends Error {
+  readonly path: Path
+
+  constructor(reason: string, path: Path) {
+    super(`bote: cannot resolve ${formatPath(path)}: ${reason}`)
+    this.name = 'PathError'
+    this.path = path
+  }
+}
+
 export async function runStandardSchema<O>(
   schema: StandardSchemaV1<unknown, O>,
   value: unknown,

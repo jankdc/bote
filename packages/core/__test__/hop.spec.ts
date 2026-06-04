@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { open } from '../src/index.ts'
+import { open, PathError } from '../src/index.ts'
 import { memorySource, enc } from './fixtures.ts'
 
 test('hop_into_object_resolves_relatives_against_anchor', async () => {
@@ -28,6 +28,12 @@ test('hop_missing_path_returns_null', async () => {
   const n = await cursor.hop('users', 0)
   assert.ok(n)
   assert.equal(await n.get(), 1)
+})
+
+test('hop_through_scalar_throws_PathError', async (t) => {
+  const cursor = await open(memorySource(enc('{"a":1}')))
+  t.after(() => cursor.close())
+  await assert.rejects(() => cursor.hop('a', 'b'), PathError)
 })
 
 test('hop_chains_relative_to_the_previous_hop', async () => {

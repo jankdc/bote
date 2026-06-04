@@ -98,6 +98,11 @@ impl ByteStream for JsByteStream {
         "read() returned {view_len} bytes for a {length}-byte request"
       )));
     }
+    if view_len == 0 && length > 0 {
+      return Err(SourceError::Io(format!(
+        "read() returned 0 bytes for a {length}-byte request at offset {offset} (before declared EOF)"
+      )));
+    }
     // Copy out so `Bytes` owns its allocation; don't carry the JS view further.
     Ok(Bytes::copy_from_slice(&view[..view_len]))
   }

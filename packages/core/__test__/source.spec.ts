@@ -57,21 +57,26 @@ test('source_open_is_deferred_until_open_call', async () => {
 })
 
 test('source_rejects_fractional_chunk_bytes', async () => {
-  // A fractional chunkBytes once truncated to 0 and divided-by-zero when
-  // deriving the default budget; it must now be a clean validation error.
-  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0.5 })), /chunkBytes must be a whole positive/)
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0.5 })), /chunkBytes must be a positive integer/)
 })
 
 test('source_rejects_zero_chunk_bytes', async () => {
-  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a whole positive/)
-})
-
-test('source_rejects_invalid_chunk_bytes', async () => {
-  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a whole positive/)
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 0 })), /chunkBytes must be a positive integer/)
 })
 
 test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
-  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 100 })), /multiple of 64/)
+  await assert.rejects(() => open(fromBuffer(enc(DOC), { chunkBytes: 100 })), /chunkBytes must be a multiple of 64/)
+})
+
+test('source_rejects_invalid_size_in_facade', async () => {
+  const withSize = (size: number): Source => ({
+    open: () =>
+      Promise.resolve({ size, read: () => Promise.resolve(new Uint8Array()) }),
+  })
+  await assert.rejects(() => open(withSize(Number.NaN)), /source size must be a non-negative integer, got NaN/)
+  await assert.rejects(() => open(withSize(Number.POSITIVE_INFINITY)), /source size must be a non-negative integer, got Infinity/)
+  await assert.rejects(() => open(withSize(-1)), /source size must be a non-negative integer, got -1/)
+  await assert.rejects(() => open(withSize(1.5)), /source size must be a non-negative integer, got 1.5/)
 })
 
 // fromHttpRange isn't exercised by the memory/file specs. Mocking `globalThis.fetch`
@@ -147,6 +152,24 @@ test('source_from_http_range_rejects_when_get_returns_200_ignoring_range', async
   await assert.rejects(() => cursor.get('users', 0, 'name'), /ignored Range and returned 200/)
 })
 
+test('source_zero_byte_read_errors_instead_of_hanging', async () => {
+  // A read() that returns 0 bytes for an in-bounds, positive-length request is a
+  // contract violation, not EOF. The scan must surface it rather than re-faulting
+  // the same offset forever. The timeout race turns a regression (hang) into a
+  // failure instead of stalling the suite.
+  const source: Source = {
+    open: () =>
+      Promise.resolve({
+        size: 1024, // declares bytes that read() never delivers
+        read: () => Promise.resolve(new Uint8Array()),
+      }),
+  }
+  const cursor = await open(source)
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('hung: query never settled')), 3000))
+  await assert.rejects(() => Promise.race([cursor.get('a'), timeout]), /returned 0 bytes/)
+  await cursor.close()
+})
+
 test('lifecycle_close_drives_reader_close_exactly_once', async () => {
   let closeCalls = 0
   const source: Source = {
@@ -166,6 +189,26 @@ test('lifecycle_close_drives_reader_close_exactly_once', async () => {
   await cursor.close()
   await cursor.close()
   assert.equal(closeCalls, 1)
+})
+
+test('lifecycle_use_after_close_throws_uniformly', async () => {
+  // close() invalidates the cursor for every method, regardless of source - a
+  // single defined contract, not the source-dependent behavior of the raw reader
+  // (fromBuffer reads would keep working; a file read would throw an opaque I/O
+  // error). Sub-cursors from walk/hop share the same closed state.
+  const cursor = await open(fromBuffer(enc(DOC)))
+  const child = await cursor.hop('meta')
+  assert.ok(child)
+  await cursor.close()
+
+  await assert.rejects(() => cursor.get('users', 0, 'name'), /cursor is closed/)
+  await assert.rejects(() => cursor.has('users'), /cursor is closed/)
+  await assert.rejects(() => cursor.count('users'), /cursor is closed/)
+  await assert.rejects(() => cursor.hop('users'), /cursor is closed/)
+  assert.throws(() => cursor.iter('users'), /cursor is closed/)
+  assert.throws(() => cursor.walk(), /cursor is closed/)
+  // The escaped sub-cursor is invalidated by the root's close too.
+  await assert.rejects(() => child.get('version'), /cursor is closed/)
 })
 
 test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
@@ -193,10 +236,9 @@ test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
 })
 
 test('lifecycle_open_failure_still_closes_reader', async () => {
-  // The native `open` rejects on `size: NaN` (lib.rs requires a finite,
-  // non-negative number). `open()` must still drive the reader's `close()`
-  // when the native side fails after `source.open()` has succeeded - otherwise
-  // a failed open leaks a file handle.
+  // `open` rejects on `size: NaN` (a non-negative integer is required). It must
+  // still drive the reader's `close()` when validation fails after
+  // `source.open()` has succeeded - otherwise a failed open leaks a file handle.
   let closeCalls = 0
   const source: Source = {
     open: () =>
@@ -210,4 +252,29 @@ test('lifecycle_open_failure_still_closes_reader', async () => {
   }
   await assert.rejects(() => open(source))
   assert.equal(closeCalls, 1, 'reader.close must run even when openNative rejects')
+})
+
+test('lifecycle_cleanup_failure_does_not_mask_open_error', async () => {
+  // openNative rejects (size: NaN) AND reader.close() also throws. The caller
+  // must still see the original open failure, not the cleanup error - the close
+  // failure rides along as `.cause`.
+  const source: Source = {
+    open: () =>
+      Promise.resolve({
+        size: Number.NaN,
+        read: () => Promise.resolve(new Uint8Array()),
+        close: async () => {
+          throw new Error('close blew up')
+        },
+      }),
+  }
+  await assert.rejects(
+    () => open(source),
+    (err: unknown) => {
+      assert.ok(err instanceof Error)
+      assert.doesNotMatch(err.message, /close blew up/, 'primary error must not be the cleanup error')
+      assert.match((err.cause as Error)?.message ?? '', /close blew up/, 'cleanup error attached as cause')
+      return true
+    },
+  )
 })

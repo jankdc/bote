@@ -80,10 +80,12 @@ async fn project_one(
 ) -> Result<serde_json::Value, SessionError> {
   match session
     .run_resolve(path, child_start, base_depth, window)
-    .await?
+    .await
   {
-    None => Ok(serde_json::Value::Null),
-    Some(loc) => session.materialize(loc, window).await,
+    Ok(None) => Ok(serde_json::Value::Null),
+    Ok(Some(loc)) => session.materialize(loc, window).await,
+    Err(SessionError::Path(_)) => Ok(serde_json::Value::Null),
+    Err(e) => Err(e),
   }
 }
 
