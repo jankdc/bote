@@ -11,6 +11,7 @@ export {
   PathError,
   formatPath,
   type Path,
+  type PathFaultCode,
   type Segment,
   type StandardSchemaV1,
 } from './validate.ts'

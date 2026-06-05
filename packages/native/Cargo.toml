@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 async-trait = "0.1"
 bytes = "1"
 dhat = { version = "0.3", optional = true }
-napi = { version = "3.0.0", features = ["async", "serde-json", "tokio_rt"] }
-napi-derive = "3.0.0"
+napi = { version = "3.9", features = ["async", "serde-json", "tokio_rt"] }
+napi-derive = "3.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

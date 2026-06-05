@@ -60,6 +60,12 @@ export interface IterArgs {
  */
 export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
 
+export type PathFaultCode =  'through_scalar'|
+'scalar_target'|
+'iter_on_object'|
+'walk_on_array'|
+'wrong_kind';
+
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {
   offset: number

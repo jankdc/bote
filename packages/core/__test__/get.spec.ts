@@ -114,6 +114,25 @@ test('get_through_scalar_and_wrong_kind_throw_PathError', async (t) => {
   assert.equal(await cursor.get('a'), 1)
 })
 
+test('get_path_error_carries_machine_code', async (t) => {
+  const cursor = await open(memorySource(enc('{"a":1,"xs":[10,20],"obj":{"k":"v"}}')))
+  t.after(() => cursor.close())
+  const faultOf = async (op: Promise<unknown>): Promise<PathError> => {
+    try {
+      await op
+    } catch (err) {
+      if (err instanceof PathError) return err
+      throw err
+    }
+    throw new Error('expected a PathError')
+  }
+  assert.equal((await faultOf(cursor.get('a', 'b'))).code, 'through_scalar')
+  assert.equal((await faultOf(cursor.get('xs', 'name'))).code, 'wrong_kind')
+  assert.equal((await faultOf(cursor.get('obj', 0))).code, 'wrong_kind')
+  assert.match((await faultOf(cursor.get('a', 'b'))).message, /at segment \d+/)
+  assert.match((await faultOf(cursor.get('xs', 'name'))).message, /segment \d+ does not match/)
+})
+
 test('get_rejects_fractional_negative_nan_and_non_string_number_segments', async (t) => {
   const cursor = await open(memorySource(enc('{"xs":[1,2,3]}')))
   t.after(() => cursor.close())

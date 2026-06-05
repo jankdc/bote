@@ -754,8 +754,8 @@ mod tests {
       Err(e) => e,
     };
     assert!(
-      err.reason.contains("use iter()"),
-      "error should steer the caller to iter(), got: {}",
+      err.reason.contains("bote:path:walk_on_array"),
+      "walk-on-array must carry the walk_on_array code, got: {}",
       err.reason
     );
     let guard = w.state.lock().await;
@@ -772,8 +772,8 @@ mod tests {
     let mut it = CursorIter::new(s.clone(), Vec::new(), 0, 0, None, 8, false);
     let err = it.next(None).await.expect_err("object target must throw");
     assert!(
-      err.reason.contains("use walk()"),
-      "error should steer the caller to walk(), got: {}",
+      err.reason.contains("bote:path:iter_on_object"),
+      "iter-on-object must carry the iter_on_object code, got: {}",
       err.reason
     );
     let guard = it.state.lock().await;

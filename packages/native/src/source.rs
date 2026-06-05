@@ -36,9 +36,13 @@ pub struct ReadArgs {
   pub length: f64,
 }
 
-/// `CalleeHandled = false`: `call_async` takes args directly and JS rejections
-/// surface via the returned `Promise`'s `.await`. `Weak = true` so a dormant
-/// Cursor's tsfn doesn't pin the Node event loop (pending `await`s keep it alive).
+/// `CalleeHandled = false`: the call takes args directly. We invoke it via
+/// `call_async_catch`, so a *synchronous* throw inside the JS `read` fn comes
+/// back as `Err` instead of aborting the host process through
+/// `napi_fatal_exception` (plain `call_async` would crash); an async rejection
+/// of the returned `Promise` surfaces via its own `.await`. `Weak = true` so a
+/// dormant Cursor's tsfn doesn't pin the Node event loop (pending `await`s keep
+/// it alive).
 pub type ReadFn =
   ThreadsafeFunction<ReadArgs, Promise<Uint8Array>, ReadArgs, napi::Status, false, true>;
 
@@ -82,12 +86,12 @@ impl ByteStream for JsByteStream {
     // the JS thread never idles, so that queue backs up and resident bytes grow
     // with bytes-read.
     let promise = read_fn
-      .call_async(ReadArgs {
+      .call_async_catch(ReadArgs {
         offset: offset as f64,
         length: length as f64,
       })
       .await
-      .map_err(|e| SourceError::Io(format!("threadsafe call failed: {e}")))?;
+      .map_err(|e| SourceError::Io(format!("read() call failed: {e}")))?;
     let view: Uint8Array = promise
       .await
       .map_err(|e| SourceError::Io(format!("read() promise rejected: {e}")))?;
