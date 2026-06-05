@@ -25,15 +25,16 @@
 // out-read itself, so a drop is forgery-proof proof the cache did work. The
 // wall-clock columns are indicative color only (hardware-dependent).
 
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { closeSync, openSync, readFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { fromBuffer, open, type Source, type SourceReader } from '@botejs/core'
 
-import { arg, flag } from './cli.ts'
-import { buildArrayDoc } from './fixtures.ts'
-import { fmtBytes, fmtNs } from './format.ts'
+import { arg, flag } from '#lib/cli.ts'
+import { buildArrayDoc } from '#lib/fixtures.ts'
+import { fmtBytes, fmtNs } from '#lib/format.ts'
+import { median, sample, timeNs } from '#lib/timings.ts'
+import { createTempDir } from '#lib/tmp.ts'
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
 
@@ -276,12 +277,6 @@ async function measureReads(s: Scenario): Promise<{ cold: number; warm: number }
   return { cold: coldReads, warm: warmReads }
 }
 
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b)
-  const m = Math.floor(s.length / 2)
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
-}
-
 const COLD_ITERS = 120
 const WARM_ITERS = 3000
 
@@ -292,21 +287,14 @@ async function measureTime(s: Scenario): Promise<{ cold: number; warm: number }>
   const coldSamples: number[] = []
   for (let i = 0; i < coldIters; i++) {
     const c = await open(source, baseOpts)
-    const t0 = process.hrtime.bigint()
-    await s.target(c)
-    coldSamples.push(Number(process.hrtime.bigint() - t0))
+    coldSamples.push(await timeNs(() => s.target(c)))
     await c.close()
   }
 
   const wc = await open(source, baseOpts)
   await s.warm(wc)
   for (let i = 0; i < 100; i++) await s.target(wc) // warm up the hit path
-  const warmSamples: number[] = []
-  for (let i = 0; i < WARM_ITERS; i++) {
-    const t0 = process.hrtime.bigint()
-    await s.target(wc)
-    warmSamples.push(Number(process.hrtime.bigint() - t0))
-  }
+  const warmSamples = await sample(() => s.target(wc), WARM_ITERS)
   await wc.close()
 
   return { cold: median(coldSamples), warm: median(warmSamples) }
@@ -322,27 +310,19 @@ function speedup(cold: number, warm: number): string {
   return `${(cold / warm).toFixed(1)}×`
 }
 
-function pad(s: string, w: number): string {
-  return s.length >= w ? s : s + ' '.repeat(w - s.length)
-}
-
-function padL(s: string, w: number): string {
-  return s.length >= w ? s : ' '.repeat(w - s.length) + s
-}
-
 async function runScenarios(): Promise<void> {
   const skipTime = flag('--reads-only')
   console.log(`bote structural-index cache — warm vs cold${budgetNote()}\n`)
   const header = skipTime
-    ? [pad('scenario', 42), padL('cold reads', 11), padL('warm reads', 11), padL('saved', 8)]
+    ? ['scenario'.padEnd(42), 'cold reads'.padStart(11), 'warm reads'.padStart(11), 'saved'.padStart(8)]
     : [
-        pad('scenario', 42),
-        padL('cold reads', 11),
-        padL('warm reads', 11),
-        padL('saved', 8),
-        padL('cold time', 11),
-        padL('warm time', 11),
-        padL('speedup', 9),
+        'scenario'.padEnd(42),
+        'cold reads'.padStart(11),
+        'warm reads'.padStart(11),
+        'saved'.padStart(8),
+        'cold time'.padStart(11),
+        'warm time'.padStart(11),
+        'speedup'.padStart(9),
       ]
   console.log(header.join('  '))
   console.log('-'.repeat(header.join('  ').length))
@@ -350,14 +330,14 @@ async function runScenarios(): Promise<void> {
   for (const s of scenarios) {
     const reads = await measureReads(s)
     const cols = [
-      pad(s.name, 42),
-      padL(String(reads.cold), 11),
-      padL(String(reads.warm), 11),
-      padL(pct(reads.cold, reads.warm), 8),
+      s.name.padEnd(42),
+      String(reads.cold).padStart(11),
+      String(reads.warm).padStart(11),
+      pct(reads.cold, reads.warm).padStart(8),
     ]
     if (!skipTime) {
       const time = await measureTime(s)
-      cols.push(padL(fmtNs(time.cold), 11), padL(fmtNs(time.warm), 11), padL(speedup(time.cold, time.warm), 9))
+      cols.push(fmtNs(time.cold).padStart(11), fmtNs(time.warm).padStart(11), speedup(time.cold, time.warm).padStart(9))
     }
     console.log(cols.join('  '))
   }
@@ -372,7 +352,7 @@ async function runScenarios(): Promise<void> {
 // into one buffer. Streaming keeps peak memory near the doc size instead of
 // holding a giant intermediate string + array of parts.
 function buildRecordsBuffer(targetBytes: number): { buf: Uint8Array; count: number } {
-  const dir = mkdtempSync(join(tmpdir(), 'bote-cache-'))
+  const { dir, cleanup } = createTempDir('bote-cache-')
   const path = join(dir, 'doc.json')
   const fd = openSync(path, 'w')
   try {
@@ -393,7 +373,7 @@ function buildRecordsBuffer(targetBytes: number): { buf: Uint8Array; count: numb
     return { buf: readFileSync(path), count: i }
   } finally {
     closeSync(fd)
-    rmSync(dir, { recursive: true, force: true })
+    cleanup()
   }
 }
 

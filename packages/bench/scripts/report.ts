@@ -6,9 +6,10 @@
 
 import { readFileSync, writeFileSync } from 'node:fs'
 
-import type { Result } from './cells.ts'
-import { arg, parseJsonl } from './cli.ts'
-import { fmtBytes, fmtNs } from './format.ts'
+import type { Result } from '#lib/cells.ts'
+import { arg, parseJsonl } from '#lib/cli.ts'
+import { fmtBytes, fmtNs } from '#lib/format.ts'
+import { columnWidths, row, rule } from '#lib/table.ts'
 
 const inPath = arg('--in')
 const outPath = arg('--out')
@@ -38,9 +39,9 @@ const rows = sorted.map((r): string[] => {
   return [op, doc, bote]
 })
 
-const widths = header.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i].length)))
-const tableRow = (cols: readonly string[]): string => `| ${cols.map((c, i) => c.padEnd(widths[i])).join(' | ')} |`
-const sep = `| ${widths.map((w) => '-'.repeat(w)).join(' | ')} |`
+const widths = columnWidths(header, rows)
+const tableRow = (cols: readonly string[]): string => `| ${row(cols, widths, ' | ')} |`
+const sep = `| ${rule(widths, '-', ' | ')} |`
 
 const chunk = results.find((r) => !r.error)?.cell.chunkBytes
 const caption = chunk ? `file source, chunk=${fmtBytes(chunk)}` : 'no cells'

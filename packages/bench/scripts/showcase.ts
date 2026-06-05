@@ -6,7 +6,7 @@
 //
 // Internally it re-execs itself as `showcase.ts run ...` once per cell.
 
-import { execSync, spawn } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,8 +14,10 @@ import { performance } from 'node:perf_hooks'
 
 import { fromFile, open } from '@botejs/core'
 
-import { arg } from './cli.ts'
-import { fmtBytes, fmtNs } from './format.ts'
+import { arg } from '#lib/cli.ts'
+import { fmtBytes, fmtNs } from '#lib/format.ts'
+import { runNode } from '#lib/proc.ts'
+import { columnWidths, row, rule } from '#lib/table.ts'
 
 interface RunResult {
   op: string
@@ -143,13 +145,12 @@ function renderTable(results: RunResult[], cold: boolean): void {
     return `${(parse.time_ns / bote.time_ns).toFixed(1)}×`
   }
   const data = order.map((op) => [op, cell(byOp.get(op)!.get('json-parse')), cell(byOp.get(op)!.get('bote')), speedup(op)])
-  const widths = headers.map((h, i) => Math.max(h.length, ...data.map((row) => row[i].length)))
-  const pad = (row: string[]): string => row.map((c, i) => c.padEnd(widths[i])).join('  ')
+  const widths = columnWidths(headers, data)
   console.log('')
   console.log(cold ? 'COLD start (OS page cache purged before each cell)' : 'WARM (OS cache left primed — NOT a cold-start result)')
-  console.log(pad(headers))
-  console.log(widths.map((w) => '─'.repeat(w)).join('  '))
-  for (const row of data) console.log(pad(row))
+  console.log(row(headers, widths))
+  console.log(rule(widths))
+  for (const r of data) console.log(row(r, widths))
   console.log('')
 }
 
@@ -203,25 +204,15 @@ function dropCaches(): void {
   execSync('sudo -v && sudo -n purge', { stdio: 'inherit' })
 }
 
-function runCell(op: string, approach: string, index: number): Promise<RunResult> {
-  return new Promise((resolve) => {
-    const args = ['--experimental-strip-types', '--no-warnings=ExperimentalWarning', selfPath, 'run']
-    args.push('--approach', approach, '--index', String(index), '--op', op, '--file', filePath)
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'inherit'] })
-    let out = ''
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (d) => {
-      out += d
-    })
-    child.on('close', () => {
-      const line = out.trim().split('\n').pop() ?? ''
-      try {
-        resolve(JSON.parse(line) as RunResult)
-      } catch {
-        resolve({ op, approach, index, time_ns: null, error: `no result (output: ${out.trim()})` })
-      }
-    })
-  })
+async function runCell(op: string, approach: string, index: number): Promise<RunResult> {
+  const args = [selfPath, 'run', '--approach', approach, '--index', String(index), '--op', op, '--file', filePath]
+  const { stdout } = await runNode(args)
+  const line = stdout.trim().split('\n').pop() ?? ''
+  try {
+    return JSON.parse(line) as RunResult
+  } catch {
+    return { op, approach, index, time_ns: null, error: `no result (output: ${stdout.trim()})` }
+  }
 }
 
 const cells: Array<{ op: string; index: number }> = [
