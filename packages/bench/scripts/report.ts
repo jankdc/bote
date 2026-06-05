@@ -25,13 +25,15 @@ const sorted = [...results].sort(
     a.cell.op.localeCompare(b.cell.op) ||
     a.cell.accessPattern.localeCompare(b.cell.accessPattern) ||
     a.cell.docShape.localeCompare(b.cell.docShape) ||
-    a.cell.docSize - b.cell.docSize,
+    a.cell.docSize - b.cell.docSize ||
+    (a.cell.batch ?? 0) - (b.cell.batch ?? 0),
 )
 
 const header = ['operation', 'document', 'bote'] as const
 
 const rows = sorted.map((r): string[] => {
-  const op = `${r.cell.op} · ${r.cell.accessPattern}`
+  const batch = r.cell.batch !== undefined ? ` · batch=${r.cell.batch.toLocaleString()}` : ''
+  const op = `${r.cell.op} · ${r.cell.accessPattern}${batch}`
   const doc = `${r.cell.docShape} · n=${r.cell.docSize.toLocaleString()}`
   if (r.error) return [op, doc, '⚠️ error']
   let bote = fmtNs(r.timing.min_ns)
