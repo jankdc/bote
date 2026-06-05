@@ -7,26 +7,24 @@
 //
 // CLI:
 //   --out <path>     write JSONL to <path> instead of stdout
-//   --common         run only the curated common-ops subset (CI report)
 //   --filter <re>    only run cells whose id matches the regex
 //   --limit <n>      stop after the first n matching cells
 //   --dry-run        print the cell list to stderr and exit
 
-import { execSync, spawn } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import type { Writable } from 'node:stream'
 
-import { commonCells, defaultCells, type Cell, type Result } from './cells.ts'
-import { arg, flag } from './cli.ts'
-import { fmtNs } from './format.ts'
+import { defaultCells, type Cell, type Result } from '#lib/cells.ts'
+import { arg, flag } from '#lib/cli.ts'
+import { runNode } from '#lib/proc.ts'
 
 const outPath = arg('--out')
-const common = flag('--common')
 const filterRe = arg('--filter') ? new RegExp(arg('--filter')!) : null
 const limit = arg('--limit') ? Number.parseInt(arg('--limit')!, 10) : Number.POSITIVE_INFINITY
 const dryRun = flag('--dry-run')
 
-const workerPath = new URL('./matrix-worker.ts', import.meta.url).pathname
+const workerPath = new URL('../lib/matrix-worker.ts', import.meta.url).pathname
 
 function gitSha(): string {
   try {
@@ -38,7 +36,7 @@ function gitSha(): string {
 
 const meta = { sha: gitSha(), arch: process.arch, platform: process.platform, node: process.version }
 
-let cells: Cell[] = common ? commonCells() : defaultCells()
+let cells: Cell[] = defaultCells()
 if (filterRe) cells = cells.filter((c) => filterRe.test(c.id))
 if (Number.isFinite(limit)) cells = cells.slice(0, limit)
 
@@ -58,31 +56,19 @@ interface SpawnOutcome {
 }
 
 async function runCell(cell: Cell): Promise<SpawnOutcome> {
-  return new Promise((resolve) => {
-    const nodeArgs = ['--experimental-strip-types', '--no-warnings=ExperimentalWarning', workerPath]
-    const child = spawn(process.execPath, nodeArgs, { stdio: ['pipe', 'pipe', 'inherit'] })
-    let out = ''
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (d) => {
-      out += d
-    })
-    child.on('error', (err) => resolve({ result: null, raw: out, exitCode: null, spawnError: err }))
-    child.on('close', (code) => {
-      const line = out.trim().split('\n').pop() ?? ''
-      let result: Result | null = null
-      try {
-        if (line) {
-          const parsed = JSON.parse(line) as Result
-          if (parsed && typeof parsed === 'object') result = parsed
-        }
-      } catch {
-        // fall through with raw output for the driver to log
-      }
-      resolve({ result, raw: out, exitCode: code })
-    })
-    child.stdin.write(JSON.stringify(cell))
-    child.stdin.end()
-  })
+  const { stdout, code, error } = await runNode([workerPath], { input: JSON.stringify(cell) })
+  if (error) return { result: null, raw: stdout, exitCode: null, spawnError: error }
+  const line = stdout.trim().split('\n').pop() ?? ''
+  let result: Result | null = null
+  try {
+    if (line) {
+      const parsed = JSON.parse(line) as Result
+      if (parsed && typeof parsed === 'object') result = parsed
+    }
+  } catch {
+    // fall through with raw output for the driver to log
+  }
+  return { result, raw: stdout, exitCode: code }
 }
 
 console.error(`running ${cells.length} cell(s); meta=${JSON.stringify(meta)}`)
@@ -116,8 +102,6 @@ for (const cell of cells) {
     console.error(`✗ ${cell.id}  ${result.error}`)
     continue
   }
-  const ratio = result.reference ? `  ratio=${result.reference.ratio.toFixed(2)}` : ''
-  console.error(`✓ ${cell.id}  p50=${fmtNs(result.timing.p50_ns)}${ratio}  (${durationMs} ms)`)
 }
 
 if (sink !== process.stdout) (sink as ReturnType<typeof createWriteStream>).end()

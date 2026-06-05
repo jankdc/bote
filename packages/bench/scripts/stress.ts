@@ -13,12 +13,13 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { withTempDoc } from './fixtures.ts'
-import { fmtBytes } from './format.ts'
+import { withTempDoc } from '#lib/fixtures.ts'
+import { fmtBytes } from '#lib/format.ts'
+import { NODE_TS_FLAGS } from '#lib/proc.ts'
 
 const ITEMS = 2_000_000 // ≈ 110 MB at padWidth 7
 const PAD_WIDTH = 7
-const WORKER = join(dirname(fileURLToPath(import.meta.url)), 'stress-worker.ts')
+const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'stress-worker.ts')
 
 // V8 needs some headroom for code, semi-space, and parser state; under
 // ~24 MB it OOMs before user code runs even on a trivial program. 32 MB
@@ -35,13 +36,7 @@ interface Result {
 
 function runChild(capMb: number, docPath: string): Promise<Result> {
   return new Promise((resolve) => {
-    const args = [
-      `--max-old-space-size=${capMb}`,
-      '--experimental-strip-types',
-      '--no-warnings=ExperimentalWarning',
-      WORKER,
-      docPath,
-    ]
+    const args = [`--max-old-space-size=${capMb}`, ...NODE_TS_FLAGS, WORKER, docPath]
     const start = Date.now()
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'inherit', 'pipe'] })
     let stderr = ''

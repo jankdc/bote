@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   report:
-    name: Report common ops
+    name: Report matrix
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: write
@@ -37,8 +37,8 @@ jobs:
         run: yarn install
       - name: Build
         run: yarn build
-      - name: Run common cells
-        run: yarn workspace @botejs/bench bench:matrix --common --out "$GITHUB_WORKSPACE/matrix.jsonl"
+      - name: Run matrix
+        run: yarn workspace @botejs/bench bench:matrix --out "$GITHUB_WORKSPACE/matrix.jsonl"
       - name: Render report
         run: yarn workspace @botejs/bench bench:report --in "$GITHUB_WORKSPACE/matrix.jsonl" --out "$GITHUB_WORKSPACE/report.md"
       - name: Build comment body
@@ -49,7 +49,7 @@ jobs:
             echo 'body<<REPORT_EOF'
             echo '### Bench report'
             echo ''
-            echo 'Common-op timings on `ubuntu-24.04`:'
+            echo 'Matrix timings on `ubuntu-24.04`:'
             echo ''
             cat "$GITHUB_WORKSPACE/report.md"
             echo REPORT_EOF

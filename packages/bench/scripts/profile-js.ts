@@ -22,8 +22,8 @@
 
 import { open, fromFile } from '@botejs/core'
 
-import { withTempDoc, withTempObjectDoc } from './fixtures.ts'
-import { fmtBytes } from './format.ts'
+import { withTempDoc, withTempObjectDoc } from '#lib/fixtures.ts'
+import { fmtBytes } from '#lib/format.ts'
 
 const gc = (globalThis as { gc?: () => void }).gc
 if (!gc) {

@@ -10,3 +10,18 @@ export function arg(name: string): string | null {
 export function flag(name: string): boolean {
   return process.argv.includes(name)
 }
+
+/** Parse JSONL, skipping blank/malformed lines. */
+export function parseJsonl<T>(text: string, onError?: (msg: string) => void): T[] {
+  const out: T[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      out.push(JSON.parse(trimmed) as T)
+    } catch (e) {
+      onError?.((e as Error).message)
+    }
+  }
+  return out
+}

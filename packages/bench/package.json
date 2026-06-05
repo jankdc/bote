@@ -4,18 +4,21 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "imports": {
+    "#lib/*": "./lib/*"
+  },
   "engines": {
     "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
   },
   "scripts": {
-    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning bench.ts",
-    "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning matrix.ts",
-    "bench:report": "node --experimental-strip-types --no-warnings=ExperimentalWarning report.ts",
-    "bench:cache": "node --experimental-strip-types --no-warnings=ExperimentalWarning cache.ts",
-    "profile:rust": "node --experimental-strip-types --no-warnings=ExperimentalWarning profile-rust.ts",
-    "profile:js": "node --expose-gc --experimental-strip-types --no-warnings=ExperimentalWarning profile-js.ts",
-    "stress": "node --experimental-strip-types --no-warnings=ExperimentalWarning stress.ts",
-    "showcase": "node --experimental-strip-types --no-warnings=ExperimentalWarning showcase.ts",
+    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/matrix.ts | node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/report.ts",
+    "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/matrix.ts",
+    "bench:report": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/report.ts",
+    "bench:cache": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/cache.ts",
+    "profile:rust": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/profile-rust.ts",
+    "profile:js": "node --expose-gc --experimental-strip-types --no-warnings=ExperimentalWarning scripts/profile-js.ts",
+    "stress": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/stress.ts",
+    "showcase": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/showcase.ts",
     "lint": "oxlint ."
   },
   "dependencies": {
