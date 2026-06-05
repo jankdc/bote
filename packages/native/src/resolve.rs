@@ -27,66 +27,70 @@ pub fn resolve_step(
     scan_record,
     ..
   } = state;
+
   while *segment_idx < path.len() {
-    if segment_scan.is_none() {
-      let (kind, value_start, ls) = if let Some(hint) = seed.take() {
-        // Seeded resume: kind and position come from the array member, so the open
-        // byte is never read. Only the first entered container is ever seeded.
-        let ls = match hint {
-          ResumePoint::Object { offset } => SegmentScan {
-            kind: ContainerKind::Object,
-            offset,
+    let ls = match segment_scan {
+      Some(ls) => ls,
+      None => {
+        let (kind, value_start, ls) = if let Some(hint) = seed.take() {
+          // Seeded resume: kind and position come from the array member, so the open
+          // byte is never read. Only the first entered container is ever seeded.
+          let ls = match hint {
+            ResumePoint::Object { offset } => SegmentScan {
+              kind: ContainerKind::Object,
+              offset,
+              index: 0,
+              depth: 0,
+              carry: ScanCarry::default(),
+            },
+            ResumePoint::Array { index, offset } => SegmentScan {
+              kind: ContainerKind::Array,
+              offset,
+              index,
+              depth: 0,
+              carry: ScanCarry::default(),
+            },
+          };
+          (ls.kind, *start, ls)
+        } else {
+          // Cold entry. Commit `start` to the skipped-whitespace position before the
+          // byte fetch so a `ChunkMiss` from `byte_at` doesn't re-skip on retry.
+          let s = walker.skip_whitespace(*start)?;
+          *start = s;
+          let b = walker.byte_at(s)?.ok_or(TraverseError::UnexpectedEof(s))?;
+          let kind = match b {
+            b'{' => ContainerKind::Object,
+            b'[' => ContainerKind::Array,
+            _ => {
+              return Ok(Resolved::NotNavigable(PathFault::ThroughScalar {
+                segment: *segment_idx,
+              }))
+            }
+          };
+          let ls = SegmentScan {
+            kind,
+            offset: s + 1,
             index: 0,
             depth: 0,
             carry: ScanCarry::default(),
-          },
-          ResumePoint::Array { index, offset } => SegmentScan {
-            kind: ContainerKind::Array,
-            offset,
-            index,
-            depth: 0,
-            carry: ScanCarry::default(),
-          },
+          };
+          (kind, s, ls)
         };
-        (ls.kind, *start, ls)
-      } else {
-        // Cold entry. Commit `start` to the skipped-whitespace position before the
-        // byte fetch so a `ChunkMiss` from `byte_at` doesn't re-skip on retry.
-        let s = walker.skip_whitespace(*start)?;
-        *start = s;
-        let b = walker.byte_at(s)?.ok_or(TraverseError::UnexpectedEof(s))?;
-        let kind = match b {
-          b'{' => ContainerKind::Object,
-          b'[' => ContainerKind::Array,
-          _ => {
-            return Ok(Resolved::NotNavigable(PathFault::ThroughScalar {
-              segment: *segment_idx,
-            }))
-          }
-        };
-        let ls = SegmentScan {
-          kind,
-          offset: s + 1,
-          index: 0,
-          depth: 0,
-          carry: ScanCarry::default(),
-        };
-        (kind, s, ls)
-      };
-      if let Some(h) = scan_record.as_mut() {
-        h.containers.push(ContainerRecord {
-          seg: *segment_idx,
-          kind,
-          value_start,
-          members: Vec::new(),
-          object_resume: None,
-          array_members: Vec::new(),
-        });
+        if let Some(h) = scan_record.as_mut() {
+          h.containers.push(ContainerRecord {
+            seg: *segment_idx,
+            kind,
+            value_start,
+            members: Vec::new(),
+            object_resume: None,
+            array_members: Vec::new(),
+          });
+        }
+        segment_scan.insert(ls)
       }
-      *segment_scan = Some(ls);
-    }
+    };
+
     let segment = &path[*segment_idx];
-    let ls = segment_scan.as_mut().expect("set just above");
     let cs = scan_record.as_mut().and_then(|h| h.containers.last_mut());
     let descend = match (ls.kind, segment) {
       // Recording is gated per kind: objects skip it (and key decode) when the
