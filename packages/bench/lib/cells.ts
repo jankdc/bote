@@ -13,6 +13,7 @@ export { type DocShape }
 export interface Cell {
   id: string
   accessPattern: AccessPattern
+  batch?: number
   chunkBytes: number
   docShape: DocShape
   docSize: number
@@ -51,7 +52,8 @@ export interface Result {
 }
 
 function mk(c: Omit<Cell, 'id'>): Cell {
-  const id = `${c.op}.${c.accessPattern}.${c.docShape}.n${c.docSize}.cs${c.chunkBytes}`
+  const batch = c.batch !== undefined ? `.b${c.batch}` : ''
+  const id = `${c.op}.${c.accessPattern}.${c.docShape}.n${c.docSize}.cs${c.chunkBytes}${batch}`
   return { ...c, id }
 }
 
@@ -73,25 +75,37 @@ const WALK = 10_000
 const ITER = 100_000
 const SMALL = 10_000
 const LARGE = 1_000_000
+const ITER_BATCHES = [1, 10, 100, 1_000, 10_000, 100_000]
 
 export function defaultCells(): Cell[] {
   const cells: Cell[] = []
   const base = { chunkBytes: CHUNK_SIZE, padWidth: PAD_WIDTH }
   const point = (docShape: DocShape, ap: AccessPattern, docSize: number, op: Operation = 'get'): void => {
-    cells.push(mk({ ...base, op, docShape, docSize, accessPattern: ap, samples: 8, iterations: iterCount(docSize, ap) }))
+    cells.push(
+      mk({ ...base, op, docShape, docSize, accessPattern: ap, samples: 8, iterations: iterCount(docSize, ap) }),
+    )
   }
   const traverse = (docShape: DocShape, op: Operation, ap: AccessPattern, docSize: number): void => {
     cells.push(mk({ ...base, op, docShape, docSize, accessPattern: ap, samples: 8, iterations: 1 }))
   }
+  const iterBatch = (docShape: DocShape, docSize: number, batch: number): void => {
+    cells.push(
+      mk({ ...base, op: 'iter', docShape, docSize, accessPattern: 'iter-all', samples: 8, iterations: 1, batch }),
+    )
+  }
 
   // array-of-objects (the workhorse): O(1) entry once at LARGE; deep scan-to-last
   // at both magnitudes (the deep LARGE scan faults a long run of chunks); array
-  // iter throughput once.
   point('array-of-objects', 'shallow', LARGE)
   point('array-of-objects', 'deep', SMALL)
   point('array-of-objects', 'deep', LARGE)
   point('array-of-objects', 'deep', LARGE, 'has') // has parallels get; one scale to confirm it stays gated
-  traverse('array-of-objects', 'iter', 'iter-all', ITER)
+
+  // iter throughput swept across batch sizes (same doc, batch is the only variable
+  // - exposes how crossing overhead amortizes vs per-yield array cost).
+  for (const batch of ITER_BATCHES) {
+    iterBatch('array-of-objects', ITER, batch)
+  }
 
   // object-of-objects: the walk workhorse (walk is object-only). Keyed traversal
   // and walk + per-child get, each over WALK members.
@@ -101,7 +115,17 @@ export function defaultCells(): Cell[] {
   // deep-nested: depth (not count) stresses pointer-walking. shallow vs deep
   // brackets the per-level cost; no middle point.
   point('deep-nested', 'shallow', 500)
-  cells.push(mk({ ...base, op: 'get', docShape: 'deep-nested', docSize: 500, accessPattern: 'deep', samples: 8, iterations: 100 }))
+  cells.push(
+    mk({
+      ...base,
+      op: 'get',
+      docShape: 'deep-nested',
+      docSize: 500,
+      accessPattern: 'deep',
+      samples: 8,
+      iterations: 100,
+    }),
+  )
 
   // wide-flat: worst-case linear key scan to the last member (the class PR#11
   // regressed) plus keyed traversal over a wide root.
@@ -112,7 +136,17 @@ export function defaultCells(): Cell[] {
   // resolving the whole container (O(1), not O(doc))- a regression there
   // balloons first_item_ns. The 500k doc exceeds the resident window so the
   // container can't fully reside.
-  cells.push(mk({ ...base, op: 'walk', docShape: 'object-of-objects', docSize: 500_000, accessPattern: 'walk-first', samples: 8, iterations: 1 }))
+  cells.push(
+    mk({
+      ...base,
+      op: 'walk',
+      docShape: 'object-of-objects',
+      docSize: 500_000,
+      accessPattern: 'walk-first',
+      samples: 8,
+      iterations: 1,
+    }),
+  )
 
   return cells
 }

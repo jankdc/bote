@@ -63,7 +63,9 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
     case 'iter': {
       // `.iter` always yields batches; count items, not yields.
       let n = 0
-      for await (const batch of cursor.iter(...path, { batch: DEFAULT_ITER_BATCH })) n += batch.length
+      for await (const batch of cursor.iter(...path, { batch: cell.batch ?? DEFAULT_ITER_BATCH })) {
+        n += batch.length
+      }
       return n
     }
   }
