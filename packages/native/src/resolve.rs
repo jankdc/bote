@@ -3,6 +3,8 @@
 //! Walks a [`&[Segment]`] over a scan-aligned [`Walker`], descending one segment
 //! at a time into objects (by member name) and arrays (by index).
 
+use napi_derive::napi;
+
 use crate::path::Segment;
 use crate::simd::ScanCarry;
 use crate::walker::{ArrayMemberSink, CommaStop, TraverseError, Walker};
@@ -603,30 +605,55 @@ pub enum PathFault {
   WalkOnArray,
 }
 
-impl std::fmt::Display for PathFault {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#[napi(string_enum = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFaultCode {
+  ThroughScalar,
+  ScalarTarget,
+  IterOnObject,
+  WalkOnArray,
+  WrongKind,
+}
+
+impl PathFaultCode {
+  pub(crate) fn as_str(self) -> &'static str {
     match self {
-      Self::ThroughScalar { segment } => {
-        write!(
-          f,
-          "path traverses a non-container value at segment {segment}"
-        )
-      }
-      Self::WrongKind { segment } => {
-        write!(
-          f,
-          "path segment {segment} does not match the container kind"
-        )
-      }
-      Self::ScalarTarget => write!(f, "target value is not a container"),
-      Self::IterOnObject => write!(
-        f,
-        "iter target is an object; use walk() to iterate object members"
-      ),
-      Self::WalkOnArray => write!(
-        f,
-        "walk target is an array; use iter() to iterate array elements"
-      ),
+      Self::ThroughScalar => "through_scalar",
+      Self::ScalarTarget => "scalar_target",
+      Self::IterOnObject => "iter_on_object",
+      Self::WalkOnArray => "walk_on_array",
+      Self::WrongKind => "wrong_kind",
+    }
+  }
+}
+
+impl PathFault {
+  fn fault(&self) -> PathFaultCode {
+    match self {
+      Self::ThroughScalar { .. } => PathFaultCode::ThroughScalar,
+      Self::WrongKind { .. } => PathFaultCode::WrongKind,
+      Self::ScalarTarget => PathFaultCode::ScalarTarget,
+      Self::IterOnObject => PathFaultCode::IterOnObject,
+      Self::WalkOnArray => PathFaultCode::WalkOnArray,
+    }
+  }
+
+  /// The offending segment index, where one is meaningful.
+  fn segment(&self) -> Option<usize> {
+    match self {
+      Self::ThroughScalar { segment } | Self::WrongKind { segment } => Some(*segment),
+      _ => None,
+    }
+  }
+
+  /// Machine code carried across the napi boundary (see `session.rs`
+  /// `SessionError::Path`): `<code>`, or `<code>:<segment>` where the offending
+  /// segment is meaningful. Only this discriminant crosses; the facade owns the
+  /// human message keyed off [`PathFaultCode`].
+  pub(crate) fn code(&self) -> String {
+    match self.segment() {
+      Some(seg) => format!("{}:{}", self.fault().as_str(), seg),
+      None => self.fault().as_str().to_string(),
     }
   }
 }

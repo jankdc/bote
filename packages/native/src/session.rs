@@ -47,10 +47,7 @@ pub enum SessionError {
   Json(#[from] serde_json::Error),
   #[error(transparent)]
   Select(#[from] SelectError),
-  /// A path that contradicts the document shape. The `bote.PathError:` prefix is
-  /// a sentinel the facade matches to rethrow a `PathError` carrying the path.
-  /// TODO: Improve this as this is a bit hacky
-  #[error("bote.PathError: {0}")]
+  #[error("bote:path:{}", .0.code())]
   Path(PathFault),
 }
 

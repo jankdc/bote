@@ -8,6 +8,7 @@ import {
   validateItem,
   PathError,
   type Path,
+  type PathFaultCode,
   type Segment,
   type StandardSchemaV1,
 } from './validate.ts'
@@ -166,15 +167,15 @@ async function closeReader(reader: SourceReader): Promise<void> {
   if (reader.close) await reader.close()
 }
 
-/** Sentinel the native layer prefixes onto shape-contradiction errors (see
- *  `session.rs` `SessionError::Path`). */
-const NATIVE_PATH_ERROR_PREFIX = 'bote.PathError: '
+const NATIVE_PATH_ERROR = /^bote:path:([a-z_]+)(?::(\d+))?$/
 
-/** Rethrow a native shape-contradiction error as a `PathError` carrying the
- *  caller's path; pass anything else through unchanged. */
-function asPathError(err: unknown, path: Path): unknown {
-  if (err instanceof Error && !(err instanceof PathError) && err.message.startsWith(NATIVE_PATH_ERROR_PREFIX)) {
-    return new PathError(err.message.slice(NATIVE_PATH_ERROR_PREFIX.length), path)
+function deserializeError(err: unknown, path: Path): unknown {
+  if (err instanceof Error && !(err instanceof PathError)) {
+    const match = NATIVE_PATH_ERROR.exec(err.message)
+    if (match) {
+      const segment = match[2] === undefined ? undefined : Number(match[2])
+      return new PathError(path, match[1] as PathFaultCode, segment)
+    }
   }
   return err
 }
@@ -197,7 +198,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       try {
         child = await native.hop(path)
       } catch (err) {
-        throw asPathError(err, path)
+        throw deserializeError(err, path)
       }
       return child ? wrap(child, state) : null
     },
@@ -222,7 +223,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       try {
         value = await native.get(path)
       } catch (err) {
-        throw asPathError(err, path)
+        throw deserializeError(err, path)
       }
       if (!schema) return value
       return runStandardSchema(schema, value, path)
@@ -233,7 +234,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       try {
         return await native.count(path)
       } catch (err) {
-        throw asPathError(err, path)
+        throw deserializeError(err, path)
       }
     },
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): AsyncIterable<unknown[]> {
@@ -258,7 +259,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
             try {
               for await (const b of inner) yield b
             } catch (err) {
-              throw asPathError(err, path)
+              throw deserializeError(err, path)
             }
           },
         } as AsyncIterable<unknown[]>
@@ -279,7 +280,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
               yield out
             }
           } catch (err) {
-            throw asPathError(err, path)
+            throw deserializeError(err, path)
           }
         },
       }
@@ -294,7 +295,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
               yield [key, wrap(child, state)]
             }
           } catch (err) {
-            throw asPathError(err, path)
+            throw deserializeError(err, path)
           }
         },
       }
