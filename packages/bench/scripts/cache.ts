@@ -1,9 +1,9 @@
 // Structural-index cache demonstrator: warm vs cold.
 //
-//   yarn workspace @botejs/bench bench:cache                   # per-scenario table
-//   yarn workspace @botejs/bench bench:cache --reads-only       # skip the timing columns
-//   yarn workspace @botejs/bench bench:cache --index-cache-entries 3072   # custom slot budget (default 1024; 0 disables)
-//   yarn workspace @botejs/bench bench:cache --mb 200          # also run the demo on a freshly-built ~200 MB doc
+//   npm run bench:cache -w @botejs/bench                                 # per-scenario table
+//   npm run bench:cache -w @botejs/bench -- --reads-only                 # skip the timing columns
+//   npm run bench:cache -w @botejs/bench -- --index-cache-entries 3072   # custom slot budget (default 1024; 0 disables)
+//   npm run bench:cache -w @botejs/bench -- --mb 200                     # also run the demo on a freshly-built ~200 MB doc
 //
 // `--index-cache-entries <n>` sets the structural-index cache slot budget for
 // every cursor opened by this run (both modes), so you can see how a larger or

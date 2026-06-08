@@ -7,17 +7,16 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+    "node": ">= 22.18.0"
   },
   "scripts": {
-    "build": "yarn workspaces foreach -A -pt run build",
-    "build:debug": "yarn workspaces foreach -A -pt run build:debug",
-    "test": "yarn workspaces foreach -A -pt run test",
-    "bench": "yarn workspace @botejs/bench bench",
-    "lint": "yarn workspaces foreach -A -p run lint",
-    "format": "run-p format:prettier format:rs",
-    "format:prettier": "prettier . -w",
-    "format:rs": "cargo fmt",
+    "build": "npm run build -w @botejs/native && npm run build -w @botejs/core",
+    "build:debug": "npm run build:debug -w @botejs/native && npm run build:debug -w @botejs/core",
+    "test": "npm run test -w @botejs/native -w @botejs/core",
+    "bench": "npm run bench -w @botejs/bench",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier . -w && cargo fmt",
+    "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/bench/tsconfig.json && tsc --noEmit -p packages/native/tsconfig.json",
     "changeset": "changeset",
     "release": "changeset publish",
     "prepare": "husky",
@@ -27,18 +26,9 @@
     "@changesets/cli": "^2.28.1",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.0",
-    "npm-run-all2": "^8.0.4",
     "oxlint": "^1.14.0",
     "prettier": "^3.6.2",
     "typescript": "^6.0.0"
-  },
-  "lint-staged": {
-    "*.@(js|ts|tsx)": [
-      "oxlint --fix"
-    ],
-    "*.@(js|ts|tsx|yml|yaml|md|json)": [
-      "prettier --write"
-    ]
   },
   "prettier": {
     "printWidth": 120,
@@ -46,6 +36,5 @@
     "trailingComma": "all",
     "singleQuote": true,
     "arrowParens": "always"
-  },
-  "packageManager": "yarn@4.14.1"
+  }
 }

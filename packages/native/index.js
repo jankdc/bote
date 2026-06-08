@@ -525,23 +525,26 @@ function requireNative() {
 
 nativeBinding = requireNative()
 
-if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
+const forceWasi =
+  process.env.NAPI_RS_FORCE_WASI === 'true' || process.env.NAPI_RS_FORCE_WASI === 'error'
+
+if (!nativeBinding || forceWasi) {
   let wasiBinding = null
   let wasiBindingError = null
   try {
     wasiBinding = require('./bote.wasi.cjs')
     nativeBinding = wasiBinding
   } catch (err) {
-    if (process.env.NAPI_RS_FORCE_WASI) {
+    if (forceWasi) {
       wasiBindingError = err
     }
   }
-  if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
+  if (!nativeBinding || forceWasi) {
     try {
       wasiBinding = require('@botejs/native-wasm32-wasi')
       nativeBinding = wasiBinding
     } catch (err) {
-      if (process.env.NAPI_RS_FORCE_WASI) {
+      if (forceWasi) {
         if (!wasiBindingError) {
           wasiBindingError = err
         } else {
@@ -579,8 +582,8 @@ module.exports = nativeBinding
 module.exports.Cursor = nativeBinding.Cursor
 module.exports.CursorIter = nativeBinding.CursorIter
 module.exports.CursorWalk = nativeBinding.CursorWalk
+module.exports.PathFaultCode = nativeBinding.PathFaultCode
 module.exports.heapProfilePeakBytes = nativeBinding.heapProfilePeakBytes
 module.exports.heapProfileStart = nativeBinding.heapProfileStart
 module.exports.heapProfileStop = nativeBinding.heapProfileStop
 module.exports.open = nativeBinding.open
-module.exports.PathFaultCode = nativeBinding.PathFaultCode

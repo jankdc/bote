@@ -1,11 +1,18 @@
 {
   "name": "@botejs/core",
   "version": "0.3.0",
+  "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jankdc/bote.git",
     "directory": "packages/core"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +21,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+    "node": ">= 22.18.0"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
@@ -23,12 +30,12 @@
   "scripts": {
     "build": "tsc",
     "build:debug": "tsc --sourceMap",
-    "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning __test__/*.spec.ts",
+    "test": "node --test __test__/*.spec.ts",
     "lint": "oxlint src",
     "prepublishOnly": "cp ../../README.md ./README.md && tsc"
   },
   "dependencies": {
-    "@botejs/native": "workspace:*"
+    "@botejs/native": "^0.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

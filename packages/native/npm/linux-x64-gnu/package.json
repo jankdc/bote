@@ -19,7 +19,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+    "node": ">= 22.18.0"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
