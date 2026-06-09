@@ -1,4 +1,4 @@
-// Cold-cache JSON.parse vs bote showdown
+// Cold-cache get-by-index showdown: JSON.parse vs bote.
 //
 //   npm run showcase -w @botejs/bench                       # ~500 MiB synth doc
 //   BYTES=1073741824 npm run showcase -w @botejs/bench      # custom size
@@ -7,16 +7,16 @@
 // Internally it re-execs itself as `showcase.ts run ...` once per cell.
 
 import { execSync } from 'node:child_process'
-import { closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 
 import { fromFile, open } from '@botejs/core'
 
 import { arg } from '#lib/cli.ts'
-import { fmtBytes, fmtNs } from '#lib/format.ts'
+import { fmtNs } from '#lib/format.ts'
 import { runNode } from '#lib/proc.ts'
+import { ensureFixture } from '#lib/showcase-fixture.ts'
+import { APPROACH_LABEL, APPROACHES } from '#lib/approaches.ts'
 import { columnWidths, row, rule } from '#lib/table.ts'
 
 interface RunResult {
@@ -25,82 +25,6 @@ interface RunResult {
   index: number
   time_ns: number | null
   error: string | null
-}
-
-// A reasonably rich, realistic record so JSON.parse has honest work to do
-function makeRecord(i: number): object {
-  return {
-    id: `evt_${i.toString(36)}`,
-    type: ['PushEvent', 'PullRequestEvent', 'IssueCommentEvent', 'ForkEvent', 'WatchEvent'][i % 5],
-    actor: { id: i * 31 + 7, login: `user_${i}`, url: `https://api.github.com/users/user_${i}` },
-    repo: { id: i * 17 + 3, name: `org_${i % 1000}/repo_${i % 5000}` },
-    payload: {
-      ref: `refs/heads/branch_${i % 200}`,
-      size: (i % 7) + 1,
-      message: `Commit ${i}: tidy file_${i % 500}.ts`,
-    },
-    public: true,
-    created_at: new Date(1700000000000 + i * 1000).toISOString(),
-  }
-}
-
-// Stream a ~targetBytes JSON array to disk. Streaming (not an in-memory
-// builder) is the point: the doc can be far larger than the V8 heap.
-function generate(path: string, targetBytes: number): { count: number; bytes: number } {
-  const fd = openSync(path, 'w')
-  try {
-    const chunks: Buffer[] = []
-    let buffered = 0
-    let written = 0
-    const flush = (): void => {
-      if (buffered === 0) return
-      const merged = Buffer.concat(chunks, buffered)
-      writeSync(fd, merged)
-      written += merged.byteLength
-      chunks.length = 0
-      buffered = 0
-    }
-    const push = (s: string): void => {
-      const b = Buffer.from(s, 'utf8')
-      chunks.push(b)
-      buffered += b.byteLength
-      if (buffered >= 4 * 1024 * 1024) flush()
-    }
-    push('[')
-    let count = 0
-    while (written + buffered < targetBytes - 2) {
-      push((count === 0 ? '' : ',') + JSON.stringify(makeRecord(count)))
-      count++
-    }
-    push(']')
-    flush()
-    return { count, bytes: written }
-  } finally {
-    closeSync(fd)
-  }
-}
-
-// Synth fixture with a sidecar so repeat runs reuse it instead of
-// regenerating hundreds of MB each time.
-function ensureFixture(targetBytes: number): { filePath: string; count: number; bytes: number } {
-  const filePath = join(tmpdir(), `bote-showcase-${targetBytes}.json`)
-  const sidecarPath = `${filePath}.meta.json`
-  if (existsSync(filePath) && existsSync(sidecarPath)) {
-    const stat = statSync(filePath)
-    const meta = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { count: number; bytes: number }
-    if (stat.size === meta.bytes) {
-      console.error(`reusing fixture: ${filePath} (${fmtBytes(stat.size)}, ${meta.count.toLocaleString()} items)`)
-      return { filePath, count: meta.count, bytes: meta.bytes }
-    }
-  }
-  console.error(`generating fixture ~${fmtBytes(targetBytes)} at ${filePath}…`)
-  const t0 = performance.now()
-  const { count, bytes } = generate(filePath, targetBytes)
-  writeFileSync(sidecarPath, JSON.stringify({ count, bytes }))
-  console.error(
-    `wrote ${fmtBytes(bytes)} (${count.toLocaleString()} items) in ${fmtNs((performance.now() - t0) * 1e6)}`,
-  )
-  return { filePath, count, bytes }
 }
 
 async function runOnce(approach: string, file: string, idx: number): Promise<number> {
@@ -125,31 +49,36 @@ async function runOnce(approach: string, file: string, idx: number): Promise<num
   throw new Error(`unknown approach: ${approach}`)
 }
 
+function fmtX(x: number): string {
+  if (x >= 100) return `${Math.round(x)}×`
+  return `${x.toFixed(x >= 10 ? 1 : 2)}×`
+}
+
 function renderTable(results: RunResult[], cold: boolean): void {
-  const headers = ['operation', 'JSON.parse', 'bote', 'bote speedup']
-  const byOp = new Map<string, Map<string, RunResult>>()
-  const order: string[] = []
+  const headers = ['operation', 'approach', 'time', 'vs JSON.parse']
+  const ops: string[] = []
+  const parseByOp = new Map<string, number>()
   for (const r of results) {
-    if (!byOp.has(r.op)) {
-      byOp.set(r.op, new Map())
-      order.push(r.op)
+    if (!ops.includes(r.op)) ops.push(r.op)
+    if (r.approach === 'json-parse' && r.time_ns) parseByOp.set(r.op, r.time_ns)
+  }
+  const find = (op: string, approach: string): RunResult | undefined =>
+    results.find((r) => r.op === op && r.approach === approach)
+  const timeCell = (r: RunResult | undefined): string =>
+    r === undefined ? '-' : r.error !== null ? 'FAILED' : fmtNs(r.time_ns ?? 0)
+  const ratioCell = (op: string, r: RunResult | undefined): string => {
+    if (r?.approach === 'json-parse') return '1×'
+    const parse = parseByOp.get(op)
+    if (!parse || !r?.time_ns) return '-'
+    return fmtX(parse / r.time_ns)
+  }
+  const data: string[][] = []
+  for (const op of ops) {
+    for (const approach of APPROACHES) {
+      const r = find(op, approach)
+      data.push([op, APPROACH_LABEL[approach], timeCell(r), ratioCell(op, r)])
     }
-    byOp.get(r.op)!.set(r.approach, r)
   }
-  const cell = (r: RunResult | undefined): string =>
-    r === undefined ? '-' : r.error !== null ? `FAILED - ${r.error}` : fmtNs(r.time_ns ?? 0)
-  const speedup = (op: string): string => {
-    const parse = byOp.get(op)!.get('json-parse')
-    const bote = byOp.get(op)!.get('bote')
-    if (!parse?.time_ns || !bote?.time_ns) return '-'
-    return `${(parse.time_ns / bote.time_ns).toFixed(1)}×`
-  }
-  const data = order.map((op) => [
-    op,
-    cell(byOp.get(op)!.get('json-parse')),
-    cell(byOp.get(op)!.get('bote')),
-    speedup(op),
-  ])
   const widths = columnWidths(headers, data)
   console.log('')
   console.log(
@@ -170,7 +99,7 @@ if (process.argv[2] === 'run') {
   const indexStr = arg('--index')
   const op = arg('--op')
   if (!approach || !file || indexStr === null || !op) {
-    console.error('usage: showcase.ts run --approach <json-parse|bote> --file <path> --index <N> --op <label>')
+    console.error('usage: showcase.ts run --approach <approach> --file <path> --index <N> --op <label>')
     process.exit(1)
   }
   const index = Number.parseInt(indexStr, 10)
@@ -232,7 +161,7 @@ const cells: Array<{ op: string; index: number }> = [
 
 const results: RunResult[] = []
 for (const { op, index } of cells) {
-  for (const approach of ['json-parse', 'bote']) {
+  for (const approach of APPROACHES) {
     dropCaches()
     console.error(`[run] op='${op}' approach=${approach} index=${index}`)
     results.push(await runCell(op, approach, index))

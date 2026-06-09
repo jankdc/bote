@@ -1,0 +1,3 @@
+# dhat / heap-profile artifacts emitted by profile:rust and footprint
+dhat-heap.json
+heap-profile.json
