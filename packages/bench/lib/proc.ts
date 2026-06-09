@@ -2,10 +2,6 @@
 
 import { spawn } from 'node:child_process'
 
-/** Flags every bench worker is launched with: run `.ts` directly, mute the
- *  strip-types experimental warning. Mirrors the package.json script prefix. */
-export const NODE_TS_FLAGS = ['--experimental-strip-types', '--no-warnings=ExperimentalWarning'] as const
-
 export interface NodeRun {
   /** Everything the child wrote to stdout (stderr is inherited, not captured). */
   stdout: string
@@ -15,14 +11,13 @@ export interface NodeRun {
   error?: Error
 }
 
-/** Spawn a fresh `node` (with {@link NODE_TS_FLAGS} prepended) running `args`,
- *  optionally feeding `input` to stdin, and resolve once it closes with the
- *  collected stdout. stderr streams through to our own. Never rejects — a spawn
- *  failure resolves with `error` set. */
+/** Spawn a fresh `node` running `args`, optionally feeding `input` to stdin, and
+ *  resolve once it closes with the collected stdout. stderr streams through to
+ *  our own. Never rejects — a spawn failure resolves with `error` set. */
 export function runNode(args: readonly string[], opts?: { input?: string }): Promise<NodeRun> {
   return new Promise((resolve) => {
     const stdin = opts?.input !== undefined ? 'pipe' : 'ignore'
-    const child = spawn(process.execPath, [...NODE_TS_FLAGS, ...args], { stdio: [stdin, 'pipe', 'inherit'] })
+    const child = spawn(process.execPath, [...args], { stdio: [stdin, 'pipe', 'inherit'] })
     let stdout = ''
     // stdout is always piped (see stdio above); stdin only when `input` is given.
     child.stdout!.setEncoding('utf8')

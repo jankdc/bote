@@ -1,8 +1,8 @@
 // Cold-cache JSON.parse vs bote showdown
 //
-//   yarn workspace @botejs/bench showcase                  # ~500 MiB synth doc
-//   BYTES=1073741824 yarn workspace @botejs/bench showcase # custom size
-//   SKIP_PURGE=1 yarn workspace @botejs/bench showcase      # warm OS cache (fast iteration)
+//   npm run showcase -w @botejs/bench                       # ~500 MiB synth doc
+//   BYTES=1073741824 npm run showcase -w @botejs/bench      # custom size
+//   SKIP_PURGE=1 npm run showcase -w @botejs/bench          # warm OS cache (fast iteration)
 //
 // Internally it re-execs itself as `showcase.ts run ...` once per cell.
 
@@ -144,10 +144,19 @@ function renderTable(results: RunResult[], cold: boolean): void {
     if (!parse?.time_ns || !bote?.time_ns) return '-'
     return `${(parse.time_ns / bote.time_ns).toFixed(1)}×`
   }
-  const data = order.map((op) => [op, cell(byOp.get(op)!.get('json-parse')), cell(byOp.get(op)!.get('bote')), speedup(op)])
+  const data = order.map((op) => [
+    op,
+    cell(byOp.get(op)!.get('json-parse')),
+    cell(byOp.get(op)!.get('bote')),
+    speedup(op),
+  ])
   const widths = columnWidths(headers, data)
   console.log('')
-  console.log(cold ? 'COLD start (OS page cache purged before each cell)' : 'WARM (OS cache left primed — NOT a cold-start result)')
+  console.log(
+    cold
+      ? 'COLD start (OS page cache purged before each cell)'
+      : 'WARM (OS cache left primed — NOT a cold-start result)',
+  )
   console.log(row(headers, widths))
   console.log(rule(widths))
   for (const r of data) console.log(row(r, widths))

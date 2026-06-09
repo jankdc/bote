@@ -15,7 +15,6 @@ import { fileURLToPath } from 'node:url'
 
 import { withTempDoc } from '#lib/fixtures.ts'
 import { fmtBytes } from '#lib/format.ts'
-import { NODE_TS_FLAGS } from '#lib/proc.ts'
 
 const ITEMS = 2_000_000 // ≈ 110 MB at padWidth 7
 const PAD_WIDTH = 7
@@ -36,7 +35,7 @@ interface Result {
 
 function runChild(capMb: number, docPath: string): Promise<Result> {
   return new Promise((resolve) => {
-    const args = [`--max-old-space-size=${capMb}`, ...NODE_TS_FLAGS, WORKER, docPath]
+    const args = [`--max-old-space-size=${capMb}`, WORKER, docPath]
     const start = Date.now()
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'inherit', 'pipe'] })
     let stderr = ''

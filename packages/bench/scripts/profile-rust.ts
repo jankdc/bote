@@ -10,10 +10,10 @@
 // live bytes is the `t-gmax` field.
 //
 // Usage:
-//   yarn workspace @botejs/bench profile:rust                       # synth ~400 MB doc
-//   yarn workspace @botejs/bench profile:rust --file path/to.json   # real file
-//   yarn workspace @botejs/bench profile:rust --items 7_000_000     # custom synth size
-//   yarn workspace @botejs/bench profile:rust --out my-heap.json    # custom dump path
+//   npm run profile:rust -w @botejs/bench                          # synth ~400 MB doc
+//   npm run profile:rust -w @botejs/bench -- --file path/to.json   # real file
+//   npm run profile:rust -w @botejs/bench -- --items 7_000_000     # custom synth size
+//   npm run profile:rust -w @botejs/bench -- --out my-heap.json    # custom dump path
 
 import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'

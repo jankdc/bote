@@ -27,7 +27,7 @@ import { fmtBytes } from '#lib/format.ts'
 
 const gc = (globalThis as { gc?: () => void }).gc
 if (!gc) {
-  console.error('profile-js requires --expose-gc. Run via `yarn workspace @botejs/bench profile:js`.')
+  console.error('profile-js requires --expose-gc. Run via `npm run profile:js -w @botejs/bench`.')
   process.exit(1)
 }
 

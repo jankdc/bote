@@ -8,22 +8,22 @@
     "#lib/*": "./lib/*"
   },
   "engines": {
-    "node": ">= 18.17.0 < 19 || >= 20.3.0 < 21 || >= 21.1.0"
+    "node": ">= 22.18.0"
   },
   "scripts": {
-    "bench": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/matrix.ts | node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/report.ts",
-    "bench:matrix": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/matrix.ts",
-    "bench:report": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/report.ts",
-    "bench:cache": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/cache.ts",
-    "profile:rust": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/profile-rust.ts",
-    "profile:js": "node --expose-gc --experimental-strip-types --no-warnings=ExperimentalWarning scripts/profile-js.ts",
-    "stress": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/stress.ts",
-    "showcase": "node --experimental-strip-types --no-warnings=ExperimentalWarning scripts/showcase.ts",
+    "bench": "node scripts/matrix.ts | node scripts/report.ts",
+    "bench:matrix": "node scripts/matrix.ts",
+    "bench:report": "node scripts/report.ts",
+    "bench:cache": "node scripts/cache.ts",
+    "profile:rust": "node scripts/profile-rust.ts",
+    "profile:js": "node --expose-gc scripts/profile-js.ts",
+    "stress": "node scripts/stress.ts",
+    "showcase": "node scripts/showcase.ts",
     "lint": "oxlint ."
   },
   "dependencies": {
-    "@botejs/core": "workspace:*",
-    "@botejs/native": "workspace:*"
+    "@botejs/core": "*",
+    "@botejs/native": "*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -22,25 +22,23 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v6
-      - run: npm install -g --force corepack@latest && corepack enable
-        shell: bash
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: yarn
+          cache: npm
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-04-15
       - name: Install dependencies
-        run: yarn install
+        run: npm ci
       - name: Build
-        run: yarn build
+        run: npm run build
       - name: Run matrix
-        run: yarn workspace @botejs/bench bench:matrix --out "$GITHUB_WORKSPACE/matrix.jsonl"
+        run: npm run bench:matrix -w @botejs/bench -- --out "$GITHUB_WORKSPACE/matrix.jsonl"
       - name: Render report
-        run: yarn workspace @botejs/bench bench:report --in "$GITHUB_WORKSPACE/matrix.jsonl" --out "$GITHUB_WORKSPACE/report.md"
+        run: npm run bench:report -w @botejs/bench -- --in "$GITHUB_WORKSPACE/matrix.jsonl" --out "$GITHUB_WORKSPACE/report.md"
       - name: Build comment body
         id: report
         if: github.event_name == 'pull_request'
