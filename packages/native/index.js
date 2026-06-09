@@ -525,6 +525,13 @@ function requireNative() {
 
 nativeBinding = requireNative()
 
+// NAPI_RS_FORCE_WASI is a tri-state flag:
+//   unset / any other value → native binding preferred, WASI is only a fallback
+//   'true'                   → force WASI fallback even if native loaded
+//   'error'                  → force WASI and throw if no WASI binding is found
+// Treating any non-empty string as truthy (the historical behavior) meant
+// NAPI_RS_FORCE_WASI=false, NAPI_RS_FORCE_WASI=0, etc. inadvertently triggered
+// the WASI path, causing ENOENT for packages shipped without a .wasi.cjs file.
 const forceWasi =
   process.env.NAPI_RS_FORCE_WASI === 'true' || process.env.NAPI_RS_FORCE_WASI === 'error'
 
@@ -582,8 +589,8 @@ module.exports = nativeBinding
 module.exports.Cursor = nativeBinding.Cursor
 module.exports.CursorIter = nativeBinding.CursorIter
 module.exports.CursorWalk = nativeBinding.CursorWalk
-module.exports.PathFaultCode = nativeBinding.PathFaultCode
 module.exports.heapProfilePeakBytes = nativeBinding.heapProfilePeakBytes
 module.exports.heapProfileStart = nativeBinding.heapProfileStart
 module.exports.heapProfileStop = nativeBinding.heapProfileStop
 module.exports.open = nativeBinding.open
+module.exports.PathFaultCode = nativeBinding.PathFaultCode

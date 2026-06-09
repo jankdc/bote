@@ -283,6 +283,24 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   ])
 })
 
+test('iter_withIndex_with_skip_preserves_source_indices_across_skipped_items', async () => {
+  const evenOnly = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (v: unknown) =>
+        typeof v === 'number' && v % 2 === 0 ? { value: v } : { issues: [{ message: 'odd' }] },
+    },
+  } as const
+  const cursor = await open(memorySource(enc('{"xs":[10,11,12,13,14]}')))
+  const pairs = await collect(cursor.iter('xs', { schema: evenOnly, withIndex: true, onInvalid: 'skip' }))
+  assert.deepEqual(pairs, [
+    [0, 10],
+    [2, 12],
+    [4, 14],
+  ])
+})
+
 test('iter_scalar_target_throws_PathError', async () => {
   // A container operation aimed at a present scalar is a shape error, surfaced
   // on first iteration (like the iter-on-object / walk-on-array gates).
