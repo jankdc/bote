@@ -142,7 +142,7 @@ impl Session {
     path: &[Segment],
     anchor_start: u64,
     base_depth: u32,
-  ) -> Result<Option<serde_json::Value>, SessionError> {
+  ) -> Result<Option<Vec<u8>>, SessionError> {
     let mut window = self.new_window();
     let Some(loc) = self
       .run_resolve(path, anchor_start, base_depth, &mut window)
@@ -151,7 +151,7 @@ impl Session {
       return Ok(None);
     };
     let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
-    Ok(Some(serde_json::from_slice(&bytes)?))
+    Ok(Some(bytes))
   }
 
   pub async fn locate_at(
@@ -201,14 +201,12 @@ impl Session {
       .await
   }
 
-  /// Materialize the JSON value at `loc` by reading and parsing its bytes.
   pub async fn materialize(
     &self,
     loc: ValueLocation,
     window: &mut ChunkWindow,
-  ) -> Result<serde_json::Value, SessionError> {
-    let bytes = self.read_range(loc.start, loc.end, window).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+  ) -> Result<Vec<u8>, SessionError> {
+    self.read_range(loc.start, loc.end, window).await
   }
 
   /// Open a child iterator over the container at `value_start`, or `Ok(None)` if

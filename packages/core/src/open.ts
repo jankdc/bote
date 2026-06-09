@@ -6,6 +6,7 @@ import type { Source, SourceReader } from './sources.ts'
 import {
   runStandardSchema,
   validateItem,
+  formatPath,
   PathError,
   type Path,
   type PathFaultCode,
@@ -210,7 +211,9 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       }
       if (!schema) return native.has(path)
       if (!(await native.has(path))) return false
-      const result = await validateItem(schema, await native.get(path), path, 'skip')
+      const text = await native.get(path)
+      const value = text === undefined ? undefined : parseValue(text, path)
+      const result = await validateItem(schema, value, path, 'skip')
       return !('skip' in result)
     },
     async get(...args: VariadicPathArgs<StandardSchemaV1>): Promise<unknown> {
@@ -221,7 +224,8 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       }
       let value: unknown
       try {
-        value = await native.get(path)
+        const text = await native.get(path)
+        value = text === undefined ? undefined : parseValue(text, path)
       } catch (err) {
         throw deserializeError(err, path)
       }
@@ -250,14 +254,28 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       if (onInvalid !== undefined && onInvalid !== 'throw' && onInvalid !== 'skip') {
         throw new RangeError(`iter: onInvalid must be "throw" or "skip", got ${JSON.stringify(onInvalid)}`)
       }
+
       const resolvedBatch = batch ?? DEFAULT_ITER_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: withIndex })
+      const inner = native.iter(path, { selectIr, batch: resolvedBatch })
+
       if (!schema) {
         return {
           async *[Symbol.asyncIterator]() {
+            let i = 0
             try {
-              for await (const b of inner) yield b
+              for await (const b of inner) {
+                const batch = parseValue(b, path) as unknown[]
+                if (!withIndex) {
+                  yield batch
+                  continue
+                }
+                const out: unknown[] = new Array(batch.length)
+                for (let j = 0; j < batch.length; j++) {
+                  out[j] = [i++, batch[j]]
+                }
+                yield out
+              }
             } catch (err) {
               throw deserializeError(err, path)
             }
@@ -271,11 +289,14 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
           try {
             for await (const b of inner) {
               const out: unknown[] = []
-              for (const v of b as unknown[]) {
-                const value = withIndex ? (v as [IterIndex, unknown])[1] : v
-                const result = await validateItem(schema, value, [...path, i++], policy)
-                if ('skip' in result) continue
-                out.push(withIndex ? [(v as [IterIndex, unknown])[0], result.value] : result.value)
+              for (const v of parseValue(b, path) as unknown[]) {
+                const index = i++
+                const result = await validateItem(schema, v, [...path, index], policy)
+                if ('skip' in result) {
+                  continue
+                }
+
+                out.push(withIndex ? [index, result.value] : result.value)
               }
               yield out
             }
@@ -303,4 +324,12 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
   }
 
   return cursor as Cursor
+}
+
+function parseValue(text: string, path: Path): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`bote: malformed JSON value at ${formatPath(path)}`)
+  }
 }

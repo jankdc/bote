@@ -76,18 +76,16 @@ impl Cursor {
 
   #[napi(
     ts_args_type = "path: Array<string | number>",
-    ts_return_type = "Promise<unknown>"
+    ts_return_type = "Promise<string | undefined>"
   )]
-  pub async fn get(
-    &self,
-    path: Vec<Either<String, u32>>,
-  ) -> napi::Result<Either<serde_json::Value, ()>> {
+  pub async fn get(&self, path: Vec<Either<String, u32>>) -> napi::Result<Either<String, ()>> {
     self
       .session
       .get_at(&path::from_napi(path), self.anchor_start(), self.depth)
       .await
       .map(|opt| match opt {
-        Some(v) => Either::A(v),
+        // SAFETY: bytes are a slice of a UTF-8 JSON source.
+        Some(b) => Either::A(unsafe { String::from_utf8_unchecked(b) }),
         None => Either::B(()),
       })
       .map_err(map_err)
@@ -115,7 +113,6 @@ impl Cursor {
       self.depth,
       options.select_ir,
       (options.batch as usize).max(1),
-      options.with_key.unwrap_or(false),
     )
   }
 
@@ -159,8 +156,6 @@ pub struct IterArgs {
   pub select_ir: Option<String>,
   /// Items yielded per iteration.
   pub batch: f64,
-  /// Yield `[key, value]` tuples instead of bare values.
-  pub with_key: Option<bool>,
 }
 
 #[napi(async_iterator)]
@@ -177,17 +172,8 @@ impl CursorIter {
     base_depth: u32,
     select_ir: Option<String>,
     batch: usize,
-    with_key: bool,
   ) -> Self {
-    let state = IterState::new(
-      &session,
-      path,
-      anchor_start,
-      base_depth,
-      select_ir,
-      batch,
-      with_key,
-    );
+    let state = IterState::new(&session, path, anchor_start, base_depth, select_ir, batch);
     Self {
       session,
       state: Arc::new(AsyncMutex::new(state)),
@@ -197,7 +183,7 @@ impl CursorIter {
 
 #[napi]
 impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
-  type Yield = serde_json::Value;
+  type Yield = String;
   type Next = ();
   type Return = ();
 
@@ -228,12 +214,10 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
         core,
         select,
         batch,
-        with_key,
         ..
       } = &mut *guard;
       let select = select.as_ref();
       let batch = *batch;
-      let with_key = *with_key;
       let StreamCore {
         child_cursor,
         window,
@@ -252,8 +236,11 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
       // window is pruned after each item, so the buffer (not chunks) is the
       // in-flight batch. Living in this `next()` frame, it needs no special
       // cleanup on early termination via `complete`.
-      let result: Result<Option<serde_json::Value>, SessionError> = async {
-        let mut buf: Vec<serde_json::Value> = Vec::with_capacity(batch);
+      let result: Result<Option<String>, SessionError> = async {
+        // The batch accumulates as JSON array text: `[`, items comma-joined, `]`.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.push(b'[');
+        let mut count = 0usize;
         loop {
           let Some(child) = session.next_child(child_cursor, window).await? else {
             // Exhausted: child_cursor sits AT the close. Record child count + close
@@ -276,17 +263,14 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
                 child_cursor.next_offset + 1,
               );
             }
-            if buf.is_empty() {
+            if count == 0 {
               return Ok(None);
             }
-            return Ok(Some(serde_json::Value::Array(buf)));
+            buf.push(b']');
+            // SAFETY: stitched from valid-UTF-8 JSON source slices and ASCII punctuation.
+            return Ok(Some(unsafe { String::from_utf8_unchecked(buf) }));
           };
           *yielded += 1;
-          let key = if with_key {
-            Some(child_key_json(&child))
-          } else {
-            None
-          };
           let value = match select {
             Some(sel) => {
               crate::eval::project(&session, sel, child.location().start, child_depth, window)
@@ -295,13 +279,15 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
             None => session.materialize(child.location(), window).await?,
           };
           session.prune_window(window, child_cursor.next_offset);
-          let item = match key {
-            Some(k) => serde_json::Value::Array(vec![k, value]),
-            None => value,
-          };
-          buf.push(item);
-          if buf.len() >= batch {
-            return Ok(Some(serde_json::Value::Array(buf)));
+          if count > 0 {
+            buf.push(b',');
+          }
+          buf.extend_from_slice(&value);
+          count += 1;
+          if count >= batch {
+            buf.push(b']');
+            // SAFETY: as above.
+            return Ok(Some(unsafe { String::from_utf8_unchecked(buf) }));
           }
         }
       }
@@ -444,7 +430,6 @@ struct IterState {
   /// Compiled lazily from `select_ir` on first `next()`. `None` yields the whole child.
   select: Option<CompiledSelect>,
   batch: usize,
-  with_key: bool,
 }
 
 impl IterState {
@@ -455,14 +440,12 @@ impl IterState {
     base_depth: u32,
     select_ir: Option<String>,
     batch: usize,
-    with_key: bool,
   ) -> Self {
     Self {
       core: StreamCore::new(session, path, anchor_start, base_depth),
       select_ir,
       select: None,
       batch,
-      with_key,
     }
   }
 }
@@ -513,13 +496,6 @@ fn map_err(e: SessionError) -> NapiError {
 fn release_core(core: &mut StreamCore) {
   core.window.clear();
   core.child_cursor = None;
-}
-
-fn child_key_json(child: &ChildEntry) -> serde_json::Value {
-  match child {
-    ChildEntry::Member { key, .. } => serde_json::Value::String(key.clone()),
-    ChildEntry::Element { index, .. } => serde_json::Value::Number((*index as u64).into()),
-  }
 }
 
 /// Resolve the path and open its container cursor, pruning to the scan position so
@@ -668,9 +644,10 @@ mod tests {
 
     assert!(w.state.lock().await.window.is_empty());
     // The escaped child is still fully usable: its session outlives the walk.
+    // get now returns raw JSON text, so the string value carries its quotes.
     assert!(matches!(
       child.get(vec![Either::A("name".into())]).await.unwrap(),
-      Either::A(ref v) if v == &serde_json::json!("i0000")
+      Either::A(ref v) if v == "\"i0000\""
     ));
   }
 
@@ -693,7 +670,7 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_released_on_complete() {
     let s = session(500, 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1);
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -712,7 +689,7 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_batch_early_break_releases() {
     let s = session(500, 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 8);
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
     let guard = it.state.lock().await;
@@ -734,7 +711,6 @@ mod tests {
       0,
       Some(r#"{"one":["total"]}"#.to_string()),
       64,
-      false,
     );
     while it.next(None).await.unwrap().is_some() {
       let len = it.state.lock().await.core.window.len();
@@ -769,7 +745,7 @@ mod tests {
   #[tokio::test]
   async fn iter_on_object_target_throws() {
     let s = session(50, 256);
-    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, 0, None, 8, false);
+    let mut it = CursorIter::new(s.clone(), Vec::new(), 0, 0, None, 8);
     let err = it.next(None).await.expect_err("object target must throw");
     assert!(
       err.reason.contains("bote:path:iter_on_object"),

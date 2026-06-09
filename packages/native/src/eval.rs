@@ -19,7 +19,7 @@ pub async fn project(
   child_start: u64,
   base_depth: u32,
   window: &mut ChunkWindow,
-) -> Result<serde_json::Value, SessionError> {
+) -> Result<Vec<u8>, SessionError> {
   match select {
     CompiledSelect::One(path) => project_one(session, path, child_start, base_depth, window).await,
     CompiledSelect::Map(fields) => {
@@ -34,7 +34,7 @@ async fn project_map(
   child_start: u64,
   base_depth: u32,
   window: &mut ChunkWindow,
-) -> Result<serde_json::Value, SessionError> {
+) -> Result<Vec<u8>, SessionError> {
   let mut matched: Vec<Option<ValueLocation>> = vec![None; fields.len()];
   let mut remaining = fields.iter().filter(|(_, p)| !p.is_empty()).count();
 
@@ -55,20 +55,35 @@ async fn project_map(
     }
   }
 
-  let mut obj = serde_json::Map::new();
-  for ((key, path), loc) in fields.iter().zip(matched) {
-    let value = match (path.len(), loc) {
+  let mut out = Vec::new();
+  out.push(b'{');
+  for (i, ((key, path), loc)) in fields.iter().zip(matched).enumerate() {
+    if i > 0 {
+      out.push(b',');
+    }
+    emit_json_string(&mut out, key);
+    out.push(b':');
+    match (path.len(), loc) {
       // defensive: facade rejects empty sub-paths; treat as the whole child
-      (0, _) => project_one(session, path, child_start, base_depth, window).await?,
-      (_, None) => serde_json::Value::Null,
+      (0, _) => {
+        let v = project_one(session, path, child_start, base_depth, window).await?;
+        out.extend_from_slice(&v);
+      }
+      (_, None) => out.extend_from_slice(b"null"),
       // single segment: the matched entry is already the value
-      (1, Some(loc)) => session.materialize(loc, window).await?,
+      (1, Some(loc)) => {
+        let v = session.materialize(loc, window).await?;
+        out.extend_from_slice(&v);
+      }
       // resolve the tail from the matched entry's start
-      (_, Some(loc)) => project_one(session, &path[1..], loc.start, base_depth + 1, window).await?,
-    };
-    obj.insert(key.clone(), value);
+      (_, Some(loc)) => {
+        let v = project_one(session, &path[1..], loc.start, base_depth + 1, window).await?;
+        out.extend_from_slice(&v);
+      }
+    }
   }
-  Ok(serde_json::Value::Object(obj))
+  out.push(b'}');
+  Ok(out)
 }
 
 async fn project_one(
@@ -77,16 +92,20 @@ async fn project_one(
   child_start: u64,
   base_depth: u32,
   window: &mut ChunkWindow,
-) -> Result<serde_json::Value, SessionError> {
+) -> Result<Vec<u8>, SessionError> {
   match session
     .run_resolve(path, child_start, base_depth, window)
     .await
   {
-    Ok(None) => Ok(serde_json::Value::Null),
+    Ok(None) => Ok(b"null".to_vec()),
     Ok(Some(loc)) => session.materialize(loc, window).await,
-    Err(SessionError::Path(_)) => Ok(serde_json::Value::Null),
+    Err(SessionError::Path(_)) => Ok(b"null".to_vec()),
     Err(e) => Err(e),
   }
+}
+
+fn emit_json_string(out: &mut Vec<u8>, key: &str) {
+  serde_json::to_writer(out, key).expect("serializing a &str to JSON is infallible");
 }
 
 fn segment_matches(seg: &Segment, entry: &ChildEntry) -> bool {

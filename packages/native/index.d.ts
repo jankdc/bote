@@ -2,7 +2,7 @@
 /* eslint-disable */
 export declare class Cursor {
   has(path: Array<string | number>): Promise<boolean>
-  get(path: Array<string | number>): Promise<unknown>
+  get(path: Array<string | number>): Promise<string | undefined>
   count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   walk(path: Array<string | number>): AsyncIterable<[string, Cursor]>
@@ -16,7 +16,7 @@ export declare class Cursor {
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
  */
 export declare class CursorIter {
-  [Symbol.asyncIterator](): AsyncGenerator<any, void, undefined>
+  [Symbol.asyncIterator](): AsyncGenerator<string, void, undefined>
 }
 
 /**
@@ -25,9 +25,7 @@ export declare class CursorIter {
  *
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
  */
-export declare class CursorWalk {
-
-}
+export declare class CursorWalk {}
 
 export declare function heapProfilePeakBytes(): number
 
@@ -44,8 +42,6 @@ export interface IterArgs {
   selectIr?: string
   /** Items yielded per iteration. */
   batch: number
-  /** Yield `[key, value]` tuples instead of bare values. */
-  withKey?: boolean
 }
 
 /**
@@ -58,13 +54,16 @@ export interface IterArgs {
  *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
  *   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
  */
-export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
+export declare function open(source: {
+  size: number
+  chunkBytes: number
+  indexCacheEntries?: number
+  objectMemberCap?: number
+  arrayIndexInterval?: number
+  read: (args: ReadArgs) => Promise<Uint8Array>
+}): Cursor
 
-export type PathFaultCode =  'through_scalar'|
-'scalar_target'|
-'iter_on_object'|
-'walk_on_array'|
-'wrong_kind';
+export type PathFaultCode = 'through_scalar' | 'scalar_target' | 'iter_on_object' | 'walk_on_array' | 'wrong_kind'
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {
