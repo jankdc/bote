@@ -42,6 +42,8 @@ jobs:
         run: npm ci
       - name: Oxlint
         run: npm run lint
+      - name: Build core
+        run: npm run build -w @botejs/core
       - name: Typecheck
         run: npm run typecheck
       - name: Cargo fmt
