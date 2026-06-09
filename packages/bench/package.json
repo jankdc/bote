@@ -19,6 +19,7 @@
     "profile:js": "node --expose-gc scripts/profile-js.ts",
     "stress": "node scripts/stress.ts",
     "showcase": "node scripts/showcase.ts",
+    "footprint": "node scripts/footprint.ts",
     "lint": "oxlint ."
   },
   "dependencies": {
