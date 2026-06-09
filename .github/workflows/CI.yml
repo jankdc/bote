@@ -23,8 +23,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -238,7 +238,7 @@ jobs:
       pull-requests: write
       id-token: write
     needs:
-      - lint
+      - check
       - test-macOS-windows-binding
       - test-linux-binding
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
