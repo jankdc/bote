@@ -18,6 +18,7 @@ mod session;
 
 mod count;
 mod eval;
+mod stream;
 
 mod cursor;
 

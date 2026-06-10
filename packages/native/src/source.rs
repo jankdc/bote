@@ -49,22 +49,13 @@ pub type ReadFn =
 /// ByteStream backed by a JS `read(args): Promise<Uint8Array>`, held as a
 /// [`ThreadsafeFunction`] so it can be awaited from any tokio task.
 pub struct JsByteStream {
-  read_fn: Option<ReadFn>,
+  read_fn: ReadFn,
   size: u64,
 }
 
 impl JsByteStream {
   pub fn new(read_fn: ReadFn, size: u64) -> Self {
-    Self {
-      read_fn: Some(read_fn),
-      size,
-    }
-  }
-}
-
-impl Drop for JsByteStream {
-  fn drop(&mut self) {
-    drop(self.read_fn.take());
+    Self { read_fn, size }
   }
 }
 
@@ -75,17 +66,13 @@ impl ByteStream for JsByteStream {
   }
 
   async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
-    let read_fn = self
-      .read_fn
-      .as_ref()
-      .ok_or_else(|| SourceError::Io("source already closed".into()))?;
-
     // Pulling the buffer *from* JS (vs pushing a Rust-owned `with_external_data`
     // view *to* JS) keeps it V8-owned/V8-GC'd: a pushed view needs a strong napi
     // ref whose drop queues through `CUSTOM_GC_TSFN`, and under a continuous scan
     // the JS thread never idles, so that queue backs up and resident bytes grow
     // with bytes-read.
-    let promise = read_fn
+    let promise = self
+      .read_fn
       .call_async_catch(ReadArgs {
         offset: offset as f64,
         length: length as f64,

@@ -38,7 +38,7 @@ impl ChunkWindow {
   }
 
   #[inline]
-  pub fn chunk_start_of(&self, offset: u64) -> u64 {
+  fn chunk_start_of(&self, offset: u64) -> u64 {
     (offset / self.chunk_bytes) * self.chunk_bytes
   }
 
