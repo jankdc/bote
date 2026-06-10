@@ -27,10 +27,7 @@ type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : nev
 
 type SelectMapShape<S> = { -readonly [K in keyof S]: unknown }
 
-/** Zero-based index of an array element. */
-export type IterIndex = number
-/** One `walk` step: the member's key paired with a cursor anchored at its value. */
-export type WalkEntry = [key: string, cursor: Cursor]
+export type IterKey = string | number
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
@@ -81,22 +78,19 @@ export interface Cursor {
   iter(...path: Segment[]): AsyncIterable<unknown[]>
   iter<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): AsyncIterable<InferOutput<Sch>[]>
   iter<Sch extends StandardSchemaV1>(
-    ...args: [...Segment[], IterOptions & { withIndex: true; schema: Sch }]
-  ): AsyncIterable<[IterIndex, InferOutput<Sch>][]>
+    ...args: [...Segment[], IterOptions & { withKey: true; schema: Sch }]
+  ): AsyncIterable<[IterKey, InferOutput<Sch>][]>
   iter<Sch extends StandardSchemaV1>(
     ...args: [...Segment[], IterOptions & { schema: Sch }]
   ): AsyncIterable<InferOutput<Sch>[]>
   iter<S extends Record<string, Segment | Path>>(
-    ...args: [...Segment[], IterOptions & { withIndex: true; select: S }]
-  ): AsyncIterable<[IterIndex, SelectMapShape<S>][]>
+    ...args: [...Segment[], IterOptions & { withKey: true; select: S }]
+  ): AsyncIterable<[IterKey, SelectMapShape<S>][]>
   iter<S extends Record<string, Segment | Path>>(
     ...args: [...Segment[], IterOptions & { select: S }]
   ): AsyncIterable<SelectMapShape<S>[]>
-  iter(...args: [...Segment[], IterOptions & { withIndex: true }]): AsyncIterable<[IterIndex, unknown][]>
+  iter(...args: [...Segment[], IterOptions & { withKey: true }]): AsyncIterable<[IterKey, unknown][]>
   iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
-
-  walk(...path: Segment[]): AsyncIterable<WalkEntry>
-  walk(...path: Segment[]): AsyncIterable<Cursor>
 }
 
 export interface RootCursor extends Cursor, AsyncDisposable {
@@ -244,12 +238,12 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): AsyncIterable<unknown[]> {
       ensureOpen(state)
       const { path, tail } = splitArgs<StandardSchemaV1 | IterOptions>(args)
-      const { schema, select, batch, onInvalid, withIndex } = normalizeIterTail(tail)
+      const { schema, select, batch, onInvalid, withKey } = normalizeIterTail(tail)
       if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0 || batch > MAX_ITER_BATCH)) {
         throw new RangeError(`iter: batch must be an integer in 1..=${MAX_ITER_BATCH}, got ${batch}`)
       }
-      if (withIndex !== undefined && typeof withIndex !== 'boolean') {
-        throw new TypeError(`iter: withIndex must be a boolean, got ${typeof withIndex}`)
+      if (withKey !== undefined && typeof withKey !== 'boolean') {
+        throw new TypeError(`iter: withKey must be a boolean, got ${typeof withKey}`)
       }
       if (onInvalid !== undefined && onInvalid !== 'throw' && onInvalid !== 'skip') {
         throw new RangeError(`iter: onInvalid must be "throw" or "skip", got ${JSON.stringify(onInvalid)}`)
@@ -257,24 +251,16 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
 
       const resolvedBatch = batch ?? DEFAULT_ITER_BATCH
       const selectIr = select !== undefined ? serializeSelect(select) : undefined
-      const inner = native.iter(path, { selectIr, batch: resolvedBatch })
+      const wantKey = withKey ?? false
+      const nativeWithKey = wantKey || schema !== undefined
+      const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: nativeWithKey })
 
       if (!schema) {
         return {
           async *[Symbol.asyncIterator]() {
-            let i = 0
             try {
               for await (const b of inner) {
-                const batch = parseValue(b, path) as unknown[]
-                if (!withIndex) {
-                  yield batch
-                  continue
-                }
-                const out: unknown[] = new Array(batch.length)
-                for (let j = 0; j < batch.length; j++) {
-                  out[j] = [i++, batch[j]]
-                }
-                yield out
+                yield parseValue(b, path) as unknown[]
               }
             } catch (err) {
               throw deserializeError(err, path)
@@ -285,35 +271,17 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       const policy = onInvalid ?? 'throw'
       return {
         async *[Symbol.asyncIterator]() {
-          let i = 0
           try {
             for await (const b of inner) {
               const out: unknown[] = []
-              for (const v of parseValue(b, path) as unknown[]) {
-                const index = i++
-                const result = await validateItem(schema, v, [...path, index], policy)
+              for (const [key, value] of parseValue(b, path) as Array<[IterKey, unknown]>) {
+                const result = await validateItem(schema, value, [...path, key], policy)
                 if ('skip' in result) {
                   continue
                 }
-
-                out.push(withIndex ? [index, result.value] : result.value)
+                out.push(wantKey ? [key, result.value] : result.value)
               }
               yield out
-            }
-          } catch (err) {
-            throw deserializeError(err, path)
-          }
-        },
-      }
-    },
-    walk(...path: Segment[]): AsyncIterable<WalkEntry> {
-      ensureOpen(state)
-      validatePath(path)
-      return {
-        async *[Symbol.asyncIterator]() {
-          try {
-            for await (const [key, child] of native.walk(path)) {
-              yield [key, wrap(child, state)]
             }
           } catch (err) {
             throw deserializeError(err, path)

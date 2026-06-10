@@ -30,9 +30,6 @@ function makeDoc(buf: Uint8Array): { path: string; cleanup: () => void } {
   return { path, cleanup }
 }
 
-// Returns items consumed (1 for get/has, iterated count for walk/iter).
-// `walk-get-name` is a walk that also fetches `name` on every child -
-// closer to a realistic streaming-traversal workload.
 async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<number> {
   switch (cell.op) {
     case 'get':
@@ -41,31 +38,15 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
     case 'has':
       await cursor.has(...path)
       return 1
-    case 'walk': {
-      let n = 0
-      if (cell.accessPattern === 'walk-get-name') {
-        for await (const [, child] of cursor.walk(...path)) {
-          await child.get('name')
-          n += 1
-        }
-      } else if (cell.accessPattern === 'walk-first') {
-        // Stop after the first child: this times time-to-first-child, not a
-        // full traversal.
-        for await (const _entry of cursor.walk(...path)) {
-          n = 1
-          break
-        }
-      } else {
-        for await (const _entry of cursor.walk(...path)) n += 1
-      }
-      return n
-    }
     case 'iter': {
-      // `.iter` always yields batches; count items, not yields.
-      let n = 0
-      for await (const batch of cursor.iter(...path, { batch: cell.batch ?? DEFAULT_ITER_BATCH })) {
-        n += batch.length
+      if (cell.accessPattern === 'obj-iter-first') {
+        for await (const batch of cursor.iter(...path, { batch: 1 })) return batch.length
+        return 0
       }
+      const batch = cell.batch ?? DEFAULT_ITER_BATCH
+      const opts = cell.accessPattern === 'obj-iter-name' ? { batch, select: 'name' } : { batch }
+      let n = 0
+      for await (const b of cursor.iter(...path, opts)) n += b.length
       return n
     }
   }
@@ -102,7 +83,7 @@ async function measureCell(cell: Cell): Promise<Result> {
 function summarizeTiming(batchMeans: number[], cell: Cell): Timing {
   const sorted = [...batchMeans].sort((a, b) => a - b)
   const min_ns = sorted[0]
-  const firstItem = cell.op === 'walk' && cell.accessPattern === 'walk-first'
+  const firstItem = cell.op === 'iter' && cell.accessPattern === 'obj-iter-first'
   return {
     min_ns,
     p50_ns: percentile(sorted, 0.5),

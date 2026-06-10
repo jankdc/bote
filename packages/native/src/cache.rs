@@ -22,7 +22,7 @@
 //! tiebreak): the shallow navigational backbone - a big array's member node, a
 //! top-level object's table - is reachable from many future queries; deep nodes
 //! are narrowly reachable and shed first. Each node carries its document depth
-//! (`base_depth + path.len()`) because `iter`/`walk` re-anchor children at their
+//! (`base_depth + path.len()`) because `iter`/`hop` re-anchor children at their
 //! own byte offset, so the relative `NodeKey.path` length does *not* reflect tree
 //! depth.
 
@@ -782,7 +782,7 @@ mod tests {
     // One shallow backbone node (depth 0): a root array with array members.
     c.merge_array_scan(0, 0, &[], 0, &[(0, 0), (16, 160)]);
     // Flood deep nodes (depth 2): re-anchored element objects, tagged base_depth 2
-    // the way iter/walk would.
+    // the way iter/hop would.
     for i in 0..100u64 {
       c.merge_object_scan(
         2,

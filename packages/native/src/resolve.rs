@@ -601,12 +601,8 @@ pub enum PathFault {
   ThroughScalar { segment: usize },
   /// A member-name segment addressed an array, or an index segment an object.
   WrongKind { segment: usize },
-  /// A container operation (`count`/`iter`/`walk`) was aimed at a scalar target.
+  /// A container operation (`count`/`iter`) was aimed at a scalar target.
   ScalarTarget,
-  /// `iter` was aimed at an object (steer the caller to `walk`).
-  IterOnObject,
-  /// `walk` was aimed at an array (steer the caller to `iter`).
-  WalkOnArray,
 }
 
 #[napi(string_enum = "snake_case")]
@@ -614,8 +610,6 @@ pub enum PathFault {
 pub enum PathFaultCode {
   ThroughScalar,
   ScalarTarget,
-  IterOnObject,
-  WalkOnArray,
   WrongKind,
 }
 
@@ -624,8 +618,6 @@ impl PathFaultCode {
     match self {
       Self::ThroughScalar => "through_scalar",
       Self::ScalarTarget => "scalar_target",
-      Self::IterOnObject => "iter_on_object",
-      Self::WalkOnArray => "walk_on_array",
       Self::WrongKind => "wrong_kind",
     }
   }
@@ -637,8 +629,6 @@ impl PathFault {
       Self::ThroughScalar { .. } => PathFaultCode::ThroughScalar,
       Self::WrongKind { .. } => PathFaultCode::WrongKind,
       Self::ScalarTarget => PathFaultCode::ScalarTarget,
-      Self::IterOnObject => PathFaultCode::IterOnObject,
-      Self::WalkOnArray => PathFaultCode::WalkOnArray,
     }
   }
 

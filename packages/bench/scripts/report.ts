@@ -51,9 +51,9 @@ const caption = chunk ? `file source, chunk=${fmtBytes(chunk)}` : 'no cells'
 // Column legend (moved here from the matrix driver): the table is the report,
 // so explain its columns next to it rather than the raw cell-id format.
 const legend = [
-  '`operation` - `<op> · <access>`: op is get | has | walk | iter; access is how far the lookup reaches (shallow/deep) or the traversal kind (iter-all/walk-all/walk-get-name/walk-first).',
+  '`operation` - `<op> · <access>`: op is get | has | iter; access is how far the lookup reaches (shallow/deep) or the traversal kind (iter-all/obj-iter/obj-iter-name/obj-iter-first).',
   '`document` - `<shape> · n=<size>`: shape is the JSON document shape; n is the array/object member or key count, or nesting depth for deep-nested.',
-  '`bote` - fastest-sample whole-operation wall-clock (compare across runs on the same machine); `_(to 1st)_` marks time to the first child (walk-first).',
+  '`bote` - fastest-sample whole-operation wall-clock (compare across runs on the same machine); `_(to 1st)_` marks time to the first member (obj-iter-first).',
 ]
   .map((l) => `- ${l}`)
   .join('\n')

@@ -234,7 +234,7 @@ impl Session {
   /// start offset (no extent walk).
   ///
   /// Memoization seam: every path resolution flows through here (or its wrappers
-  /// `run_resolve`/`locate_at`) - `get`/`has`/`count`/`iter`/`walk`/`select` all
+  /// `run_resolve`/`locate_at`) - `get`/`has`/`count`/`iter`/`select` all
   /// route in. So the structural-index cache lives here: cached container hops
   /// start the scan as deep as possible (an all-hit returns the offset faulting
   /// no chunks), the first uncached level resumes from the deepest array member, and
@@ -415,7 +415,7 @@ impl Session {
     self.with_cache(|c| c.store_child_count(base_depth, anchor, path, kind, value_start, count));
   }
 
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`/`walk`
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
   /// learned it - lets a repeat `count` skip the scan.
   pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
     self
@@ -424,7 +424,7 @@ impl Session {
   }
 
   /// Record an array resume-point member `(index, offset)` so a later random
-  /// index resumes near where `iter`/`walk` stopped.
+  /// index resumes near where `iter` stopped.
   pub(crate) fn store_array_resume_point(
     &self,
     base_depth: u32,

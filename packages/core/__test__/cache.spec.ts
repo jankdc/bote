@@ -94,11 +94,17 @@ test('transparency_object_sibling_access_consistent_first_and_last_members', asy
   assert.equal(await cursor.get('missing'), undefined)
 })
 
-test('transparency_walk_then_out_of_order_multi_get_on_child_is_consistent', async (t) => {
+test('transparency_iter_object_then_out_of_order_multi_get_on_child_is_consistent', async (t) => {
   const cursor = await open(memorySource(enc('{"rows":{"r0":{"a":1,"b":2,"c":3},"r1":{"a":4,"b":5,"c":6}}}')))
   t.after(() => cursor.close())
+  const keys: string[] = []
+  for await (const batch of cursor.iter('rows', { withKey: true, select: 'a' })) {
+    for (const [key] of batch as Array<[string, unknown]>) keys.push(key)
+  }
   const seen: Array<[unknown, unknown, unknown]> = []
-  for await (const [, row] of cursor.walk('rows')) {
+  for (const key of keys) {
+    const row = await cursor.hop('rows', key)
+    assert.ok(row)
     const a = await row.get('a')
     const c = await row.get('c')
     const b = await row.get('b')

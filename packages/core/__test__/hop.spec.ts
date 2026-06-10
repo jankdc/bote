@@ -60,7 +60,7 @@ test('hop_empty_path_anchors_at_cursor', async () => {
   assert.equal(await again.get(), 1)
 })
 
-test('hop_supports_iter_and_walk_from_the_anchor', async () => {
+test('hop_supports_iter_from_the_anchor', async () => {
   const data = enc('{"orders":[{"id":"a"},{"id":"b"},{"id":"c"}],"meta":{"a":1,"b":2}}')
   const cursor = await open(memorySource(data))
   const orders = await cursor.hop('orders')
@@ -70,8 +70,8 @@ test('hop_supports_iter_and_walk_from_the_anchor', async () => {
   assert.deepEqual(ids, [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
   const meta = await cursor.hop('meta')
   assert.ok(meta)
-  const keys: string[] = []
-  for await (const [key] of meta.walk()) keys.push(key)
+  const keys: unknown[] = []
+  for await (const batch of meta.iter({ withKey: true })) for (const [key] of batch) keys.push(key)
   assert.deepEqual(keys, ['a', 'b'])
 })
 

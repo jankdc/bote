@@ -19,11 +19,11 @@ for await (const users of cursor.iter('users', {
   // what to do with an item that fails schema: surface the error, or silently
   // drop it from the batch. ('throw' | 'skip', default: 'throw')
   onInvalid: 'skip',
-  // yield [index, value] tuples instead of bare values, where index is the
-  // element's zero-based position in the source array. (boolean, default: false)
-  withIndex: true,
+  // yield [key, value] tuples instead of bare values. key is the member name for
+  // an object, the element's zero-based index for an array. (boolean, default: false)
+  withKey: true,
 })) {
-  for (const [index, user] of users) {
-    console.log(index, user.id, user.email)
+  for (const [key, user] of users) {
+    console.log(key, user.id, user.email)
   }
 }

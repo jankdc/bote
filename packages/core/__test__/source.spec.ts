@@ -70,11 +70,13 @@ test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
 
 test('source_rejects_invalid_size_in_facade', async () => {
   const withSize = (size: number): Source => ({
-    open: () =>
-      Promise.resolve({ size, read: () => Promise.resolve(new Uint8Array()) }),
+    open: () => Promise.resolve({ size, read: () => Promise.resolve(new Uint8Array()) }),
   })
   await assert.rejects(() => open(withSize(Number.NaN)), /source size must be a non-negative integer, got NaN/)
-  await assert.rejects(() => open(withSize(Number.POSITIVE_INFINITY)), /source size must be a non-negative integer, got Infinity/)
+  await assert.rejects(
+    () => open(withSize(Number.POSITIVE_INFINITY)),
+    /source size must be a non-negative integer, got Infinity/,
+  )
   await assert.rejects(() => open(withSize(-1)), /source size must be a non-negative integer, got -1/)
   await assert.rejects(() => open(withSize(1.5)), /source size must be a non-negative integer, got 1.5/)
 })
@@ -195,7 +197,7 @@ test('lifecycle_use_after_close_throws_uniformly', async () => {
   // close() invalidates the cursor for every method, regardless of source - a
   // single defined contract, not the source-dependent behavior of the raw reader
   // (fromBuffer reads would keep working; a file read would throw an opaque I/O
-  // error). Sub-cursors from walk/hop share the same closed state.
+  // error). Sub-cursors from hop share the same closed state.
   const cursor = await open(fromBuffer(enc(DOC)))
   const child = await cursor.hop('meta')
   assert.ok(child)
@@ -206,7 +208,6 @@ test('lifecycle_use_after_close_throws_uniformly', async () => {
   await assert.rejects(() => cursor.count('users'), /cursor is closed/)
   await assert.rejects(() => cursor.hop('users'), /cursor is closed/)
   assert.throws(() => cursor.iter('users'), /cursor is closed/)
-  assert.throws(() => cursor.walk(), /cursor is closed/)
   // The escaped sub-cursor is invalidated by the root's close too.
   await assert.rejects(() => child.get('version'), /cursor is closed/)
 })

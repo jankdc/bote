@@ -33,7 +33,7 @@ here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default set
 
 ## array access
 
-`iter` streams the elements of an array at a path, **a batch at a time**, so you never hold the whole collection in memory and not wait for the heat death of the universe if this yielded individually. each `for await` step yields an array of items (use `walk` to step over the members of an object):
+`iter` streams the children of a container at a path, **a batch at a time**, so you never hold the whole collection in memory and not wait for the heat death of the universe if this yielded individually. it works on either kind: array elements or object member values. each `for await` step yields an array of items:
 
 ```ts
 // e.g. [{ id: 'user-1' }, { id: 'user-2' }, ...]
@@ -47,20 +47,21 @@ for await (const users of cursor.iter()) {
 }
 ```
 
-pass an options object as the last argument to tune what comes back: `batch`, `select`, `schema`, `onInvalid`, and `withIndex`. if you want to know more of the options, see [`arrays.js`](./examples/arrays.js).
+pass an options object as the last argument to tune what comes back: `batch`, `select`, `schema`, `onInvalid`, and `withKey`. if you want to know more of the options, see [`arrays.js`](./examples/arrays.js).
 
 ## object access
 
-`walk` steps over the members of an object at a path, yielding a **`[key, cursor]`** pair per member. the key is the member name, the cursor is anchored at its value. each child cursor is first-class: it outlives the loop and can be `walk`ed again, which is what lets you descend a tree of unknown depth.
+`iter` over an object yields its **member values** in document order. add `withKey: true` to get **`[key, value]`** pairs instead, where `key` is the member name (for an array, `key` is the element's index). batched either way, so a million-member object never lands on the heap at once:
 
 ```ts
 // e.g. { alice: { role: 'admin' }, bob: { role: 'guest' }, ... }
 await using cursor = await open(fromFile('./accounts.json'))
 
-for await (const [name, account] of cursor.walk()) {
-  // name is the member name ('alice', 'bob', ...)
-  const role = await account.get('role')
-  console.log(`${name}: ${role}`)
+for await (const batch of cursor.iter({ withKey: true })) {
+  for (const [name, account] of batch) {
+    // name is the member name ('alice', 'bob', ...); account is its value
+    console.log(`${name}: ${account.role}`)
+  }
 }
 ```
 

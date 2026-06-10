@@ -229,6 +229,29 @@ test('schema_iter_batch_1_yields_each_valid_item_before_invalid_throws', async (
   )
 })
 
+test('schema_iter_object_failure_path_is_the_member_name_not_a_numeric_index', async (t) => {
+  // Iterating an OBJECT with a schema, the failure path must carry the offending
+  // member's key, not a positional counter - `users.u2`, never `users[2]`.
+  const doc = enc(
+    '{"users":{"u0":{"id":1,"name":"Alice","tags":[]},' +
+      '"u1":{"id":2,"name":"Bob","tags":[]},' +
+      '"u2":{"id":"oops","name":"Cara","tags":[]}}}',
+  )
+  const cursor = await open(memorySource(doc))
+  t.after(() => cursor.close())
+  await assert.rejects(
+    async () => {
+      for await (const _ of cursor.iter('users', { schema: userSchema(), batch: 1 })) void _
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof ValidationError)
+      assert.deepEqual(err.path, ['users', 'u2'])
+      assert.equal(formatPath(err.path), 'users.u2')
+      return true
+    },
+  )
+})
+
 test('schema_iter_default_batch_throw_loses_partial', async (t) => {
   // Documents the tradeoff: when validation throws mid-batch, the batch is
   // never yielded - earlier-validated items in the same batch are not

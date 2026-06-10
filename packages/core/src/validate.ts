@@ -25,8 +25,6 @@ const PATH_FAULT_MESSAGE: Record<PathFaultCode, (segment?: number) => string> = 
   through_scalar: (segment) => `path traverses a non-container value at segment ${segment}`,
   wrong_kind: (segment) => `path segment ${segment} does not match the container kind`,
   scalar_target: () => 'target value is not a container',
-  iter_on_object: () => 'iter target is an object; use walk() to iterate object members',
-  walk_on_array: () => 'walk target is an array; use iter() to iterate array elements',
 }
 
 export class PathError extends Error {

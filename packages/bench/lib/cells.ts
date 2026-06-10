@@ -6,7 +6,7 @@
 
 import type { DocShape, FixturePattern } from './fixtures.ts'
 
-export type Operation = 'get' | 'has' | 'walk' | 'iter'
+export type Operation = 'get' | 'has' | 'iter'
 export type AccessPattern = FixturePattern
 export { type DocShape }
 
@@ -29,7 +29,7 @@ export interface Timing {
   mean_ns: number
   samples: number
   iters_per_sample: number
-  /** For the `walk-first` pattern: ns to yield the *first* child (min over
+  /** For the `obj-iter-first` pattern: ns to yield the *first* child (min over
    *  samples). Guards against an entry path that scans the whole container
    *  before the first element - that cost is O(doc) here, ~flat when lazy. */
   first_item_ns?: number
@@ -107,10 +107,10 @@ export function defaultCells(): Cell[] {
     iterBatch('array-of-objects', ITER, batch)
   }
 
-  // object-of-objects: the walk workhorse (walk is object-only). Keyed traversal
-  // and walk + per-child get, each over WALK members.
-  traverse('object-of-objects', 'walk', 'walk-all', WALK)
-  traverse('object-of-objects', 'walk', 'walk-get-name', WALK)
+  // object-of-objects: the object-iteration workhorse. Plain member iteration
+  // and member iteration projecting one field, each over WALK members.
+  traverse('object-of-objects', 'iter', 'obj-iter', WALK)
+  traverse('object-of-objects', 'iter', 'obj-iter-name', WALK)
 
   // deep-nested: depth (not count) stresses pointer-walking. shallow vs deep
   // brackets the per-level cost; no middle point.
@@ -128,21 +128,21 @@ export function defaultCells(): Cell[] {
   )
 
   // wide-flat: worst-case linear key scan to the last member (the class PR#11
-  // regressed) plus keyed traversal over a wide root.
+  // regressed) plus object iteration over a wide root.
   point('wide-flat', 'deep', LARGE)
-  traverse('wide-flat', 'walk', 'walk-all', WALK)
+  traverse('wide-flat', 'iter', 'obj-iter', WALK)
 
-  // First-child latency guard: walk-first must yield the first child without
+  // First-yield latency guard: obj-iter-first must yield the first member without
   // resolving the whole container (O(1), not O(doc))- a regression there
   // balloons first_item_ns. The 500k doc exceeds the resident window so the
   // container can't fully reside.
   cells.push(
     mk({
       ...base,
-      op: 'walk',
+      op: 'iter',
       docShape: 'object-of-objects',
       docSize: 500_000,
-      accessPattern: 'walk-first',
+      accessPattern: 'obj-iter-first',
       samples: 8,
       iterations: 1,
     }),
