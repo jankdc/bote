@@ -16,13 +16,12 @@
 use thiserror::Error;
 
 use crate::bitmap::{structural_word, Structural};
-pub use crate::chunks::ChunkMiss;
-use crate::chunks::ChunkWindow;
+use crate::chunks::{ChunkMiss, ChunkWindow};
 use crate::simd::{scan_block, ScanCarry, BLOCK_BYTES};
 
 /// Carry one byte past an opening quote: inside a string, no pending escape
 /// (the opening quote is never a backslash, so `prev_escaped` is 0).
-pub const INSIDE_STRING: ScanCarry = ScanCarry {
+const INSIDE_STRING: ScanCarry = ScanCarry {
   prev_escaped: 0,
   inside_string: !0,
 };
@@ -116,7 +115,7 @@ impl<'a> Walker<'a> {
   }
 
   #[inline]
-  pub fn skip_primitive(&mut self, from: u64) -> Result<u64, ChunkMiss> {
+  fn skip_primitive(&mut self, from: u64) -> Result<u64, ChunkMiss> {
     self.skip_while(from, is_primitive_byte)
   }
 
@@ -135,10 +134,7 @@ impl<'a> Walker<'a> {
   /// Drive a [`StringScan`] forward until `in_string` first goes 0 (the closing
   /// quote) or end-of-source. Commits `(offset, carry)` at each block boundary,
   /// so a `ChunkMiss` resumes mid-string without rescanning.
-  pub fn next_string_close_step(
-    &mut self,
-    scan: &mut StringScan,
-  ) -> Result<Option<u64>, ChunkMiss> {
+  fn next_string_close_step(&mut self, scan: &mut StringScan) -> Result<Option<u64>, ChunkMiss> {
     let source_size = self.source_size();
     while scan.offset < source_size {
       let block = self.block_at(scan.offset)?;
@@ -162,7 +158,7 @@ impl<'a> Walker<'a> {
   }
 
   /// Advance past `needed` depth-0 (element-boundary) commas of the current
-  /// array, returning the offset just past the last one (the next element's
+  /// container, returning the offset just past the last one (the next element's
   /// first byte). `entry_carry` is the string-scan carry at `from` (default at
   /// element boundaries, or the committed carry from a prior [`CommaStop::Partial`]).
   ///
@@ -223,8 +219,8 @@ impl<'a> Walker<'a> {
             consumed: scan.consumed,
           })
         }
-        BlockOutcome::ArrayClosed => {
-          return Ok(CommaStop::ArrayClosed {
+        BlockOutcome::ContainerClosed => {
+          return Ok(CommaStop::ContainerClosed {
             consumed: scan.consumed,
           })
         }
@@ -345,8 +341,6 @@ pub enum CommaStop {
     offset_after_comma: u64,
     consumed: usize,
   },
-  /// Array's terminating `]` reached before consuming `needed` commas.
-  ArrayClosed { consumed: usize },
   /// Block-boundary commit; caller resumes with these values once the next
   /// chunk loads.
   Partial {
@@ -355,12 +349,15 @@ pub enum CommaStop {
     consumed: usize,
     carry: ScanCarry,
   },
+  /// A depth-0 close (`]`/`}`) reached before consuming `needed` commas - the
+  /// container ended before the target.
+  ContainerClosed { consumed: usize },
 }
 
 /// Resumable position of an in-string scan: next block offset and the carry
 /// entering it. Threaded across faults so a long string isn't rescanned.
 #[derive(Debug, Clone, Copy)]
-pub struct StringScan {
+pub(crate) struct StringScan {
   pub offset: u64,
   pub carry: ScanCarry,
 }
@@ -535,8 +532,8 @@ impl StructuralWords {
 enum BlockOutcome {
   /// Target comma consumed; the next element begins at `offset_after_comma`.
   Found { offset_after_comma: u64 },
-  /// A depth-0 close was hit - the array ended before the target.
-  ArrayClosed,
+  /// A depth-0 close was hit - the container ended before the target.
+  ContainerClosed,
   /// Block exhausted, target not reached.
   Continue,
 }
@@ -598,7 +595,7 @@ impl CommaScan {
         self.depth += 1;
       } else if words.closes & bit != 0 {
         if self.depth == 0 {
-          return BlockOutcome::ArrayClosed;
+          return BlockOutcome::ContainerClosed;
         }
         self.depth -= 1;
       } else if self.depth == 0 {
@@ -846,14 +843,14 @@ mod tests {
   }
 
   #[test]
-  fn advance_commas_array_closed_before_target() {
+  fn advance_commas_container_closed_before_target() {
     let source = b"[1,2]";
     let win = window(source, 64);
     let mut w = Walker::new(&win);
     assert_eq!(
       w.advance_top_level_commas(1, 0, 5, ScanCarry::default(), None)
         .unwrap(),
-      CommaStop::ArrayClosed { consumed: 1 }
+      CommaStop::ContainerClosed { consumed: 1 }
     );
   }
 

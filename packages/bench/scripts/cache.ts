@@ -120,8 +120,8 @@ const REC_COUNT = 5000
 const REC_IDX = 4000 // deep in the array, so the cold drill-down scans most of it
 const recDoc = recordsDoc(REC_COUNT)
 
-// A realistic combined access: render one record's detail view, mixing all three
-// ops the way an app would - a header `get`, a point `get`, a `walk` over the
+// A realistic combined access: render one record's detail view, mixing the ops
+// the way an app would - a header `get`, a point `get`, an object `iter` over the
 // record's fields, and an `iter` over its tags. Cold, the first get pays the
 // full scan to the record; warm, the array member and the record's container
 // are already cached, so every step resumes near the target.
@@ -130,7 +130,7 @@ function detailViewAt(idx: number): (c: Cur) => Promise<number> {
     let sink = 0
     sink += Number(await c.get('meta', 'version'))
     sink += String(await c.get('records', idx, 'name')).length
-    for await (const _entry of c.walk('records', idx)) sink += 1
+    for await (const batch of c.iter('records', idx, { withKey: true })) sink += batch.length
     for await (const batch of c.iter('records', idx, 'tags')) sink += batch.length
     return sink
   }
@@ -227,7 +227,7 @@ const scenarios: Scenario[] = [
     target: (c) => c.count('items'),
   },
   {
-    name: 'detail view: get + walk + iter (combined)',
+    name: 'detail view: get + object iter + iter (combined)',
     doc: recDoc,
     chunkBytes: CHUNK,
     warm: detailViewAt(REC_IDX),

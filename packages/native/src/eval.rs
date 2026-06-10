@@ -5,9 +5,10 @@
 
 use crate::chunks::ChunkWindow;
 use crate::path::Segment;
-use crate::resolve::{ChildEntry, ValueLocation};
+use crate::resolve::{quoted_string_eq, ChildKey, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
+use crate::walker::TraverseError;
 
 /// Project a child into its yielded value per `select`: a single sub-path
 /// yields the bare sub-value; a map yields an object of named sub-values in
@@ -44,9 +45,36 @@ async fn project_map(
         let Some(entry) = session.next_child(&mut cursor, window).await? else {
           break; // unmatched fields stay null
         };
+        let raw_key: Option<Vec<u8>> = match entry.key {
+          ChildKey::Member { start, close } if wants_member(&matched, fields) => Some(
+            session
+              .materialize(
+                ValueLocation {
+                  start,
+                  end: close + 1,
+                },
+                window,
+              )
+              .await?,
+          ),
+          _ => None,
+        };
         for (slot, (_, path)) in matched.iter_mut().zip(fields) {
-          if slot.is_none() && path.first().is_some_and(|seg| segment_matches(seg, &entry)) {
-            *slot = Some(entry.location());
+          if slot.is_some() {
+            continue;
+          }
+          let hit = match (path.first(), entry.key) {
+            (Some(Segment::Member(name)), ChildKey::Member { start, .. }) => {
+              let raw = raw_key
+                .as_deref()
+                .expect("fetched for unmatched member fields");
+              quoted_string_eq(raw, name).map_err(|()| TraverseError::Malformed(start))?
+            }
+            (Some(Segment::Element(idx)), ChildKey::Index(index)) => *idx == index,
+            _ => false,
+          };
+          if hit {
+            *slot = Some(entry.location);
             remaining -= 1;
           }
         }
@@ -108,10 +136,11 @@ fn emit_json_string(out: &mut Vec<u8>, key: &str) {
   serde_json::to_writer(out, key).expect("serializing a &str to JSON is infallible");
 }
 
-fn segment_matches(seg: &Segment, entry: &ChildEntry) -> bool {
-  match (seg, entry) {
-    (Segment::Member(name), ChildEntry::Member { key, .. }) => key == name,
-    (Segment::Element(idx), ChildEntry::Element { index, .. }) => index == idx,
-    _ => false,
-  }
+/// Whether any still-unmatched field is addressed by a member name (so the
+/// entry's raw key span is worth fetching).
+fn wants_member(matched: &[Option<ValueLocation>], fields: &[(String, Vec<Segment>)]) -> bool {
+  matched
+    .iter()
+    .zip(fields)
+    .any(|(slot, (_, p))| slot.is_none() && matches!(p.first(), Some(Segment::Member(_))))
 }

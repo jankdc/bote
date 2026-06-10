@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::chunks::ChunkWindow;
 use crate::path::Segment;
-use crate::session::{doubling_burst, Query, Session, SessionError};
+use crate::session::{doubling_burst, Session, SessionError};
 use crate::simd::ScanCarry;
 use crate::walker::{CommaStop, TraverseError, Walker};
 
@@ -27,20 +27,20 @@ pub async fn at(
   if let Some(n) = session.cached_child_count(anchor_start, path) {
     return Ok(n);
   }
-  let mut q = Query::new(session);
+  let mut window = session.new_window();
   // run_locate, not run_resolve: we only need the container's start; the count
   // comes from a per-comma scan started at the opener.
   let Some(start) = session
-    .run_locate(path, anchor_start, base_depth, &mut q.window)
+    .run_locate(path, anchor_start, base_depth, &mut window)
     .await?
   else {
     return Ok(0);
   };
-  let Some(cursor) = session.enter_container(start, &mut q.window).await? else {
+  let Some(cursor) = session.enter_container(start, &mut window).await? else {
     return Err(SessionError::Path(crate::resolve::PathFault::ScalarTarget));
   };
   let kind = cursor.kind;
-  let count = children(session, cursor.next_offset, &mut q.window).await?;
+  let count = children(session, cursor.next_offset, &mut window).await?;
   // Store the count, not the close offset: the comma scan never sees the close.
   session.store_child_count(base_depth, anchor_start, path, kind, start, count);
   Ok(count)
@@ -90,7 +90,7 @@ fn count_step(walker: &mut Walker, state: &mut CountState) -> Result<u64, Traver
       None,
     )? {
       // Non-empty container: child count is depth-0 commas + 1.
-      CommaStop::ArrayClosed { consumed } => return Ok(state.consumed + consumed as u64 + 1),
+      CommaStop::ContainerClosed { consumed } => return Ok(state.consumed + consumed as u64 + 1),
       CommaStop::Partial {
         offset,
         depth,

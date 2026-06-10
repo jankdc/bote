@@ -79,11 +79,16 @@ pub fn resolve_step(
         if let Some(h) = scan_record.as_mut() {
           h.containers.push(ContainerRecord {
             seg: *segment_idx,
-            kind,
             value_start,
-            members: Vec::new(),
-            object_resume: None,
-            array_members: Vec::new(),
+            body: match kind {
+              ContainerKind::Object => RecordBody::Object {
+                members: Vec::new(),
+                resume: None,
+              },
+              ContainerKind::Array => RecordBody::Array {
+                members: Vec::new(),
+              },
+            },
           });
         }
         segment_scan.insert(ls)
@@ -95,16 +100,30 @@ pub fn resolve_step(
     let descend = match (ls.kind, segment) {
       // Recording is gated per kind: objects skip it (and key decode) when the
       // object cap is 0; arrays skip the array-member sink when the stride is 0.
+      // The push above fixed the record's variant from the same kind, so the
+      // mismatched arms are unreachable.
       (ContainerKind::Object, Segment::Member(name)) => {
-        step_object(walker, name, ls, if record_objects { cs } else { None })?
+        let rec = if record_objects {
+          cs.map(|c| match &mut c.body {
+            RecordBody::Object { members, resume } => (members, resume),
+            RecordBody::Array { .. } => unreachable!("record variant fixed at push"),
+          })
+        } else {
+          None
+        };
+        step_object(walker, name, ls, rec)?
       }
-      (ContainerKind::Array, Segment::Element(idx)) => step_array(
-        walker,
-        *idx,
-        ls,
-        array_stride,
-        if array_stride > 0 { cs } else { None },
-      )?,
+      (ContainerKind::Array, Segment::Element(idx)) => {
+        let rec = if array_stride > 0 {
+          cs.map(|c| match &mut c.body {
+            RecordBody::Array { members } => members,
+            RecordBody::Object { .. } => unreachable!("record variant fixed at push"),
+          })
+        } else {
+          None
+        };
+        step_array(walker, *idx, ls, array_stride, rec)?
+      }
       _ => {
         return Ok(Resolved::NotNavigable(PathFault::WrongKind {
           segment: *segment_idx,
@@ -206,18 +225,26 @@ pub struct ScanRecord {
 pub struct ContainerRecord {
   /// The container is `path[..seg]` from the scan's anchor.
   pub seg: usize,
-  pub kind: ContainerKind,
   /// Offset of the container's `{`/`[`.
   pub value_start: u64,
-  /// Object members seen, in scan order: `(name, key_start, value_start)`.
-  /// Empty for arrays.
-  pub members: Vec<(Box<str>, u64, u64)>,
-  /// Object only: high-water resume offset - the matched member's start, or the
-  /// close `}`.
-  pub object_resume: Option<u64>,
-  /// Array only: `(index, element_offset)` array members (one per stride
-  /// multiple) plus the resolved target, in ascending index order.
-  pub array_members: Vec<(usize, u64)>,
+  pub body: RecordBody,
+}
+
+/// Kind-specific payload of a [`ContainerRecord`], mirroring the cache's
+/// object/array body split.
+#[derive(Debug, Clone)]
+pub enum RecordBody {
+  Object {
+    /// Members seen, in scan order: `(name, key_start, value_start)`.
+    members: Vec<(Box<str>, u64, u64)>,
+    /// High-water resume offset - the matched member's start, or the close `}`.
+    resume: Option<u64>,
+  },
+  Array {
+    /// `(index, element_offset)` array members (one per stride multiple) plus
+    /// the resolved target, in ascending index order.
+    members: Vec<(usize, u64)>,
+  },
 }
 
 /// Byte range `[start, end)` covering a JSON value in the source document.
@@ -261,14 +288,6 @@ pub fn next_child(
   }
 }
 
-impl ChildEntry {
-  pub fn location(&self) -> ValueLocation {
-    match self {
-      Self::Member { location, .. } | Self::Element { location, .. } => *location,
-    }
-  }
-}
-
 /// Kind of JSON container being iterated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerKind {
@@ -288,19 +307,32 @@ pub struct ContainerCursor {
   pub index: usize,
 }
 
+impl ContainerCursor {
+  /// Offset just past the container's closing `}`/`]`. Valid only after
+  /// [`next_child`] has returned `None` - mid-iteration `next_offset` points at
+  /// the next child, not the close.
+  pub fn close_offset(&self) -> u64 {
+    self.next_offset + 1
+  }
+}
+
 /// One yielded child of a container.
-#[derive(Debug, Clone)]
-pub enum ChildEntry {
-  /// Object member: decoded key plus the byte range of the value.
-  Member {
-    key: String,
-    location: ValueLocation,
-  },
-  /// Array element: zero-based index plus the byte range of the value.
-  Element {
-    index: usize,
-    location: ValueLocation,
-  },
+#[derive(Debug)]
+pub struct ChildEntry {
+  pub key: ChildKey,
+  /// Byte range of the child's value.
+  pub location: ValueLocation,
+}
+
+/// How a child is addressed within its container. Object keys are carried as
+/// their raw source span - consumers that need the name fetch and decode it;
+/// nothing here validates the key bytes.
+#[derive(Debug, Clone, Copy)]
+pub enum ChildKey {
+  /// Object member: span of the key string, opening quote through closing quote.
+  Member { start: u64, close: u64 },
+  /// Array element: zero-based index.
+  Index(usize),
 }
 
 /// Advance an array scan, committing `state` only after a fully successful
@@ -310,7 +342,7 @@ fn step_array(
   target_index: usize,
   state: &mut SegmentScan,
   array_stride: usize,
-  mut cs: Option<&mut ContainerRecord>,
+  mut members: Option<&mut Vec<(usize, u64)>>,
 ) -> Result<Option<u64>, TraverseError> {
   // Fast path: jump to the target element by counting depth-0 commas, skipping
   // per-element skip_value calls. When collecting, an `ArrayMemberSink` samples
@@ -323,10 +355,10 @@ fn step_array(
     let depth = state.depth;
     let carry = state.carry;
     let stop = {
-      let sink = cs.as_deref_mut().map(|cs| ArrayMemberSink {
+      let sink = members.as_deref_mut().map(|out| ArrayMemberSink {
         base_index,
         stride: array_stride,
-        out: &mut cs.array_members,
+        out,
       });
       walker.advance_top_level_commas(from, depth, needed, carry, sink)?
     };
@@ -341,7 +373,7 @@ fn step_array(
         // Just past a depth-0 comma is an element boundary - outside any string.
         state.carry = ScanCarry::default();
       }
-      CommaStop::ArrayClosed { consumed: _ } => {
+      CommaStop::ContainerClosed { consumed: _ } => {
         // Array ended before the target index existed.
         return Ok(None);
       }
@@ -370,8 +402,8 @@ fn step_array(
       _ => {}
     }
     if iter_index == target_index {
-      if let Some(cs) = cs.as_deref_mut() {
-        cs.array_members.push((target_index, offset));
+      if let Some(out) = members.as_deref_mut() {
+        out.push((target_index, offset));
       }
       return Ok(Some(offset));
     }
@@ -390,23 +422,27 @@ fn step_array(
   }
 }
 
+/// Mutable view into a [`RecordBody::Object`]'s fields, handed to
+/// [`step_object`] while recording: `(members, resume)`.
+type ObjectRecord<'a> = (&'a mut Vec<(Box<str>, u64, u64)>, &'a mut Option<u64>);
+
 /// Advance an object scan, committing `state.offset` only after a fully
 /// successful iteration, so a mid-iteration `ChunkMiss` redoes at most one key.
 fn step_object(
   walker: &mut Walker,
   target: &str,
   state: &mut SegmentScan,
-  mut cs: Option<&mut ContainerRecord>,
+  mut rec: Option<ObjectRecord>,
 ) -> Result<Option<u64>, TraverseError> {
-  let collecting = cs.is_some();
+  let collecting = rec.is_some();
   loop {
     let iter_offset = state.offset;
     let offset = walker.skip_whitespace(iter_offset)?;
     match walker.byte_at(offset)? {
       None => return Err(TraverseError::UnexpectedEof(offset)),
       Some(b'}') => {
-        if let Some(cs) = cs.as_deref_mut() {
-          cs.object_resume = Some(offset);
+        if let Some((_, resume)) = rec.as_mut() {
+          **resume = Some(offset);
         }
         return Ok(None);
       }
@@ -442,11 +478,11 @@ fn step_object(
     if matches {
       // Match commit point: no fallible call follows, so recording here is never
       // redone by a retry.
-      if let Some(cs) = cs.as_deref_mut() {
+      if let Some((members, resume)) = rec.as_mut() {
         if let Some(name) = decoded.take() {
-          cs.members.push((name.into(), iter_offset, value_start));
+          members.push((name.into(), iter_offset, value_start));
         }
-        cs.object_resume = Some(iter_offset);
+        **resume = Some(iter_offset);
       }
       return Ok(Some(value_start));
     }
@@ -458,20 +494,20 @@ fn step_object(
         // fault leaves `state` at `iter_offset` recording nothing, so the retry
         // re-records exactly once.
         state.offset = after + 1;
-        if let Some(cs) = cs.as_deref_mut() {
+        if let Some((members, _)) = rec.as_mut() {
           if let Some(name) = decoded.take() {
-            cs.members.push((name.into(), iter_offset, value_start));
+            members.push((name.into(), iter_offset, value_start));
           }
         }
       }
       Some(b'}') => {
         // Last member (no trailing comma): record it before the resume point
         // advances to the close, else the resume point would skip past it.
-        if let Some(cs) = cs.as_deref_mut() {
+        if let Some((members, resume)) = rec.as_mut() {
           if let Some(name) = decoded.take() {
-            cs.members.push((name.into(), iter_offset, value_start));
+            members.push((name.into(), iter_offset, value_start));
           }
-          cs.object_resume = Some(after);
+          **resume = Some(after);
         }
         return Ok(None);
       }
@@ -484,7 +520,7 @@ fn step_object(
 /// Escape-free interiors byte-compare directly; escaped ones go through
 /// `serde_json`. `Err(())` means the escaped interior failed to decode
 /// (malformed); the caller maps it to [`TraverseError::Malformed`].
-fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
+pub(crate) fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
   if value_raw.len() < 2 || value_raw[0] != b'"' || value_raw[value_raw.len() - 1] != b'"' {
     return Ok(false);
   }
@@ -544,22 +580,15 @@ fn next_object_member(
   let key_close = walker
     .next_string_close(offset + 1)?
     .ok_or(TraverseError::UnexpectedEof(offset))?;
-  let raw = walker.read_range(offset, key_close + 1)?;
-  let key: String = serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(offset))?;
   let value_start = member_value_start(walker, key_close)?;
-  let value_end = walker.skip_value(value_start)?;
-  let after = walker.skip_whitespace(value_end)?;
-  cursor.next_offset = match walker.byte_at(after)? {
-    Some(b',') => after + 1,
-    Some(b'}') => after,
-    Some(_) | None => return Err(TraverseError::Malformed(after)),
-  };
-  Ok(Some(ChildEntry::Member {
-    key,
-    location: ValueLocation {
-      start: value_start,
-      end: value_end,
+  let (location, next_offset) = advance_past_value(walker, value_start, b'}')?;
+  cursor.next_offset = next_offset;
+  Ok(Some(ChildEntry {
+    key: ChildKey::Member {
+      start: offset,
+      close: key_close,
     },
+    location,
   }))
 }
 
@@ -576,23 +605,38 @@ fn next_array_element(
     }
     _ => {}
   }
-  let value_start = offset;
-  let value_end = walker.skip_value(value_start)?;
-  let after = walker.skip_whitespace(value_end)?;
-  cursor.next_offset = match walker.byte_at(after)? {
-    Some(b',') => after + 1,
-    Some(b']') => after,
-    Some(_) | None => return Err(TraverseError::Malformed(after)),
-  };
+  let (location, next_offset) = advance_past_value(walker, offset, b']')?;
+  cursor.next_offset = next_offset;
   let index = cursor.index;
   cursor.index += 1;
-  Ok(Some(ChildEntry::Element {
-    index,
-    location: ValueLocation {
+  Ok(Some(ChildEntry {
+    key: ChildKey::Index(index),
+    location,
+  }))
+}
+
+/// Skip the value at `value_start` and the separator after it, returning the
+/// value's location and the next child's offset (or the offset of `close` when
+/// this was the last child).
+fn advance_past_value(
+  walker: &mut Walker,
+  value_start: u64,
+  close: u8,
+) -> Result<(ValueLocation, u64), TraverseError> {
+  let value_end = walker.skip_value(value_start)?;
+  let after = walker.skip_whitespace(value_end)?;
+  let next_offset = match walker.byte_at(after)? {
+    Some(b',') => after + 1,
+    Some(b) if b == close => after,
+    Some(_) | None => return Err(TraverseError::Malformed(after)),
+  };
+  Ok((
+    ValueLocation {
       start: value_start,
       end: value_end,
     },
-  }))
+    next_offset,
+  ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -601,12 +645,8 @@ pub enum PathFault {
   ThroughScalar { segment: usize },
   /// A member-name segment addressed an array, or an index segment an object.
   WrongKind { segment: usize },
-  /// A container operation (`count`/`iter`/`walk`) was aimed at a scalar target.
+  /// A container operation (`count`/`iter`) was aimed at a scalar target.
   ScalarTarget,
-  /// `iter` was aimed at an object (steer the caller to `walk`).
-  IterOnObject,
-  /// `walk` was aimed at an array (steer the caller to `iter`).
-  WalkOnArray,
 }
 
 #[napi(string_enum = "snake_case")]
@@ -614,8 +654,6 @@ pub enum PathFault {
 pub enum PathFaultCode {
   ThroughScalar,
   ScalarTarget,
-  IterOnObject,
-  WalkOnArray,
   WrongKind,
 }
 
@@ -624,8 +662,6 @@ impl PathFaultCode {
     match self {
       Self::ThroughScalar => "through_scalar",
       Self::ScalarTarget => "scalar_target",
-      Self::IterOnObject => "iter_on_object",
-      Self::WalkOnArray => "walk_on_array",
       Self::WrongKind => "wrong_kind",
     }
   }
@@ -637,8 +673,6 @@ impl PathFault {
       Self::ThroughScalar { .. } => PathFaultCode::ThroughScalar,
       Self::WrongKind { .. } => PathFaultCode::WrongKind,
       Self::ScalarTarget => PathFaultCode::ScalarTarget,
-      Self::IterOnObject => PathFaultCode::IterOnObject,
-      Self::WalkOnArray => PathFaultCode::WalkOnArray,
     }
   }
 
@@ -646,7 +680,7 @@ impl PathFault {
   fn segment(&self) -> Option<usize> {
     match self {
       Self::ThroughScalar { segment } | Self::WrongKind { segment } => Some(*segment),
-      _ => None,
+      Self::ScalarTarget => None,
     }
   }
 
@@ -758,10 +792,13 @@ mod tests {
     let cs = &h.containers[0];
     assert_eq!(cs.seg, 0);
     assert_eq!(cs.value_start, 0);
-    let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
+    let RecordBody::Object { members, resume } = &cs.body else {
+      panic!("expected an object record");
+    };
+    let names: Vec<&str> = members.iter().map(|(n, _, _)| n.as_ref()).collect();
     assert_eq!(names, vec!["a", "b", "c"]);
     // "c" starts at offset 13 - the high-water resume point.
-    assert_eq!(cs.object_resume, Some(13));
+    assert_eq!(*resume, Some(13));
   }
 
   #[test]
@@ -772,11 +809,12 @@ mod tests {
     resolve_once(&win, &[Segment::Element(2)], &mut st);
 
     let h = st.take_scan_record().expect("collecting");
-    let cs = &h.containers[0];
-    assert!(cs.members.is_empty());
+    let RecordBody::Array { members } = &h.containers[0].body else {
+      panic!("expected an array record");
+    };
     // Stride 16 over 4 elements samples no grid array member, just the resolved
     // target. Element 2 ("30") starts at offset 7.
-    assert_eq!(cs.array_members, vec![(2, 7)]);
+    assert_eq!(*members, vec![(2, 7)]);
   }
 
   #[test]
@@ -789,10 +827,12 @@ mod tests {
     assert_eq!(resolve_once(&win, &[member("zzz")], &mut st), None);
 
     let h = st.take_scan_record().unwrap();
-    let cs = &h.containers[0];
-    let names: Vec<&str> = cs.members.iter().map(|(n, _, _)| n.as_ref()).collect();
+    let RecordBody::Object { members, resume } = &h.containers[0].body else {
+      panic!("expected an object record");
+    };
+    let names: Vec<&str> = members.iter().map(|(n, _, _)| n.as_ref()).collect();
     assert_eq!(names, vec!["a", "b"], "the last member must be tabled too");
-    assert_eq!(cs.object_resume, Some(12)); // the closing `}`
+    assert_eq!(*resume, Some(12)); // the closing `}`
   }
 
   #[test]
@@ -813,9 +853,9 @@ mod tests {
     assert_eq!(h.containers[0].seg, 0);
     assert_eq!(h.containers[1].seg, 1);
     assert_eq!(h.containers[2].seg, 2);
-    assert_eq!(
-      h.containers[1].array_members.last().map(|&(i, _)| i),
-      Some(1)
-    );
+    let RecordBody::Array { members } = &h.containers[1].body else {
+      panic!("expected an array record for the users array");
+    };
+    assert_eq!(members.last().map(|&(i, _)| i), Some(1));
   }
 }

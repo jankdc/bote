@@ -9,13 +9,12 @@
 //      resolved values or async-iterator state, heap would climb linearly
 //      with N. A flat tail is the pass condition.
 //
-//   2. weakref phase - walks a smaller sample, records a WeakRef per
-//      yielded Cursor wrapper, drops the strong reference at the loop
-//      boundary, forces GC, asserts all refs deref to undefined. This
-//      phase keeps the refs array around, so it intentionally inflates
-//      heapUsed - which is why it doesn't share a run with phase 1. Stays
-//      on `walk` because the property under test is specifically that
-//      walked Cursor wrappers are reclaimable.
+//   2. weakref phase - iterates an object sample with `withKey` to learn the
+//      member keys, hops into each (the only Cursor-wrapper factory now that
+//      `walk` is gone), records a WeakRef per hopped wrapper, drops the strong
+//      reference at the loop boundary, forces GC, asserts all refs deref to
+//      undefined. This phase keeps the refs array around, so it intentionally
+//      inflates heapUsed - which is why it doesn't share a run with phase 1.
 //
 // Must be run with `--expose-gc`; the harness asserts gc is available
 // and exits otherwise.
@@ -75,11 +74,13 @@ async function weakRefPhase(path: string): Promise<{ total: number; alive: numbe
   await using cursor = await open(fromFile(path))
   const refs: WeakRef<object>[] = []
   let seen = 0
-  for await (const [, child] of cursor.walk('items')) {
-    await child.get('name')
-    refs.push(new WeakRef(child))
-    seen += 1
-    if (seen >= WEAKREF_ITEMS) break
+  outer: for await (const batch of cursor.iter('items', { withKey: true, select: 'name' })) {
+    for (const [key] of batch as Array<[string, unknown]>) {
+      const child = await cursor.hop('items', key)
+      if (child) refs.push(new WeakRef(child))
+      seen += 1
+      if (seen >= WEAKREF_ITEMS) break outer
+    }
   }
   await collect()
   let alive = 0

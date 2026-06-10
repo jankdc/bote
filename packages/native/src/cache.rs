@@ -22,14 +22,14 @@
 //! tiebreak): the shallow navigational backbone - a big array's member node, a
 //! top-level object's table - is reachable from many future queries; deep nodes
 //! are narrowly reachable and shed first. Each node carries its document depth
-//! (`base_depth + path.len()`) because `iter`/`walk` re-anchor children at their
+//! (`base_depth + path.len()`) because `iter`/`hop` re-anchor children at their
 //! own byte offset, so the relative `NodeKey.path` length does *not* reflect tree
 //! depth.
 
 use std::collections::{hash_map::Entry, HashMap};
 
 use crate::path::Segment;
-use crate::resolve::{ContainerKind, ResumePoint, ScanRecord, ValueLocation};
+use crate::resolve::{ContainerKind, RecordBody, ResumePoint, ScanRecord, ValueLocation};
 
 /// A flat map of container nodes keyed by `(anchor, path)`, bounded by a global
 /// `slot_budget` with depth-first eviction. No invalidation (the source is
@@ -79,15 +79,12 @@ impl StructuralIndex {
     let mut seg = 0;
     while seg < path.len() {
       let key = NodeKey::new(anchor, &path[..seg]);
-      let Some(hop) = self.nodes.get(&key).map(|n| n.hop_for(&path[seg])) else {
+      let tick = self.next_tick();
+      let Some(node) = self.nodes.get_mut(&key) else {
         return (start, seg, None);
       };
-      // Bump recency on the hit so hot containers outlive stale ones in their tier.
-      let tick = self.next_tick();
-      if let Some(node) = self.nodes.get_mut(&key) {
-        node.last_used = tick;
-      }
-      match hop {
+      node.last_used = tick;
+      match node.body.hop(&path[seg]) {
         Hop::Into(vs) => {
           start = vs;
           seg += 1;
@@ -108,8 +105,25 @@ impl StructuralIndex {
     value_start: u64,
     close: u64,
   ) {
-    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
+    self.upsert(base_depth, anchor, path, kind, value_start, |node| {
       node.close = Some(close)
+    });
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn store_exhausted(
+    &mut self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    count: u64,
+    close: u64,
+  ) {
+    self.upsert(base_depth, anchor, path, kind, value_start, |node| {
+      node.child_count = Some(count);
+      node.close = Some(close);
     });
   }
 
@@ -123,13 +137,13 @@ impl StructuralIndex {
     value_start: u64,
     new_members: &[(usize, u64)],
   ) {
-    self.merge_into(
+    self.upsert(
       base_depth,
       anchor,
       path,
       ContainerKind::Array,
       value_start,
-      |body| body.merge_array(new_members),
+      |node| node.body.merge_array(new_members),
     );
   }
 
@@ -145,13 +159,13 @@ impl StructuralIndex {
     resume: Option<u64>,
   ) {
     let cap = self.object_member_cap.min(self.member_ceiling());
-    self.merge_into(
+    self.upsert(
       base_depth,
       anchor,
       path,
       ContainerKind::Object,
       value_start,
-      |body| body.merge_object(members, resume, cap),
+      |node| node.body.merge_object(members, resume, cap),
     );
   }
 
@@ -166,22 +180,19 @@ impl StructuralIndex {
   ) {
     for cs in &scan_record.containers {
       let prefix = &path[..cs.seg];
-      match cs.kind {
-        ContainerKind::Object => self.merge_object_scan(
-          base_depth,
-          anchor,
-          prefix,
-          cs.value_start,
-          &cs.members,
-          cs.object_resume,
-        ),
-        ContainerKind::Array => self.merge_array_scan(
-          base_depth,
-          anchor,
-          prefix,
-          cs.value_start,
-          &cs.array_members,
-        ),
+      match &cs.body {
+        RecordBody::Object { members, resume } => {
+          if members.is_empty() && resume.is_none() {
+            continue;
+          }
+          self.merge_object_scan(base_depth, anchor, prefix, cs.value_start, members, *resume);
+        }
+        RecordBody::Array { members } => {
+          if members.is_empty() {
+            continue;
+          }
+          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, members);
+        }
       }
     }
   }
@@ -195,7 +206,7 @@ impl StructuralIndex {
     value_start: u64,
     count: u64,
   ) {
-    self.store_field(base_depth, anchor, path, kind, value_start, |node| {
+    self.upsert(base_depth, anchor, path, kind, value_start, |node| {
       node.child_count = Some(count)
     });
   }
@@ -212,16 +223,16 @@ impl StructuralIndex {
     self.slot_budget.saturating_sub(1)
   }
 
-  /// Get-or-create the `(anchor, path)` node and apply `merge` to its body,
-  /// keeping `slots_used` in step and evicting if the write tips over budget.
-  fn merge_into(
+  /// Get-or-create the `(anchor, path)` node and apply `apply` to it, keeping
+  /// `slots_used` in step and evicting if the write tips over budget.
+  fn upsert(
     &mut self,
     base_depth: u32,
     anchor: u64,
     path: &[Segment],
     kind: ContainerKind,
     value_start: u64,
-    merge: impl FnOnce(&mut ContainerBody),
+    apply: impl FnOnce(&mut ContainerNode),
   ) {
     if !self.is_enabled() {
       return;
@@ -239,40 +250,7 @@ impl StructuralIndex {
           e.insert(ContainerNode::new(kind, value_start, depth, tick)),
         ),
       };
-      merge(&mut node.body);
-      node.last_used = tick;
-      node.slot_cost() - before
-    };
-    self.slots_used += delta;
-    self.evict_if_over_budget();
-  }
-
-  fn store_field(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    set: impl FnOnce(&mut ContainerNode),
-  ) {
-    if !self.is_enabled() {
-      return;
-    }
-    let depth = base_depth + path.len() as u32;
-    let tick = self.next_tick();
-    let delta = {
-      let (before, node) = match self.nodes.entry(NodeKey::new(anchor, path)) {
-        Entry::Occupied(e) => {
-          let n = e.into_mut();
-          (n.slot_cost(), n)
-        }
-        Entry::Vacant(e) => (
-          0,
-          e.insert(ContainerNode::new(kind, value_start, depth, tick)),
-        ),
-      };
-      set(node);
+      apply(node);
       node.last_used = tick;
       node.slot_cost() - before
     };
@@ -360,10 +338,6 @@ impl ContainerNode {
 
   pub fn child_count(&self) -> Option<u64> {
     self.child_count
-  }
-
-  fn hop_for(&self, segment: &Segment) -> Hop {
-    self.body.hop(segment)
   }
 
   /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
@@ -458,8 +432,8 @@ impl ContainerBody {
   /// How a hop along `segment` resolves.
   fn hop(&self, segment: &Segment) -> Hop {
     match (segment, self) {
-      (Segment::Member(name), ContainerBody::Object { resume, .. }) => {
-        match self.object_member(name) {
+      (Segment::Member(name), ContainerBody::Object { members, resume }) => {
+        match members.get(name.as_str()).copied() {
           Some(vs) => Hop::Into(vs),
           // The table covers the dense prefix `[open, resume]`, so an un-tabled
           // member is at or after `resume` - resuming there is always correct.
@@ -471,12 +445,14 @@ impl ContainerBody {
           .nearest_array_member(*idx)
           .map(|(index, offset)| ResumePoint::Array { index, offset }),
       ),
-      // Kind/segment mismatch: resolve will return None; no seed.
+      // Kind/segment mismatch: the resolver will surface WrongKind for this
+      // segment; no seed is useful.
       _ => Hop::Stop(None),
     }
   }
 
   /// `value_start` of a tabled object member, or `None` (untabled, or array body).
+  #[cfg(test)]
   fn object_member(&self, name: &str) -> Option<u64> {
     match self {
       ContainerBody::Array { .. } => None,
@@ -720,6 +696,53 @@ mod tests {
   }
 
   #[test]
+  fn scan_record_information_less_records_mint_no_nodes() {
+    use crate::resolve::ContainerRecord;
+    let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
+    let rec = ScanRecord {
+      containers: vec![
+        ContainerRecord {
+          seg: 0,
+          value_start: 0,
+          body: RecordBody::Object {
+            members: Vec::new(),
+            resume: None,
+          },
+        },
+        ContainerRecord {
+          seg: 0,
+          value_start: 0,
+          body: RecordBody::Array {
+            members: Vec::new(),
+          },
+        },
+      ],
+    };
+    c.apply_scan_record(0, 0, &[], &rec);
+    assert_eq!(c.node_count(), 0);
+    assert_eq!(c.slots_used(), 0);
+  }
+
+  #[test]
+  fn scan_record_resume_only_object_still_mints_node() {
+    use crate::resolve::ContainerRecord;
+    let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
+    let rec = ScanRecord {
+      containers: vec![ContainerRecord {
+        seg: 0,
+        value_start: 0,
+        body: RecordBody::Object {
+          members: Vec::new(),
+          resume: Some(12),
+        },
+      }],
+    };
+    c.apply_scan_record(0, 0, &[], &rec);
+    let node = c.get(0, &[]).expect("an {} miss still parks its resume");
+    assert_eq!(node.object_resume(), 12);
+  }
+
+  #[test]
   fn scalars_close_and_count_and_location() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     c.store_close(0, 0, &[], ContainerKind::Array, 0, 42);
@@ -782,7 +805,7 @@ mod tests {
     // One shallow backbone node (depth 0): a root array with array members.
     c.merge_array_scan(0, 0, &[], 0, &[(0, 0), (16, 160)]);
     // Flood deep nodes (depth 2): re-anchored element objects, tagged base_depth 2
-    // the way iter/walk would.
+    // the way iter/hop would.
     for i in 0..100u64 {
       c.merge_object_scan(
         2,

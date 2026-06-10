@@ -150,13 +150,13 @@ test('iter_select_rejects_non_path_values', async (t) => {
   assert.throws(() => db.iter('orders', { select: { a: { nested: 1 } } }), TypeError)
 })
 
-test('iter_rejects_non_boolean_withIndex', async (t) => {
-  // A non-boolean withIndex used to surface a raw napi error leaking the internal
-  // field name 'withKey'; the facade rejects it with a TypeError naming withIndex.
+test('iter_rejects_non_boolean_withKey', async (t) => {
+  // A non-boolean withKey is rejected at the facade with a TypeError naming the
+  // option, rather than passed through to surface a raw napi error.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  // @ts-expect-error withIndex must be a boolean
-  assert.throws(() => db.iter('orders', { withIndex: 'yes' }), /iter: withIndex must be a boolean/)
+  // @ts-expect-error withKey must be a boolean
+  assert.throws(() => db.iter('orders', { withKey: 'yes' }), /iter: withKey must be a boolean/)
 })
 
 test('iter_rejects_invalid_onInvalid', async (t) => {
@@ -198,9 +198,9 @@ test('iter_batch_rejects_above_max', async (t) => {
   assert.doesNotThrow(() => db.iter('orders', { batch: MAX_ITER_BATCH }))
 })
 
-test('iter_withIndex_array_yields_index_value_tuples', async () => {
+test('iter_withKey_array_yields_index_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
-  const pairs = await collect(cursor.iter('xs', { withIndex: true }))
+  const pairs = await collect(cursor.iter('xs', { withKey: true }))
   assert.deepEqual(pairs, [
     [0, 10],
     [1, 20],
@@ -208,10 +208,10 @@ test('iter_withIndex_array_yields_index_value_tuples', async () => {
   ])
 })
 
-test('iter_withIndex_with_select_yields_index_and_projected_value', async (t) => {
+test('iter_withKey_with_select_yields_index_and_projected_value', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows = await collect(db.iter('orders', { select: ['total'], withIndex: true }))
+  const rows = await collect(db.iter('orders', { select: ['total'], withKey: true }))
   assert.deepEqual(rows, [
     [0, 120],
     [1, 80],
@@ -221,13 +221,13 @@ test('iter_withIndex_with_select_yields_index_and_projected_value', async (t) =>
   ])
 })
 
-test('iter_withIndex_with_select_map_yields_index_and_object', async (t) => {
+test('iter_withKey_with_select_map_yields_index_and_object', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const rows = await collect(
     db.iter('orders', {
       select: { total: ['total'], country: ['customer', 'country'] },
-      withIndex: true,
+      withKey: true,
     }),
   )
   assert.equal(rows.length, 5)
@@ -235,11 +235,11 @@ test('iter_withIndex_with_select_map_yields_index_and_object', async (t) => {
   assert.deepEqual(rows[4], [4, { total: 999, country: 'US' }])
 })
 
-test('iter_withIndex_batch_override_yields_arrays_of_tuples', async (t) => {
+test('iter_withKey_batch_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const batches: Array<Array<[unknown, unknown]>> = []
-  for await (const batch of db.iter('orders', { select: ['total'], withIndex: true, batch: 3 })) {
+  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 })) {
     batches.push(batch as Array<[unknown, unknown]>)
   }
   assert.deepEqual(batches, [
@@ -255,7 +255,7 @@ test('iter_withIndex_batch_override_yields_arrays_of_tuples', async (t) => {
   ])
 })
 
-test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
+test('iter_withKey_with_schema_validates_value_part_only', async (t) => {
   // The schema sees the projected value (a number), not the [index, value] tuple.
   // The index is passed through unchanged in the yielded pair.
   const numberSchema = {
@@ -270,7 +270,7 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   const rows = await collect(
     db.iter('orders', {
       select: ['total'],
-      withIndex: true,
+      withKey: true,
       schema: numberSchema,
     }),
   )
@@ -283,7 +283,7 @@ test('iter_withIndex_with_schema_validates_value_part_only', async (t) => {
   ])
 })
 
-test('iter_withIndex_with_skip_preserves_source_indices_across_skipped_items', async () => {
+test('iter_withKey_with_skip_preserves_source_indices_across_skipped_items', async () => {
   const evenOnly = {
     '~standard': {
       version: 1,
@@ -293,7 +293,7 @@ test('iter_withIndex_with_skip_preserves_source_indices_across_skipped_items', a
     },
   } as const
   const cursor = await open(memorySource(enc('{"xs":[10,11,12,13,14]}')))
-  const pairs = await collect(cursor.iter('xs', { schema: evenOnly, withIndex: true, onInvalid: 'skip' }))
+  const pairs = await collect(cursor.iter('xs', { schema: evenOnly, withKey: true, onInvalid: 'skip' }))
   assert.deepEqual(pairs, [
     [0, 10],
     [2, 12],
@@ -303,7 +303,7 @@ test('iter_withIndex_with_skip_preserves_source_indices_across_skipped_items', a
 
 test('iter_scalar_target_throws_PathError', async () => {
   // A container operation aimed at a present scalar is a shape error, surfaced
-  // on first iteration (like the iter-on-object / walk-on-array gates).
+  // on first iteration. Holds for objects and arrays alike (iter is kind-agnostic).
   const cursor = await open(memorySource(enc('{"scalar":42}')))
   await assert.rejects(
     (async () => {
@@ -322,12 +322,81 @@ test('iter_missing_path_yields_no_batches', async () => {
   assert.deepEqual(batches, [])
 })
 
-test('iter_on_object_target_throws', async () => {
-  const cursor = await open(memorySource(enc('{"o":{"a":1,"b":2,"c":3}}')))
-  await assert.rejects(
-    (async () => {
-      for await (const _ of cursor.iter('o')) void _
-    })(),
-    /walk\(\)/,
-  )
+// iter_object_ folds in the cases that used to live in walk.spec.ts: iter is now
+// kind-agnostic, so an object target yields member values (and, with withKey,
+// [name, value] tuples) in document order.
+
+test('iter_object_yields_member_values', async () => {
+  const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))
+  assert.deepEqual(await collect(cursor.iter()), [1, 'two', [3, 4]])
+})
+
+test('iter_object_withKey_yields_name_value_pairs', async () => {
+  const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))
+  const pairs = await collect(cursor.iter({ withKey: true }))
+  assert.deepEqual(pairs, [
+    ['first', 1],
+    ['second', 'two'],
+    ['third', [3, 4]],
+  ])
+})
+
+test('iter_object_withKey_preserves_duplicate_keys', async () => {
+  // A source object can carry duplicate keys; tuple yields preserve every
+  // occurrence (unlike JSON.parse, which keeps only the last). A desirable divergence.
+  // TODO: Re-examine this we want to avoid different behaviour from JSON.parse
+  const cursor = await open(memorySource(enc('{"a":1,"a":2,"b":3}')))
+  const pairs = await collect(cursor.iter({ withKey: true }))
+  assert.deepEqual(pairs, [
+    ['a', 1],
+    ['a', 2],
+    ['b', 3],
+  ])
+})
+
+test('iter_object_withKey_with_select_projects_each_value', async (t) => {
+  const data = enc('{"users":{"alice":{"name":"Alice","age":30},"bob":{"name":"Bob","age":25}}}')
+  const cursor = await open(memorySource(data))
+  t.after(() => cursor.close())
+  const pairs = await collect(cursor.iter('users', { withKey: true, select: 'name' }))
+  assert.deepEqual(pairs, [
+    ['alice', 'Alice'],
+    ['bob', 'Bob'],
+  ])
+})
+
+test('iter_object_withKey_then_hop_descends_into_a_member', async (t) => {
+  // The interim lazy-descent recipe: withKey + select to learn the keys, then
+  // hop(key) to descend into the few members you care about.
+  const data = enc('{"users":{"alice":{"name":"Alice","age":30},"bob":{"name":"Bob","age":25}}}')
+  const cursor = await open(memorySource(data))
+  t.after(() => cursor.close())
+  const keys: string[] = []
+  for await (const batch of cursor.iter('users', { withKey: true, select: 'name' })) {
+    for (const [key] of batch as Array<[string, unknown]>) keys.push(key)
+  }
+  assert.deepEqual(keys, ['alice', 'bob'])
+  const bob = await cursor.hop('users', keys[1])
+  assert.ok(bob)
+  assert.equal(await bob.get('age'), 25)
+})
+
+test('iter_object_withKey_large_with_small_chunks', async () => {
+  const members = Array.from({ length: 100 }, (_, i) => `"item-${i}":{"id":${i},"name":"item-${i}"}`)
+  const data = enc('{' + members.join(',') + '}')
+  const cursor = await open(memorySource(data, 128))
+  const seen: Array<[string, number]> = []
+  for await (const batch of cursor.iter({ withKey: true, select: 'id' })) {
+    for (const [key, id] of batch as Array<[string, number]>) seen.push([key, id])
+  }
+  assert.equal(seen.length, 100)
+  assert.deepEqual(seen[0], ['item-0', 0])
+  assert.deepEqual(seen[99], ['item-99', 99])
+})
+
+test('iter_object_missing_path_yields_no_batches', async () => {
+  const cursor = await open(memorySource(enc('{"o":{"a":1}}')))
+  const batches: unknown[][] = []
+  for await (const b of cursor.iter('missing', { withKey: true })) batches.push(b)
+  assert.deepEqual(batches, [])
 })

@@ -9,9 +9,9 @@ export interface IterOptions {
   schema?: StandardSchemaV1
   /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
   onInvalid?: 'throw' | 'skip'
-  /** Yield `[index, value]` tuples instead of bare values, where `index` is
-   *  the zero-based position of the element in the source array. */
-  withIndex?: boolean
+  /** Yield `[key, value]` tuples instead of bare values. `key` is the member
+   *  name for objects and the zero-based index for arrays. */
+  withKey?: boolean
 }
 
 export type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail]
@@ -65,7 +65,9 @@ export function serializeSelect(select: Segment | Path | Record<string, Segment 
   const entries = Object.entries(select).map(([k, sub]) => {
     const path = typeof sub === 'string' || typeof sub === 'number' ? [sub] : sub
     if (!Array.isArray(path)) {
-      throw new TypeError(`iter: select field ${JSON.stringify(k)} must be a segment or path, got ${describeSelect(sub)}`)
+      throw new TypeError(
+        `iter: select field ${JSON.stringify(k)} must be a segment or path, got ${describeSelect(sub)}`,
+      )
     }
     validatePath(path)
     if (path.length === 0) {

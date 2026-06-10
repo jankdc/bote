@@ -5,7 +5,6 @@ export declare class Cursor {
   get(path: Array<string | number>): Promise<string | undefined>
   count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
-  walk(path: Array<string | number>): AsyncIterable<[string, Cursor]>
   hop(path: Array<string | number>): Promise<Cursor | null>
 }
 
@@ -18,14 +17,6 @@ export declare class Cursor {
 export declare class CursorIter {
   [Symbol.asyncIterator](): AsyncGenerator<string, void, undefined>
 }
-
-/**
- * This type implements JavaScript's async iterable protocol.
- * It can be used with `for await...of` loops.
- *
- * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
- */
-export declare class CursorWalk {}
 
 export declare function heapProfilePeakBytes(): number
 
@@ -42,6 +33,12 @@ export interface IterArgs {
   selectIr?: string
   /** Items yielded per iteration. */
   batch: number
+  /**
+   * Stitch each yield as a `[key, value]` tuple instead of a bare value. The key
+   * is the member name for objects (a JSON string) and the element index for
+   * arrays (a JSON number).
+   */
+  withKey?: boolean
 }
 
 /**
@@ -63,7 +60,7 @@ export declare function open(source: {
   read: (args: ReadArgs) => Promise<Uint8Array>
 }): Cursor
 
-export type PathFaultCode = 'through_scalar' | 'scalar_target' | 'iter_on_object' | 'walk_on_array' | 'wrong_kind'
+export type PathFaultCode = 'through_scalar' | 'scalar_target' | 'wrong_kind'
 
 /** Arguments passed to the JS `read(args)` callback. */
 export interface ReadArgs {

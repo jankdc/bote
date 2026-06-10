@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { withTempDir } from './tmp.ts'
 
 export type DocShape = 'array-of-objects' | 'object-of-objects' | 'deep-nested' | 'wide-flat'
-export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'walk-all' | 'iter-all' | 'walk-get-name' | 'walk-first'
+export type FixturePattern = 'shallow' | 'mid' | 'deep' | 'iter-all' | 'obj-iter' | 'obj-iter-name' | 'obj-iter-first'
 
 export interface DocFixture {
   shape: DocShape
@@ -59,10 +59,10 @@ function buildArrayOfObjects(items: number, padWidth: number): DocFixture {
       shallow: ['items', 0, 'name'],
       mid: ['items', Math.floor(items / 2), 'name'],
       deep: ['items', items - 1, 'name'],
-      'walk-all': null,
       'iter-all': ['items'],
-      'walk-get-name': null,
-      'walk-first': null,
+      'obj-iter': null,
+      'obj-iter-name': null,
+      'obj-iter-first': null,
     },
   }
 }
@@ -76,10 +76,10 @@ function buildObjectOfObjects(items: number, padWidth: number): DocFixture {
       shallow: key(0),
       mid: key(Math.floor(items / 2)),
       deep: key(items - 1),
-      'walk-all': ['items'],
       'iter-all': null,
-      'walk-get-name': ['items'],
-      'walk-first': ['items'],
+      'obj-iter': ['items'],
+      'obj-iter-name': ['items'],
+      'obj-iter-first': ['items'],
     },
   }
 }
@@ -102,10 +102,10 @@ function buildDeepNested(depth: number, padWidth: number): DocFixture {
       shallow: path(0),
       mid: path(Math.floor(depth / 2)),
       deep: path(depth),
-      'walk-all': null,
       'iter-all': null,
-      'walk-get-name': null,
-      'walk-first': null,
+      'obj-iter': null,
+      'obj-iter-name': null,
+      'obj-iter-first': null,
     },
   }
 }
@@ -126,10 +126,10 @@ function buildWideFlat(keys: number, padWidth: number): DocFixture {
       shallow: key(0),
       mid: key(Math.floor(keys / 2)),
       deep: key(keys - 1),
-      'walk-all': [],
       'iter-all': null,
-      'walk-get-name': null,
-      'walk-first': [],
+      'obj-iter': [],
+      'obj-iter-name': null,
+      'obj-iter-first': [],
     },
   }
 }

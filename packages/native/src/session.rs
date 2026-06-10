@@ -9,10 +9,6 @@
 //!   2. On `ChunkMiss(off)`, read a burst of chunks async, insert them into the
 //!      window, drop everything below the step's retention bound, and retry.
 //!   3. On success, return.
-//!
-//! The window is owned by the query ([`Query`]) or the iterator and is dropped
-//! or pruned to the scan position as the walk advances, so resident source
-//! memory stays bounded by the burst window regardless of document size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -92,7 +88,7 @@ impl Session {
     ChunkWindow::new(self.chunk_bytes, self.source_size)
   }
 
-  /// Prune the iterator window to the scan position: keep just the chunk
+  /// Prune a streaming window to the scan position: keep just the chunk
   /// covering `next_offset` so the next yield's first read is hot, dropping the
   /// rest (clearing once iteration walks off the end). Bounds resident chunks to
   /// ~1 between yields.
@@ -115,19 +111,17 @@ impl Session {
     base_depth: u32,
   ) -> Result<bool, SessionError> {
     let mut window = self.new_window();
-    // Locate-only (presence), not run_resolve (extent): `has` answers presence
-    // structurally and never validates the target's bytes, so a malformed leaf
-    // value (e.g. an unterminated string) at the target still reports `true`. A
-    // shape-contradicting path is "not present", not an error.
+    // `has` answers presence structurally: locate-only (not run_resolve) plus a
+    // kind peek (not an extent walk), so a malformed leaf value (e.g. an
+    // unterminated string) at the target still reports `true`. The peek confirms
+    // a value byte actually exists at the located start (it errors with
+    // UnexpectedEof on an empty or truncated document); a shape-contradicting
+    // path is "not present" (`Ok(false)`), not an error.
     match self
       .run_locate(path, anchor_start, base_depth, &mut window)
       .await
     {
       Ok(Some(start)) => {
-        // Confirm a value byte actually exists at the located start (an empty or
-        // truncated document has none) without walking the value's extent, so a
-        // malformed leaf (e.g. an unterminated string) at the target still
-        // reports present. peek errors with UnexpectedEof when there's no byte.
         self.peek_container_kind(start, &mut window).await?;
         Ok(true)
       }
@@ -150,20 +144,8 @@ impl Session {
     else {
       return Ok(None);
     };
-    let bytes = self.read_range(loc.start, loc.end, &mut window).await?;
+    let bytes = self.materialize(loc, &mut window).await?;
     Ok(Some(bytes))
-  }
-
-  pub async fn locate_at(
-    &self,
-    path: &[Segment],
-    anchor_start: u64,
-    base_depth: u32,
-  ) -> Result<Option<u64>, SessionError> {
-    let mut window = self.new_window();
-    self
-      .run_locate(path, anchor_start, base_depth, &mut window)
-      .await
   }
 
   pub async fn resolve_at(
@@ -179,8 +161,10 @@ impl Session {
   }
 }
 
-/// Cursor/iterator support, called from `cursor.rs`. These take a caller-owned,
-/// long-lived window that `cursor.rs` prunes to the scan frontier between yields.
+/// Container-stepping seams for the operations layer (`stream`, `eval`,
+/// `count`). Each takes a caller-owned window: streaming callers prune it to
+/// the scan frontier between yields via [`Session::prune_window`]; one-shot
+/// callers use a transient window dropped on return.
 impl Session {
   /// Advance `cursor` to the next child entry.
   pub async fn next_child(
@@ -188,16 +172,16 @@ impl Session {
     cursor: &mut ContainerCursor,
     window: &mut ChunkWindow,
   ) -> Result<Option<ChildEntry>, SessionError> {
-    // One element typically fits one chunk, and per-call invocation means no
-    // quadratic-restart risk to amortize, so burst=1.
+    // The step restarts from `cursor.next_offset` on every retry (`skip_value`
+    // starts a fresh SkipState each attempt), so a K-chunk child would rescan
+    // O(K^2) blocks at burst=1. Doubling keeps the common one-chunk child at a
+    // single 1-chunk fault while converging multi-chunk children in O(log K)
+    // retries.
     let min_reachable = AtomicU64::new(cursor.next_offset);
     self
-      .drive(
-        window,
-        &min_reachable,
-        |_| 1,
-        |walker| resolve::next_child(walker, cursor),
-      )
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
+        resolve::next_child(walker, cursor)
+      })
       .await
   }
 
@@ -233,13 +217,13 @@ impl Session {
   /// Resolve `path` from `anchor_start`, returning only the resolved value's
   /// start offset (no extent walk).
   ///
-  /// Memoization seam: every path resolution flows through here (or its wrappers
-  /// `run_resolve`/`locate_at`) - `get`/`has`/`count`/`iter`/`walk`/`select` all
-  /// route in. So the structural-index cache lives here: cached container hops
-  /// start the scan as deep as possible (an all-hit returns the offset faulting
-  /// no chunks), the first uncached level resumes from the deepest array member, and
-  /// the scan's child offsets are written back. Keep these three the only
-  /// resolution entry points so the cache has one place to live.
+  /// Memoization seam: every path resolution flows through here (or its wrapper
+  /// `run_resolve`) - `get`/`has`/`count`/`iter`/`select` all route in. So the
+  /// structural-index cache lives here: cached container hops start the scan as
+  /// deep as possible (an all-hit returns the offset faulting no chunks), the
+  /// first uncached level resumes from the deepest array member, and the scan's
+  /// child offsets are written back. Keep these two the only resolution entry
+  /// points so the cache has one place to live.
   pub(crate) async fn run_locate(
     &self,
     path: &[Segment],
@@ -388,7 +372,7 @@ impl Session {
 
 /// Structural-index cache accessors (table logic itself lives in `cache.rs`).
 /// Each is a no-op when caching is disabled. Called from `count.rs` /
-/// `cursor.rs` as scans learn child counts, closes, and array members.
+/// `stream.rs` as scans learn child counts, closes, and array members.
 impl Session {
   /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
   pub(crate) fn store_close(
@@ -415,7 +399,24 @@ impl Session {
     self.with_cache(|c| c.store_child_count(base_depth, anchor, path, kind, value_start, count));
   }
 
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`/`walk`
+  /// Record a fully-scanned container's child count and close offset in one
+  /// cache write.
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn store_exhausted(
+    &self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    kind: ContainerKind,
+    value_start: u64,
+    count: u64,
+    close: u64,
+  ) {
+    self
+      .with_cache(|c| c.store_exhausted(base_depth, anchor, path, kind, value_start, count, close));
+  }
+
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
   /// learned it - lets a repeat `count` skip the scan.
   pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
     self
@@ -424,7 +425,7 @@ impl Session {
   }
 
   /// Record an array resume-point member `(index, offset)` so a later random
-  /// index resumes near where `iter`/`walk` stopped.
+  /// index resumes near where `iter` stopped.
   pub(crate) fn store_array_resume_point(
     &self,
     base_depth: u32,
@@ -457,8 +458,8 @@ impl Session {
 pub(crate) const MAX_BURST: u64 = 256;
 
 /// Adaptive doubling burst for drivers that don't know the value's extent up
-/// front (`run_locate`, `skip_value_at`, `count::children`). Stateful; use one
-/// per `Session::drive`.
+/// front (`run_locate`, `skip_value_at`, `next_child`, `count::children`).
+/// Stateful; use one per `Session::drive`.
 pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
   let mut n = 1u64;
   move |_off| {
@@ -500,23 +501,6 @@ impl Session {
         }
         Err(e) => return Err(e.into()),
       }
-    }
-  }
-}
-
-/// RAII scope for a one-shot query: owns the transient [`ChunkWindow`] so its
-/// chunks are released on return, including early-`?` and early-`return` paths.
-///
-/// The iterators in `cursor.rs` don't use this - they keep a long-lived window
-/// across yields and prune it explicitly via [`Session::prune_window`].
-pub(crate) struct Query {
-  pub(crate) window: ChunkWindow,
-}
-
-impl Query {
-  pub(crate) fn new(session: &Session) -> Self {
-    Self {
-      window: session.new_window(),
     }
   }
 }
@@ -957,13 +941,13 @@ mod tests {
     )
     .unwrap();
 
+    let mut window = session.new_window();
     let start = session
-      .locate_at(&[Segment::Member("items".into())], 0, 0)
+      .run_locate(&[Segment::Member("items".into())], 0, 0, &mut window)
       .await
       .unwrap()
       .expect("items resolves");
 
-    let mut window = session.new_window();
     let mut cursor = session
       .enter_container(start, &mut window)
       .await
