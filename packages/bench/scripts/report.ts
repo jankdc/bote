@@ -24,6 +24,7 @@ const sorted = [...results].sort(
   (a, b) =>
     a.cell.op.localeCompare(b.cell.op) ||
     a.cell.accessPattern.localeCompare(b.cell.accessPattern) ||
+    (a.cell.consume ?? '').localeCompare(b.cell.consume ?? '') ||
     a.cell.docShape.localeCompare(b.cell.docShape) ||
     a.cell.docSize - b.cell.docSize ||
     (a.cell.batch ?? 0) - (b.cell.batch ?? 0),
@@ -33,7 +34,8 @@ const header = ['operation', 'document', 'bote'] as const
 
 const rows = sorted.map((r): string[] => {
   const batch = r.cell.batch !== undefined ? ` · batch=${r.cell.batch.toLocaleString()}` : ''
-  const op = `${r.cell.op} · ${r.cell.accessPattern}${batch}`
+  const access = r.cell.consume ?? r.cell.accessPattern
+  const op = `${r.cell.op} · ${access}${batch}`
   const doc = `${r.cell.docShape} · n=${r.cell.docSize.toLocaleString()}`
   if (r.error) return [op, doc, '⚠️ error']
   let bote = fmtNs(r.timing.min_ns)
@@ -51,7 +53,7 @@ const caption = chunk ? `file source, chunk=${fmtBytes(chunk)}` : 'no cells'
 // Column legend (moved here from the matrix driver): the table is the report,
 // so explain its columns next to it rather than the raw cell-id format.
 const legend = [
-  '`operation` - `<op> · <access>`: op is get | has | iter; access is how far the lookup reaches (shallow/deep) or the traversal kind (iter-all/obj-iter/obj-iter-name/obj-iter-first).',
+  '`operation` - `<op> · <access>`: op is get | has | iter; access is how far the lookup reaches (shallow/deep), the traversal kind (iter-all/obj-iter/obj-iter-name/obj-iter-first), or the `iter` consumption mode (batches/toArray/forEach/reduce/find/some/every/map/filter/take/drop).',
   '`document` - `<shape> · n=<size>`: shape is the JSON document shape; n is the array/object member or key count, or nesting depth for deep-nested.',
   '`bote` - fastest-sample whole-operation wall-clock (compare across runs on the same machine); `_(to 1st)_` marks time to the first member (obj-iter-first).',
 ]

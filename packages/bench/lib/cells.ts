@@ -6,8 +6,21 @@
 
 import type { DocShape, FixturePattern } from './fixtures.ts'
 
-export type Operation = 'get' | 'has' | 'iter'
 export type AccessPattern = FixturePattern
+export type Operation = 'get' | 'has' | 'iter'
+export type Consume =
+  | 'batches'
+  | 'toArray'
+  | 'forEach'
+  | 'reduce'
+  | 'find'
+  | 'some'
+  | 'every'
+  | 'map'
+  | 'filter'
+  | 'take'
+  | 'drop'
+
 export { type DocShape }
 
 export interface Cell {
@@ -15,6 +28,7 @@ export interface Cell {
   accessPattern: AccessPattern
   batch?: number
   chunkBytes: number
+  consume?: Consume
   docShape: DocShape
   docSize: number
   iterations: number
@@ -53,7 +67,8 @@ export interface Result {
 
 function mk(c: Omit<Cell, 'id'>): Cell {
   const batch = c.batch !== undefined ? `.b${c.batch}` : ''
-  const id = `${c.op}.${c.accessPattern}.${c.docShape}.n${c.docSize}.cs${c.chunkBytes}${batch}`
+  const consume = c.consume !== undefined ? `.${c.consume}` : ''
+  const id = `${c.op}.${c.accessPattern}.${c.docShape}.n${c.docSize}.cs${c.chunkBytes}${batch}${consume}`
   return { ...c, id }
 }
 
@@ -76,6 +91,19 @@ const ITER = 100_000
 const SMALL = 10_000
 const LARGE = 1_000_000
 const ITER_BATCHES = [1, 10, 100, 1_000, 10_000, 100_000]
+const CONSUMERS: Consume[] = [
+  'batches',
+  'toArray',
+  'forEach',
+  'reduce',
+  'find',
+  'some',
+  'every',
+  'map',
+  'filter',
+  'take',
+  'drop',
+]
 
 export function defaultCells(): Cell[] {
   const cells: Cell[] = []
@@ -105,6 +133,22 @@ export function defaultCells(): Cell[] {
   // - exposes how crossing overhead amortizes vs per-yield array cost).
   for (const batch of ITER_BATCHES) {
     iterBatch('array-of-objects', ITER, batch)
+  }
+
+  // each terminal/transform drained over the same array at the default batch.
+  for (const consume of CONSUMERS) {
+    cells.push(
+      mk({
+        ...base,
+        op: 'iter',
+        docShape: 'array-of-objects',
+        docSize: ITER,
+        accessPattern: 'iter-all',
+        samples: 8,
+        iterations: 1,
+        consume,
+      }),
+    )
   }
 
   // object-of-objects: the object-iteration workhorse. Plain member iteration
