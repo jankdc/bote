@@ -1,5 +1,5 @@
-import { validatePath } from './path.ts';
-import type { Path, Segment, StandardSchemaV1 } from './validate.ts';
+import { validatePath, type Path, type Segment } from './path.ts';
+import type { StandardSchemaV1 } from './validate.ts';
 
 /** Trailing options object for `Cursor.iter`, tuning how the iteration yields items. */
 export interface IterOptions {

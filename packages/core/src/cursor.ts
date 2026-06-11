@@ -1,10 +1,10 @@
 import type { Cursor as NativeCursor } from '@botejs/native';
 
-import { validatePath } from './path.ts';
+import { validatePath, type Path, type Segment } from './path.ts';
 import { parseValue, deserializeError } from './decode.ts';
 import { makeStream, type IterStream } from './stream.ts';
 
-import { runStandardSchema, validateItem, type Path, type Segment, type StandardSchemaV1 } from './validate.ts';
+import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts';
 
 import {
   splitArgs,

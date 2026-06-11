@@ -1,4 +1,4 @@
-import { PathError, formatPath, type Path, type PathFaultCode } from './validate.ts';
+import { PathError, formatPath, type Path, type PathFaultCode } from './path.ts';
 
 const NATIVE_PATH_ERROR = /^bote:path:([a-z_]+)(?::(\d+))?$/;
 
