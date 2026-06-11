@@ -1,19 +1,8 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec';
-import { formatPath, type Path } from './path.ts';
+import { type Path } from './path.ts';
+import { ValidationError } from './error.ts';
 
 export type { StandardSchemaV1 };
-
-export class ValidationError extends Error {
-  readonly issues: readonly StandardSchemaV1.Issue[];
-  readonly path: Path;
-
-  constructor(issues: readonly StandardSchemaV1.Issue[], path: Path) {
-    super(`bote: schema validation failed at ${formatPath(path)}: ${issues[0]?.message ?? 'unknown'}`);
-    this.name = 'ValidationError';
-    this.issues = issues;
-    this.path = path;
-  }
-}
 
 export async function runStandardSchema<O>(
   schema: StandardSchemaV1<unknown, O>,

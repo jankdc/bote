@@ -13,11 +13,28 @@
 //! Resumable scans commit their `(offset, carry)` at a block boundary, so a
 //! chunk fault never rewinds work or loses the carry.
 
+use napi_derive::napi;
 use thiserror::Error;
 
 use crate::bitmap::{structural_word, Structural};
 use crate::chunks::{ChunkMiss, ChunkWindow};
 use crate::simd::{scan_block, ScanCarry, BLOCK_BYTES};
+
+#[napi(string_enum = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonFaultCode {
+  MalformedJson,
+  UnexpectedEof,
+}
+
+impl JsonFaultCode {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::MalformedJson => "malformed_json",
+      Self::UnexpectedEof => "unexpected_eof",
+    }
+  }
+}
 
 /// Carry one byte past an opening quote: inside a string, no pending escape
 /// (the opening quote is never a backslash, so `prev_escaped` is 0).

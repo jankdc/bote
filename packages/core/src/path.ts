@@ -1,27 +1,9 @@
-import type { PathFaultCode } from '@botejs/native';
-
-export type { PathFaultCode };
-
 export type Segment = string | number;
 export type Path = readonly Segment[];
 
 /** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
  *  comfortably covers any in-memory JSON array. */
 export const MAX_ARRAY_INDEX = 0xffffffff;
-
-export class PathError extends Error {
-  readonly path: Path;
-  /** The fault kind; stable across versions, safe to branch on. */
-  readonly code: PathFaultCode;
-
-  constructor(path: Path, code: PathFaultCode, segment?: number) {
-    const reason = (PATH_FAULT_MESSAGE[code] ?? (() => code))(segment);
-    super(`bote: cannot resolve ${formatPath(path)}: ${reason}`);
-    this.name = 'PathError';
-    this.path = path;
-    this.code = code;
-  }
-}
 
 export function validatePath(path: readonly unknown[]): asserts path is readonly Segment[] {
   for (let i = 0; i < path.length; i++) {
@@ -67,9 +49,3 @@ function describeBadSegment(s: unknown): string {
   }
   return typeof s;
 }
-
-const PATH_FAULT_MESSAGE: Record<PathFaultCode, (segment?: number) => string> = {
-  through_scalar: (segment) => `path traverses a non-container value at segment ${segment}`,
-  wrong_kind: (segment) => `path segment ${segment} does not match the container kind`,
-  scalar_target: () => 'target value is not a container',
-};

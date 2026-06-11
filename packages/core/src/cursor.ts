@@ -1,8 +1,8 @@
 import type { Cursor as NativeCursor } from '@botejs/native';
 
-import { formatPath, validatePath, type Path, type Segment } from './path.ts';
+import { deserializeNativeError, ClosedCursorError, MalformedJsonError } from './error.ts';
+import { validatePath, type Path, type Segment } from './path.ts';
 import { makeStream, type IterStream } from './stream.ts';
-import { deserializeError } from './error.ts';
 
 import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts';
 
@@ -112,12 +112,7 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
     async hop(...path: Segment[]): Promise<Cursor | null> {
       ensureOpen(state);
       validatePath(path);
-      let child: NativeCursor | null;
-      try {
-        child = await native.hop(path);
-      } catch (err) {
-        throw deserializeError(err, path);
-      }
+      const child = await withPath(path, () => native.hop(path));
       return child ? wrap(child, state) : null;
     },
     async has(...args: VariadicPathArgs<StandardSchemaV1>): Promise<boolean> {
@@ -127,12 +122,12 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
         throw new TypeError('has: expected a Standard Schema as the trailing argument');
       }
       if (!schema) {
-        return native.has(path);
+        return withPath(path, () => native.has(path));
       }
-      if (!(await native.has(path))) {
+      if (!(await withPath(path, () => native.has(path)))) {
         return false;
       }
-      const text = await native.get(path);
+      const text = await withPath(path, () => native.get(path));
       const value = text === undefined ? undefined : parseValue(text, path);
       const result = await validateItem(schema, value, path, 'skip');
       return !('skip' in result);
@@ -143,13 +138,8 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
       if (schema !== undefined && !isSchema(schema)) {
         throw new TypeError('get: expected a Standard Schema as the trailing argument');
       }
-      let value: unknown;
-      try {
-        const text = await native.get(path);
-        value = text === undefined ? undefined : parseValue(text, path);
-      } catch (err) {
-        throw deserializeError(err, path);
-      }
+      const text = await withPath(path, () => native.get(path));
+      const value = text === undefined ? undefined : parseValue(text, path);
       if (!schema) {
         return value;
       }
@@ -158,11 +148,7 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
     async count(...path: Segment[]): Promise<number> {
       ensureOpen(state);
       validatePath(path);
-      try {
-        return await native.count(path);
-      } catch (err) {
-        throw deserializeError(err, path);
-      }
+      return withPath(path, () => native.count(path));
     },
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): IterStream<unknown> {
       ensureOpen(state);
@@ -207,7 +193,18 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
 
 export function ensureOpen(state: CursorState): void {
   if (state.closed) {
-    throw new Error('bote: cursor is closed');
+    throw new ClosedCursorError();
+  }
+}
+
+/** Run a native call, retyping any addon error as the matching {@link BoteError}
+ *  anchored to `path`. The single funnel every cursor operation passes through,
+ *  so native faults surface uniformly. */
+async function withPath<T>(path: Path, op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    throw deserializeNativeError(err, path);
   }
 }
 
@@ -223,7 +220,7 @@ function nativeStream(
         yield await mapBatch(raw);
       }
     } catch (err) {
-      throw deserializeError(err, path);
+      throw deserializeNativeError(err, path);
     }
   }
   return makeStream(batches, batchSize);
@@ -232,7 +229,7 @@ function nativeStream(
 function parseValue(text: string, path: Path): unknown {
   try {
     return JSON.parse(text);
-  } catch {
-    throw new Error(`bote: malformed JSON value at ${formatPath(path)}`);
+  } catch (cause) {
+    throw new MalformedJsonError(path, 'malformed_json', { cause });
   }
 }
