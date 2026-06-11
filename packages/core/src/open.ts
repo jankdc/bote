@@ -33,6 +33,17 @@ export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024
 export const DEFAULT_ITER_BATCH = 1000
 export const MAX_ITER_BATCH = 1_000_000
 
+/**
+ * The async stream returned by `iter`. Iterating it directly yields one item at
+ * a time or other methods to process the stream.
+ */
+export interface IterStream<T> extends AsyncIterable<T> {
+  batches(): AsyncIterable<T[]>
+  collect(): Promise<T[]>
+  forEach(fn: (item: T, index: number) => void): Promise<void>
+  reduce<A>(fn: (acc: A, item: T, index: number) => A, init: A): Promise<A>
+}
+
 export interface OpenOptions {
   /**
    * Slot budget for the structural-index cache: one slot per cached container
@@ -75,22 +86,22 @@ export interface Cursor {
 
   count(...path: Segment[]): Promise<number>
 
-  iter(...path: Segment[]): AsyncIterable<unknown[]>
-  iter<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): AsyncIterable<InferOutput<Sch>[]>
+  iter(...path: Segment[]): IterStream<unknown>
+  iter<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): IterStream<InferOutput<Sch>>
   iter<Sch extends StandardSchemaV1>(
     ...args: [...Segment[], IterOptions & { withKey: true; schema: Sch }]
-  ): AsyncIterable<[IterKey, InferOutput<Sch>][]>
+  ): IterStream<[IterKey, InferOutput<Sch>]>
   iter<Sch extends StandardSchemaV1>(
     ...args: [...Segment[], IterOptions & { schema: Sch }]
-  ): AsyncIterable<InferOutput<Sch>[]>
+  ): IterStream<InferOutput<Sch>>
   iter<S extends Record<string, Segment | Path>>(
     ...args: [...Segment[], IterOptions & { withKey: true; select: S }]
-  ): AsyncIterable<[IterKey, SelectMapShape<S>][]>
+  ): IterStream<[IterKey, SelectMapShape<S>]>
   iter<S extends Record<string, Segment | Path>>(
     ...args: [...Segment[], IterOptions & { select: S }]
-  ): AsyncIterable<SelectMapShape<S>[]>
-  iter(...args: [...Segment[], IterOptions & { withKey: true }]): AsyncIterable<[IterKey, unknown][]>
-  iter(...args: [...Segment[], IterOptions]): AsyncIterable<unknown[]>
+  ): IterStream<SelectMapShape<S>>
+  iter(...args: [...Segment[], IterOptions & { withKey: true }]): IterStream<[IterKey, unknown]>
+  iter(...args: [...Segment[], IterOptions]): IterStream<unknown>
 }
 
 export interface RootCursor extends Cursor, AsyncDisposable {
@@ -235,7 +246,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
         throw deserializeError(err, path)
       }
     },
-    iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): AsyncIterable<unknown[]> {
+    iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): IterStream<unknown> {
       ensureOpen(state)
       const { path, tail } = splitArgs<StandardSchemaV1 | IterOptions>(args)
       const { schema, select, batch, onInvalid, withKey } = normalizeIterTail(tail)
@@ -256,7 +267,7 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
       const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: nativeWithKey })
 
       if (!schema) {
-        return {
+        return makeStream({
           async *[Symbol.asyncIterator]() {
             try {
               for await (const b of inner) {
@@ -266,10 +277,10 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
               throw deserializeError(err, path)
             }
           },
-        } as AsyncIterable<unknown[]>
+        })
       }
       const policy = onInvalid ?? 'throw'
-      return {
+      return makeStream({
         async *[Symbol.asyncIterator]() {
           try {
             for await (const b of inner) {
@@ -287,11 +298,47 @@ function wrap(native: NativeCursor, state: CursorState): Cursor {
             throw deserializeError(err, path)
           }
         },
-      }
+      })
     },
   }
 
   return cursor as Cursor
+}
+
+function makeStream<T>(source: AsyncIterable<T[]>): IterStream<T> {
+  return {
+    async *[Symbol.asyncIterator](): AsyncIterator<T> {
+      for await (const batch of source)
+        for (let i = 0; i < batch.length; i++) {
+          yield batch[i]
+        }
+    },
+    batches: () => source,
+    async collect(): Promise<T[]> {
+      const out: T[] = []
+      for await (const batch of source)
+        for (let i = 0; i < batch.length; i++) {
+          out.push(batch[i])
+        }
+      return out
+    },
+    async forEach(fn: (item: T, index: number) => void): Promise<void> {
+      let index = 0
+      for await (const batch of source)
+        for (let i = 0; i < batch.length; i++) {
+          fn(batch[i], index++)
+        }
+    },
+    async reduce<A>(fn: (acc: A, item: T, index: number) => A, init: A): Promise<A> {
+      let acc = init
+      let index = 0
+      for await (const batch of source)
+        for (let i = 0; i < batch.length; i++) {
+          acc = fn(acc, batch[i], index++)
+        }
+      return acc
+    },
+  }
 }
 
 function parseValue(text: string, path: Path): unknown {

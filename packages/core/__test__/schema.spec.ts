@@ -133,9 +133,7 @@ test('schema_iter_completes_when_all_valid', async (t) => {
   const cursor = await open(memorySource(enc(doc)))
   t.after(() => cursor.close())
   const collected: string[] = []
-  for await (const batch of cursor.iter('tags', asyncStringSchema())) {
-    for (const tag of batch) collected.push(tag)
-  }
+  for await (const tag of cursor.iter('tags', asyncStringSchema())) collected.push(tag)
   assert.deepEqual(collected, ['a', 'b', 'c'])
 })
 
@@ -154,9 +152,7 @@ test('schema_iter_validates_every_yielded_child', async (t) => {
     },
   }
   const ids: string[] = []
-  for await (const batch of db.iter('orders', { schema: orderId })) {
-    for (const order of batch) ids.push(order.id)
-  }
+  for await (const order of db.iter('orders', { schema: orderId })) ids.push(order.id)
   assert.deepEqual(ids, ['a', 'b', 'c', 'd', 'e'])
 })
 
@@ -164,9 +160,7 @@ test('schema_iter_skip_filters_invalid', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const batch of db.iter('rows', { schema: numberN(), onInvalid: 'skip' })) {
-    for (const row of batch) ns.push(row.n)
-  }
+  for await (const row of db.iter('rows', { schema: numberN(), onInvalid: 'skip' })) ns.push(row.n)
   assert.deepEqual(ns, [1, 2, 4])
 })
 
@@ -174,9 +168,7 @@ test('schema_iter_skip_async_validator', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const batch of db.iter('rows', { schema: asyncNumberN(), onInvalid: 'skip' })) {
-    for (const row of batch) ns.push(row.n)
-  }
+  for await (const row of db.iter('rows', { schema: asyncNumberN(), onInvalid: 'skip' })) ns.push(row.n)
   assert.deepEqual(ns, [1, 2, 4])
 })
 
@@ -185,8 +177,8 @@ test('schema_iter_select_skip_validates_projected_shape', async (t) => {
   const db = await open(memorySource(enc(doc)))
   t.after(() => db.close())
   const ns: number[] = []
-  for await (const batch of db.iter('rows', { select: { n: ['v'] }, schema: numberN(), onInvalid: 'skip' })) {
-    for (const row of batch) ns.push(row.n)
+  for await (const row of db.iter('rows', { select: { n: ['v'] }, schema: numberN(), onInvalid: 'skip' })) {
+    ns.push(row.n)
   }
   assert.deepEqual(ns, [1, 3])
 })
@@ -195,7 +187,7 @@ test('schema_iter_batch_skip_shrinks_batches', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const batches: number[][] = []
-  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', batch: 2 })) {
+  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', batch: 2 }).batches()) {
     batches.push(b.map((r) => r.n))
   }
   // native batches the raw rows [1,2],[bad,4]; skip drops `bad` -> [[1,2],[4]]
@@ -213,9 +205,7 @@ test('schema_iter_batch_1_yields_each_valid_item_before_invalid_throws', async (
   const seen: User[] = []
   await assert.rejects(
     async () => {
-      for await (const batch of cursor.iter('users', { schema: userSchema(), batch: 1 })) {
-        for (const u of batch) seen.push(u)
-      }
+      for await (const u of cursor.iter('users', { schema: userSchema(), batch: 1 })) seen.push(u)
     },
     (err: unknown) => {
       assert.ok(err instanceof ValidationError)
@@ -260,9 +250,7 @@ test('schema_iter_default_batch_throw_loses_partial', async (t) => {
   t.after(() => cursor.close())
   const seen: User[] = []
   await assert.rejects(async () => {
-    for await (const batch of cursor.iter('users', userSchema())) {
-      for (const u of batch) seen.push(u)
-    }
+    for await (const u of cursor.iter('users', userSchema())) seen.push(u)
   }, ValidationError)
   assert.deepEqual(seen, [])
 })
@@ -271,9 +259,7 @@ test('schema_iter_batch_throws_on_invalid', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   await assert.rejects(async () => {
-    for await (const _b of db.iter('rows', { schema: numberN(), batch: 2 })) {
-      // consume
-    }
+    for await (const _ of db.iter('rows', { schema: numberN(), batch: 2 })) void _
   }, ValidationError)
 })
 

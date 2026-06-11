@@ -130,8 +130,8 @@ function detailViewAt(idx: number): (c: Cur) => Promise<number> {
     let sink = 0
     sink += Number(await c.get('meta', 'version'))
     sink += String(await c.get('records', idx, 'name')).length
-    for await (const batch of c.iter('records', idx, { withKey: true })) sink += batch.length
-    for await (const batch of c.iter('records', idx, 'tags')) sink += batch.length
+    for await (const _ of c.iter('records', idx, { withKey: true })) sink += 1
+    for await (const _ of c.iter('records', idx, 'tags')) sink += 1
     return sink
   }
 }
@@ -163,7 +163,7 @@ const siblingDoc = siblingArrayDoc(50, 4000, 200)
 
 async function iterItems(c: Cur): Promise<number> {
   let n = 0
-  for await (const batch of c.iter('items')) n += batch.length
+  for await (const _ of c.iter('items')) n += 1
   return n
 }
 

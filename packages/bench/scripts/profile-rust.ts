@@ -30,8 +30,8 @@ const PAD_WIDTH = 7
 
 async function iterAll(cursor: Cursor): Promise<number> {
   let count = 0
-  for await (const batch of cursor.iter('items', { select: ['name'], batch: DEFAULT_ITER_BATCH })) {
-    count += batch.length
+  for await (const _name of cursor.iter('items', { select: ['name'], batch: DEFAULT_ITER_BATCH })) {
+    count += 1
   }
   return count
 }

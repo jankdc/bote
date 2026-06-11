@@ -33,35 +33,39 @@ here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default set
 
 ## array access
 
-`iter` streams the children of a container at a path, **a batch at a time**, so you never hold the whole collection in memory and not wait for the heat death of the universe if this yielded individually. it works on either kind: array elements or object member values. each `for await` step yields an array of items:
+`iter` streams the children of a container at a path **one item at a time**, so you never hold the whole collection in memory. it works on either kind: array elements or object member values. each `for await` step yields a single item:
 
 ```ts
 // e.g. [{ id: 'user-1' }, { id: 'user-2' }, ...]
 await using cursor = await open(fromFile('./users.json'))
 
 // root is an array
-for await (const users of cursor.iter()) {
+for await (const user of cursor.iter()) {
+  console.log(user)
+}
+```
+
+the item loop is the ergonomic default; it costs a flat ~10% over a full walk. for hot paths, `.batches()` hands back the raw fetch arrays with no per-item tax (the `batch` option sets their size and the memory bound):
+
+```ts
+for await (const users of cursor.iter().batches()) {
   for (const user of users) {
     console.log(user)
   }
 }
 ```
 
-pass an options object as the last argument to tune what comes back: `batch`, `select`, `schema`, `onInvalid`, and `withKey`. if you want to know more of the options, see [`arrays.js`](./examples/arrays.js).
-
 ## object access
 
-`iter` over an object yields its **member values** in document order. add `withKey: true` to get **`[key, value]`** pairs instead, where `key` is the member name (for an array, `key` is the element's index). batched either way, so a million-member object never lands on the heap at once:
+`iter` over an object yields its **member values** in document order. add `withKey: true` to get **`[key, value]`** pairs instead, where `key` is the member name (for an array, `key` is the element's index). streamed either way, so a million-member object never lands on the heap at once:
 
 ```ts
 // e.g. { alice: { role: 'admin' }, bob: { role: 'guest' }, ... }
 await using cursor = await open(fromFile('./accounts.json'))
 
-for await (const batch of cursor.iter({ withKey: true })) {
-  for (const [name, account] of batch) {
-    // name is the member name ('alice', 'bob', ...); account is its value
-    console.log(`${name}: ${account.role}`)
-  }
+for await (const [name, account] of cursor.iter({ withKey: true })) {
+  // name is the member name ('alice', 'bob', ...); account is its value
+  console.log(`${name}: ${account.role}`)
 }
 ```
 
@@ -78,8 +82,8 @@ await using cursor = await open(fromFile('./report.json'))
 const section = await cursor.hop('report', 'sections', 0)
 if (section) {
   console.log(await section.count('rows'))
-  for await (const rows of section.iter('rows')) {
-    console.log(rows)
+  for await (const row of section.iter('rows')) {
+    console.log(row)
   }
 }
 ```
@@ -106,12 +110,14 @@ const cursor = await open(fromFile('./users.json'))
 // name: string
 const name = await cursor.get('users', 1000, 'name', User.shape.name)
 
-for await (const users of cursor.iter('users', User)) {
-  // user: User[]
-  const emails = users.map((user) => user.email)
-  await sendNewsletter(emails)
+let emails: string[] = []
+// .batches() to hand each fetch's worth of recipients to the batched API at once
+for await (const user of cursor.iter('users', User)) {
+  // user: User
+  emails.push(user.email)
 }
 
+await sendNewsletter(emails)
 await cursor.close()
 ```
 
