@@ -5,7 +5,7 @@ export interface IterOptions {
   select?: Segment | Path | Record<string, Segment | Path>
   /** How many items cross the native boundary per fetch, which also bounds the
    *  resident materialization window (the memory knob) and sets the array size
-   *  yielded by `IterStream.batches()`. The default item loop drains each fetch
+   *  yielded by `IterStream.raw()`. The default item loop drains each fetch
    *  one item at a time, so this doesn't change what item iteration yields, only
    *  how much is fetched and held at once. Higher is faster but holds more in
    *  memory. */

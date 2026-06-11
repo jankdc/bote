@@ -45,7 +45,7 @@ test('iter_item_and_batches_agree_on_contents', async () => {
   for await (const x of itemCursor.iter('xs')) byItem.push(x as number)
   const byBatch: number[] = []
   const batchCursor = await open(memorySource(doc))
-  for await (const batch of batchCursor.iter('xs').batches()) for (const x of batch) byBatch.push(x as number)
+  for await (const batch of batchCursor.iter('xs').raw()) for (const x of batch) byBatch.push(x as number)
   assert.deepEqual(byItem, byBatch)
   assert.deepEqual(byItem, items)
 })
@@ -58,14 +58,14 @@ test('iter_batches_default_batch_size_is_DEFAULT_ITER_BATCH', async () => {
   const items = Array.from({ length: 2500 }, (_, i) => i)
   const cursor = await open(memorySource(enc(JSON.stringify({ xs: items }))))
   const sizes: number[] = []
-  for await (const batch of cursor.iter('xs').batches()) sizes.push(batch.length)
+  for await (const batch of cursor.iter('xs').raw()) sizes.push(batch.length)
   assert.deepEqual(sizes, [1000, 1000, 500])
 })
 
 test('iter_batches_flushes_partial_final_batch', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
   const batches: number[][] = []
-  for await (const batch of cursor.iter('xs').batches()) batches.push(batch as number[])
+  for await (const batch of cursor.iter('xs').raw()) batches.push(batch as number[])
   assert.deepEqual(batches, [[10, 20, 30, 40]])
 })
 
@@ -118,7 +118,7 @@ test('iter_select_missing_sub_path_yields_null', async (t) => {
 
 test('iter_select_batch_combined_byCountry_fold', async (t) => {
   // The doc's headline example: project, batch, fold in JS. Pins the batch shape,
-  // so it iterates `.batches()`.
+  // so it iterates `.raw()`.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const byCountry = new Map<string, number>()
@@ -127,7 +127,7 @@ test('iter_select_batch_combined_byCountry_fold', async (t) => {
       select: { total: ['total'], country: ['customer', 'country'] },
       batch: 1024,
     })
-    .batches()) {
+    .raw()) {
     for (const row of rows as Array<{ total: number; country: string }>) {
       byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + row.total)
     }
@@ -144,7 +144,7 @@ test('iter_select_batch_with_small_chunks_stays_correct', async (t) => {
   const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256))
   t.after(() => db.close())
   let count = 0
-  for await (const batch of db.iter({ select: ['id'], batch: 256 }).batches()) count += batch.length
+  for await (const batch of db.iter({ select: ['id'], batch: 256 }).raw()) count += batch.length
   assert.equal(count, 4000)
 })
 
@@ -207,7 +207,7 @@ test('iter_batches_override_yields_arrays', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const sizes: number[] = []
-  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 }).batches()) sizes.push(batch.length)
+  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 }).raw()) sizes.push(batch.length)
   assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
 })
 
@@ -272,7 +272,7 @@ test('iter_withKey_batches_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const batches: Array<Array<[unknown, unknown]>> = []
-  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 }).batches()) {
+  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 }).raw()) {
     batches.push(batch as Array<[unknown, unknown]>)
   }
   assert.deepEqual(batches, [
@@ -352,7 +352,7 @@ test('iter_missing_path_yields_zero_items', async () => {
   const cursor = await open(memorySource(enc('{"xs":[1,2]}')))
   assert.deepEqual(await cursor.iter('nope').toArray(), [])
   const batches: unknown[][] = []
-  for await (const b of cursor.iter('nope').batches()) batches.push(b)
+  for await (const b of cursor.iter('nope').raw()) batches.push(b)
   assert.deepEqual(batches, [])
 })
 
@@ -577,7 +577,7 @@ test('iter_transform_batches_regroup_to_batch_size', async () => {
   for await (const batch of cursor
     .iter('xs', { batch: 2 })
     .map((x) => (x as number) + 1)
-    .batches())
+    .raw())
     sizes.push(batch.length)
   assert.deepEqual(sizes, [2, 2, 1])
 })

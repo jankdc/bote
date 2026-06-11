@@ -9,7 +9,7 @@ import type { DocShape, FixturePattern } from './fixtures.ts'
 export type AccessPattern = FixturePattern
 export type Operation = 'get' | 'has' | 'iter'
 export type Consume =
-  | 'batches'
+  | 'raw'
   | 'toArray'
   | 'forEach'
   | 'reduce'
@@ -92,7 +92,7 @@ const SMALL = 10_000
 const LARGE = 1_000_000
 const ITER_BATCHES = [1, 10, 100, 1_000, 10_000, 100_000]
 const CONSUMERS: Consume[] = [
-  'batches',
+  'raw',
   'toArray',
   'forEach',
   'reduce',

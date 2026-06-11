@@ -187,7 +187,7 @@ test('schema_iter_batch_skip_shrinks_batches', async (t) => {
   const db = await open(memorySource(enc(MIXED)))
   t.after(() => db.close())
   const batches: number[][] = []
-  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', batch: 2 }).batches()) {
+  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', batch: 2 }).raw()) {
     batches.push(b.map((r) => r.n))
   }
   // native batches the raw rows [1,2],[bad,4]; skip drops `bad` -> [[1,2],[4]]

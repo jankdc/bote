@@ -2,6 +2,10 @@
 '@botejs/core': minor
 ---
 
+\***\*BREAKING:\*\*** the raw-batch escape hatch is renamed from `batches()` to
+`raw()`. Migrate by renaming the call:
+`cursor.iter(...).batches()` to `cursor.iter(...).raw()`.
+
 Add chainable helpers to the `iter` stream.
 
 `cursor.iter(...)` now returns an `IterStream<T>` with lazy operators and

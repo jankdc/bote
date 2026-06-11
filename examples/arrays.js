@@ -4,7 +4,7 @@ import { User } from './schemas'
 await using cursor = await open(fromFile('./users.json'))
 
 // `iter` yields one item at a time. pass an options object as the last argument
-// to tune what comes back. (for the raw fetch arrays, append `.batches()`.)
+// to tune what comes back. (for the raw fetch arrays, append `.raw()`.)
 for await (const [key, user] of cursor.iter('users', {
   // how many items cross the native boundary per fetch, which also bounds resident
   // memory. larger reads fewer times but holds more at once; the item loop still

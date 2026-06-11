@@ -61,9 +61,9 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
 // they traverse the whole stream rather than stopping early.
 async function consumeStream(stream: IterStream<unknown>, consume: Consume, size: number): Promise<number> {
   switch (consume) {
-    case 'batches': {
+    case 'raw': {
       let n = 0
-      for await (const b of stream.batches()) n += b.length
+      for await (const b of stream.raw()) n += b.length
       return n
     }
     case 'toArray':

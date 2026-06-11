@@ -1,5 +1,5 @@
 export interface IterStream<T> extends AsyncIterable<T> {
-  batches(): AsyncIterable<T[]>
+  raw(): AsyncIterable<T[]>
 
   map<U>(fn: (item: T, index: number) => U | Promise<U>): IterStream<U>
   filter<U extends T>(fn: (item: T, index: number) => item is U): IterStream<U>
@@ -21,7 +21,7 @@ export function makeStream<T>(batches: () => AsyncIterable<T[]>, batchSize: numb
     [Symbol.asyncIterator]() {
       return flatten(batches())[Symbol.asyncIterator]()
     },
-    batches() {
+    raw() {
       return regroup ? regroupBatches(batches(), batchSize) : batches()
     },
     map<U>(fn: (item: T, index: number) => U | Promise<U>): IterStream<U> {
