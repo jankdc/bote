@@ -29,6 +29,20 @@ pub enum SourceError {
   Io(String),
 }
 
+#[napi_derive::napi(string_enum = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFaultCode {
+  SourceIo,
+}
+
+impl SourceFaultCode {
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::SourceIo => "source_io",
+    }
+  }
+}
+
 /// Arguments passed to the JS `read(args)` callback.
 #[napi_derive::napi(object)]
 pub struct ReadArgs {

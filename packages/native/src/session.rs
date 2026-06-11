@@ -33,17 +33,18 @@ pub(crate) const DEFAULT_OBJECT_MEMBER_CAP: usize = usize::MAX;
 /// Default `arrayIndexInterval`: array-member element stride.
 pub(crate) const DEFAULT_ARRAY_INDEX_INTERVAL: usize = 16;
 
+/// Errors a query can fail with. The napi boundary (`cursor.rs`) re-encodes
+/// these as `bote:<kind>:<detail>` lines that the facade rebuilds into typed
+/// JS errors; these `Display` strings are the Rust-facing fallback.
 #[derive(Debug, Error)]
 pub enum SessionError {
   #[error("traversal error: {0}")]
   Traverse(#[from] TraverseError),
   #[error(transparent)]
   Reader(#[from] ReaderError),
-  #[error("failed to parse JSON value: {0}")]
-  Json(#[from] serde_json::Error),
   #[error(transparent)]
   Select(#[from] SelectError),
-  #[error("bote:path:{}", .0.code())]
+  #[error("path not navigable: {}", .0.code())]
   Path(PathFault),
 }
 

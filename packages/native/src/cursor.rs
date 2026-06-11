@@ -11,10 +11,13 @@ use napi::bindgen_prelude::{Either, Error as NapiError};
 use napi::tokio::sync::Mutex as AsyncMutex;
 use napi_derive::napi;
 
+use crate::chunks::ReaderError;
 use crate::path::{self, Segment};
 use crate::resolve::ValueLocation;
 use crate::session::{Session, SessionError};
+use crate::source::{SourceError, SourceFaultCode};
 use crate::stream::IterState;
+use crate::walker::{JsonFaultCode, TraverseError};
 
 #[napi]
 pub struct Cursor {
@@ -202,7 +205,23 @@ impl napi::bindgen_prelude::AsyncGenerator for CursorIter {
 }
 
 fn map_err(e: SessionError) -> NapiError {
-  NapiError::from_reason(e.to_string())
+  NapiError::from_reason(serialize(&e))
+}
+
+fn serialize(e: &SessionError) -> String {
+  match e {
+    SessionError::Path(fault) => format!("bote:{}", fault.code()),
+    SessionError::Traverse(TraverseError::Malformed(_)) => {
+      format!("bote:{}", JsonFaultCode::MalformedJson.as_str())
+    }
+    SessionError::Traverse(TraverseError::UnexpectedEof(_)) => {
+      format!("bote:{}", JsonFaultCode::UnexpectedEof.as_str())
+    }
+    SessionError::Reader(ReaderError::ByteStream(SourceError::Io(reason))) => {
+      format!("bote:{}:{reason}", SourceFaultCode::SourceIo.as_str())
+    }
+    _ => e.to_string(),
+  }
 }
 
 #[cfg(test)]

@@ -41,6 +41,8 @@ export interface IterArgs {
   withKey?: boolean;
 }
 
+export type JsonFaultCode = 'malformed_json' | 'unexpected_eof';
+
 /**
  * Build a [`Cursor`] from a JS source object:
  *   - `size: number` total source size in bytes
@@ -67,3 +69,5 @@ export interface ReadArgs {
   offset: number;
   length: number;
 }
+
+export type SourceFaultCode = 'source_io';

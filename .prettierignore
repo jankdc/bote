@@ -1,7 +1,9 @@
 target
 node_modules
 packages/bench/.compare
-index.js
+packages/native/index.js
+packages/native/index.d.ts
+*.node
 package-template.wasi-browser.js
 package-template.wasi.cjs
 wasi-worker-browser.mjs
