@@ -1,5 +1,63 @@
 # @botejs/core
 
+## 0.5.0
+
+### Minor Changes
+
+- 6e85990: \***\*BREAKING:\*\*** the raw-batch escape hatch is renamed from `batches()` to
+  `raw()`. Migrate by renaming the call:
+  `cursor.iter(...).batches()` to `cursor.iter(...).raw()`.
+
+  Add chainable helpers to the `iter` stream.
+
+  `cursor.iter(...)` now returns an `IterStream<T>` with lazy operators and
+  eager terminals, so common item-processing no longer needs a hand-written
+  `for await` loop.
+  - **Lazy operators** (return a new `IterStream`, nothing runs until iterated or
+    a terminal is awaited): `map`, `filter` (with type-guard narrowing), `take`,
+    `drop`. Each callback receives a zero-based item index; `map`/`filter` await
+    async callbacks. `take` releases the native scan once its limit is reached.
+  - **Terminals** (await the walk): `toArray`, `forEach`, `reduce`, `find`,
+    `some`, `every`. `find`/`some` short-circuit on the first match.
+
+- bf63de8: `iter` yields items by default; `batches()` is the new escape hatch.
+
+  `cursor.iter(...)` is now a stream **of items**: `for await (const item of cursor.iter(...))`
+  yields one value at a time (a `[key, value]` tuple with `withKey: true`). Raw
+  batch access moves behind an explicit `batches()`. The main difference between this method and
+  the original individual yield item is that this one materialises the batch of items behind the
+  scenes and yield it individually, amortizing the cost of the FFI rust-js passing whilst still
+  being performant.
+  - **Breaking:** the default iterator's yield type changes from `T[]` to `T`.
+    Migrate a batch loop by appending `.batches()`:
+    `for await (const batch of cursor.iter(...))` → `for await (const batch of cursor.iter(...).batches())`.
+    TypeScript flags every site that treated a yield as an array.
+  - Per-item iteration costs a flat ~10% over a full walk; every hot path keeps a
+    zero-tax alternative (`batches()` and the `collect`/`forEach`/`reduce`
+    terminals
+  - `break`ing out of the item loop releases the underlying native scan.
+
+- dc4fc1d: Unify iteration on `iter`; remove `walk`.
+
+  `iter` is now kind-agnostic: an object target yields its member values in
+  document order (arrays are unchanged). The `walk` verb and its
+  `iter_on_object` / `walk_on_array` path faults are gone.
+  - **Breaking:** `walk(path)` is removed. Iterate object members with
+    `iter(path)`; for `[key, value]` pairs use `iter(path, { withKey: true })`.
+    To descend lazily, pair `withKey` (with a small `select` to learn the keys
+    cheaply) with `hop(key)`.
+  - **Breaking:** the `iter` option `withIndex` is renamed to `withKey`. The key
+    is the member name for objects and the element index for arrays; the exported
+    `IterKey` type widens from `number` to `string | number`.
+
+  Duplicate object keys are preserved by tuple yields (one `[key, value]` per
+  occurrence), unlike `JSON.parse`, which keeps the last.
+
+### Patch Changes
+
+- Updated dependencies [dc4fc1d]
+  - @botejs/native@0.5.0
+
 ## 0.4.0
 
 ### Minor Changes
