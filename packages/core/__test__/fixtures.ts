@@ -1,10 +1,10 @@
-import { fromBuffer, type Source } from '../src/index.ts'
+import { fromBuffer, type Source } from '../src/index.ts';
 
 export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
-  return fromBuffer(data, chunkBytes === undefined ? undefined : { chunkBytes })
+  return fromBuffer(data, chunkBytes === undefined ? undefined : { chunkBytes });
 }
 
-export const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
+export const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 // A small, fully-valid users + meta document.
 export const DOC = JSON.stringify({
@@ -13,7 +13,7 @@ export const DOC = JSON.stringify({
     { id: 2, name: 'Bob', tags: ['guest'] },
   ],
   meta: { version: 'v2', enabled: true },
-})
+});
 
 // Same shape as DOC, but the third user's `id` is a string, so a User schema
 // fails at `/users/2`.
@@ -24,11 +24,11 @@ export const USERS_WITH_INVALID = JSON.stringify({
     { id: 'oops', name: 'Carol', tags: [] },
   ],
   meta: { version: 'v2', enabled: true },
-})
+});
 
 // Homogeneous rows where the third row's `n` is non-numeric, so a `{ n: number }`
 // schema fails at `/rows/2`.
-export const MIXED = JSON.stringify({ rows: [{ n: 1 }, { n: 2 }, { n: 'bad' }, { n: 4 }] })
+export const MIXED = JSON.stringify({ rows: [{ n: 1 }, { n: 2 }, { n: 'bad' }, { n: 4 }] });
 
 // Orders used by the iter select/batch tests.
 export const ORDERS = JSON.stringify({
@@ -39,15 +39,17 @@ export const ORDERS = JSON.stringify({
     { id: 'd', status: 'paid', total: 200, customer: { country: 'DE' } },
     { id: 'e', status: 'pending', total: 999, customer: { country: 'US' } },
   ],
-})
+});
 
 // A `{"k0000":0,...}` object with `count` keys, for cache-pressure tests.
 export function bigObject(count: number): string {
-  const parts = ['{']
+  const parts = ['{'];
   for (let i = 0; i < count; i++) {
-    if (i > 0) parts.push(',')
-    parts.push(`"k${String(i).padStart(4, '0')}":${i}`)
+    if (i > 0) {
+      parts.push(',');
+    }
+    parts.push(`"k${String(i).padStart(4, '0')}":${i}`);
   }
-  parts.push('}')
-  return parts.join('')
+  parts.push('}');
+  return parts.join('');
 }

@@ -11,103 +11,115 @@
 //   --limit <n>      stop after the first n matching cells
 //   --dry-run        print the cell list to stderr and exit
 
-import { execSync } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
-import type { Writable } from 'node:stream'
+import { execSync } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
+import type { Writable } from 'node:stream';
 
-import { defaultCells, type Cell, type Result } from '#lib/cells.ts'
-import { arg, flag } from '#lib/cli.ts'
-import { runNode } from '#lib/proc.ts'
+import { defaultCells, type Cell, type Result } from '#lib/cells.ts';
+import { arg, flag } from '#lib/cli.ts';
+import { runNode } from '#lib/proc.ts';
 
-const outPath = arg('--out')
-const filterRe = arg('--filter') ? new RegExp(arg('--filter')!) : null
-const limit = arg('--limit') ? Number.parseInt(arg('--limit')!, 10) : Number.POSITIVE_INFINITY
-const dryRun = flag('--dry-run')
+const outPath = arg('--out');
+const filterRe = arg('--filter') ? new RegExp(arg('--filter')!) : null;
+const limit = arg('--limit') ? Number.parseInt(arg('--limit')!, 10) : Number.POSITIVE_INFINITY;
+const dryRun = flag('--dry-run');
 
-const workerPath = new URL('../lib/matrix-worker.ts', import.meta.url).pathname
+const workerPath = new URL('../lib/matrix-worker.ts', import.meta.url).pathname;
 
 function gitSha(): string {
   try {
-    return execSync('git rev-parse HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return execSync('git rev-parse HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
-    return process.env.GIT_SHA ?? 'unknown'
+    return process.env.GIT_SHA ?? 'unknown';
   }
 }
 
-const meta = { sha: gitSha(), arch: process.arch, platform: process.platform, node: process.version }
+const meta = { sha: gitSha(), arch: process.arch, platform: process.platform, node: process.version };
 
-let cells: Cell[] = defaultCells()
-if (filterRe) cells = cells.filter((c) => filterRe.test(c.id))
-if (Number.isFinite(limit)) cells = cells.slice(0, limit)
-
-if (dryRun) {
-  for (const c of cells) console.error(c.id)
-  console.error(`\n${cells.length} cell(s) would run.`)
-  process.exit(0)
+let cells: Cell[] = defaultCells();
+if (filterRe) {
+  cells = cells.filter((c) => filterRe.test(c.id));
+}
+if (Number.isFinite(limit)) {
+  cells = cells.slice(0, limit);
 }
 
-const sink: Writable = outPath ? createWriteStream(outPath) : process.stdout
+if (dryRun) {
+  for (const c of cells) {
+    console.error(c.id);
+  }
+  console.error(`\n${cells.length} cell(s) would run.`);
+  process.exit(0);
+}
+
+const sink: Writable = outPath ? createWriteStream(outPath) : process.stdout;
 
 interface SpawnOutcome {
-  result: Result | null
-  raw: string
-  exitCode: number | null
-  spawnError?: Error
+  result: Result | null;
+  raw: string;
+  exitCode: number | null;
+  spawnError?: Error;
 }
 
 async function runCell(cell: Cell): Promise<SpawnOutcome> {
-  const { stdout, code, error } = await runNode([workerPath], { input: JSON.stringify(cell) })
-  if (error) return { result: null, raw: stdout, exitCode: null, spawnError: error }
-  const line = stdout.trim().split('\n').pop() ?? ''
-  let result: Result | null = null
+  const { stdout, code, error } = await runNode([workerPath], { input: JSON.stringify(cell) });
+  if (error) {
+    return { result: null, raw: stdout, exitCode: null, spawnError: error };
+  }
+  const line = stdout.trim().split('\n').pop() ?? '';
+  let result: Result | null = null;
   try {
     if (line) {
-      const parsed = JSON.parse(line) as Result
-      if (parsed && typeof parsed === 'object') result = parsed
+      const parsed = JSON.parse(line) as Result;
+      if (parsed && typeof parsed === 'object') {
+        result = parsed;
+      }
     }
   } catch {
     // fall through with raw output for the driver to log
   }
-  return { result, raw: stdout, exitCode: code }
+  return { result, raw: stdout, exitCode: code };
 }
 
-console.error(`running ${cells.length} cell(s); meta=${JSON.stringify(meta)}`)
+console.error(`running ${cells.length} cell(s); meta=${JSON.stringify(meta)}`);
 
-let failed = 0
-const startedAt = Date.now()
+let failed = 0;
+const startedAt = Date.now();
 
 for (const cell of cells) {
-  const cellStartedAt = Date.now()
-  const outcome = await runCell(cell)
-  const durationMs = Date.now() - cellStartedAt
+  const cellStartedAt = Date.now();
+  const outcome = await runCell(cell);
+  const durationMs = Date.now() - cellStartedAt;
 
   if (!outcome.result) {
-    failed += 1
+    failed += 1;
     const reason = outcome.spawnError
       ? outcome.spawnError.message
-      : `exit ${outcome.exitCode}; output: ${outcome.raw.trim()}`
+      : `exit ${outcome.exitCode}; output: ${outcome.raw.trim()}`;
     sink.write(
       JSON.stringify({ cell, meta: { ...meta, date: new Date().toISOString(), durationMs }, error: reason }) + '\n',
-    )
-    console.error(`✗ ${cell.id}  worker failed: ${reason}`)
-    continue
+    );
+    console.error(`x ${cell.id}  worker failed: ${reason}`);
+    continue;
   }
 
-  const result = outcome.result
-  result.meta = { ...meta, date: new Date().toISOString(), durationMs }
-  sink.write(JSON.stringify(result) + '\n')
+  const result = outcome.result;
+  result.meta = { ...meta, date: new Date().toISOString(), durationMs };
+  sink.write(JSON.stringify(result) + '\n');
 
   if (result.error) {
-    failed += 1
-    console.error(`✗ ${cell.id}  ${result.error}`)
-    continue
+    failed += 1;
+    console.error(`x ${cell.id}  ${result.error}`);
+    continue;
   }
 }
 
-if (sink !== process.stdout) (sink as ReturnType<typeof createWriteStream>).end()
+if (sink !== process.stdout) {
+  (sink as ReturnType<typeof createWriteStream>).end();
+}
 
-const totalMs = Date.now() - startedAt
+const totalMs = Date.now() - startedAt;
 console.error(
   `\ndone: ${cells.length} cell(s) in ${(totalMs / 1000).toFixed(1)} s` + (failed ? `; ${failed} failed` : ''),
-)
-process.exit(failed > 0 ? 1 : 0)
+);
+process.exit(failed > 0 ? 1 : 0);

@@ -7,7 +7,7 @@
 // the defaults are good; reach for these knobs only to bound memory tighter on
 // huge/awkward docs, or to turn the cache off when every query hits cold paths.
 
-import { open, fromFile } from '@botejs/core'
+import { open, fromFile } from '@botejs/core';
 
 // all three knobs are optional; shown here with their meanings, not their defaults.
 await using cursor = await open(fromFile('./big.json'), {
@@ -28,9 +28,9 @@ await using cursor = await open(fromFile('./big.json'), {
   // (more memory, faster indexing).
   // default: 16.
   arrayIndexInterval: 8,
-})
+});
 
-console.log(await cursor.get('users', 100_000, 'name'))
+console.log(await cursor.get('users', 100_000, 'name'));
 
 // turn the cache off entirely. every query scans cold. useful for one-shot reads
 // or if you have extreme memory constraints.
@@ -38,5 +38,5 @@ console.log(await cursor.get('users', 100_000, 'name'))
 await using noCache = await open(fromFile('./big.json'), {
   objectMemberCap: 0,
   arrayIndexInterval: 0,
-})
-console.log(await noCache.get('users', 0, 'name'))
+});
+console.log(await noCache.get('users', 0, 'name'));

@@ -1,7 +1,7 @@
-import { open, fromFile } from '@botejs/core'
-import { User } from './schemas'
+import { open, fromFile } from '@botejs/core';
+import { User } from './schemas';
 
-await using cursor = await open(fromFile('./users.json'))
+await using cursor = await open(fromFile('./users.json'));
 
 // `iter` yields one item at a time. pass an options object as the last argument
 // to tune what comes back. (for the raw fetch arrays, append `.raw()`.)
@@ -25,5 +25,5 @@ for await (const [key, user] of cursor.iter('users', {
   // an object, the element's zero-based index for an array. (boolean, default: false)
   withKey: true,
 })) {
-  console.log(key, user.id, user.email)
+  console.log(key, user.id, user.email);
 }
