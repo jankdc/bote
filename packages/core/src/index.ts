@@ -10,16 +10,7 @@ export {
   type StandardSchemaV1,
 } from './validate.ts'
 
-export {
-  open,
-  DEFAULT_ITER_BATCH,
-  MAX_ITER_BATCH,
-  type Cursor,
-  type RootCursor,
-  type OpenOptions,
-  type IterKey,
-  type IterStream,
-} from './open.ts'
+export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type IterKey } from './cursor.ts'
 
 export {
   fromBuffer,
@@ -30,3 +21,7 @@ export {
   type SourceReader,
   type HttpRangeOptions,
 } from './sources.ts'
+
+export { type IterStream } from './stream.ts'
+
+export { open, type OpenOptions } from './open.ts'

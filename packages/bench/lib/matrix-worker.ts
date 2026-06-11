@@ -7,9 +7,9 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { DEFAULT_ITER_BATCH, fromFile, open, type Path, type Cursor } from '@botejs/core'
+import { DEFAULT_ITER_BATCH, fromFile, open, type Path, type Cursor, type IterStream } from '@botejs/core'
 
-import type { Cell, Result, Timing } from './cells.ts'
+import type { Cell, Consume, Result, Timing } from './cells.ts'
 import { buildFixture, type DocFixture } from './fixtures.ts'
 import { cv, mean, percentile, sample, warmup } from './timings.ts'
 import { createTempDir } from './tmp.ts'
@@ -47,10 +47,53 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
       }
       const batch = cell.batch ?? DEFAULT_ITER_BATCH
       const opts = cell.accessPattern === 'obj-iter-name' ? { batch, select: 'name' } : { batch }
+      if (cell.consume) return consumeStream(cursor.iter(...path, opts), cell.consume, cell.docSize)
       let n = 0
       for await (const _item of cursor.iter(...path, opts)) n += 1
       return n
     }
+  }
+}
+
+// Drain one `IterStream` by the cell's consumption mode. Each returns an
+// item-ish count purely so the work isn't dead-code-eliminated; the timing is
+// what matters. Short-circuiting terminals use predicates that never decide, so
+// they traverse the whole stream rather than stopping early.
+async function consumeStream(stream: IterStream<unknown>, consume: Consume, size: number): Promise<number> {
+  switch (consume) {
+    case 'raw': {
+      let n = 0
+      for await (const b of stream.raw()) n += b.length
+      return n
+    }
+    case 'toArray':
+      return (await stream.toArray()).length
+    case 'forEach': {
+      let n = 0
+      await stream.forEach(() => {
+        n += 1
+      })
+      return n
+    }
+    case 'reduce':
+      return stream.reduce((a) => a + 1, 0)
+    case 'find':
+      await stream.find(() => false)
+      return 0
+    case 'some':
+      await stream.some(() => false)
+      return 0
+    case 'every':
+      await stream.every(() => true)
+      return 0
+    case 'map':
+      return (await stream.map((x) => x).toArray()).length
+    case 'filter':
+      return (await stream.filter(() => true).toArray()).length
+    case 'take':
+      return (await stream.take(size).toArray()).length
+    case 'drop':
+      return (await stream.drop(1).toArray()).length
   }
 }
 

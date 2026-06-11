@@ -22,7 +22,7 @@ function countingSource(data: Uint8Array, chunkBytes: number): { source: Source;
 
 test('iter_array_yields_elements', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
-  assert.deepEqual(await cursor.iter('xs').collect(), [10, 20, 30, 40])
+  assert.deepEqual(await cursor.iter('xs').toArray(), [10, 20, 30, 40])
 })
 
 test('iter_item_iteration_yields_items_in_order_across_batch_boundaries', async () => {
@@ -45,7 +45,7 @@ test('iter_item_and_batches_agree_on_contents', async () => {
   for await (const x of itemCursor.iter('xs')) byItem.push(x as number)
   const byBatch: number[] = []
   const batchCursor = await open(memorySource(doc))
-  for await (const batch of batchCursor.iter('xs').batches()) for (const x of batch) byBatch.push(x as number)
+  for await (const batch of batchCursor.iter('xs').raw()) for (const x of batch) byBatch.push(x as number)
   assert.deepEqual(byItem, byBatch)
   assert.deepEqual(byItem, items)
 })
@@ -58,28 +58,28 @@ test('iter_batches_default_batch_size_is_DEFAULT_ITER_BATCH', async () => {
   const items = Array.from({ length: 2500 }, (_, i) => i)
   const cursor = await open(memorySource(enc(JSON.stringify({ xs: items }))))
   const sizes: number[] = []
-  for await (const batch of cursor.iter('xs').batches()) sizes.push(batch.length)
+  for await (const batch of cursor.iter('xs').raw()) sizes.push(batch.length)
   assert.deepEqual(sizes, [1000, 1000, 500])
 })
 
 test('iter_batches_flushes_partial_final_batch', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30,40]}')))
   const batches: number[][] = []
-  for await (const batch of cursor.iter('xs').batches()) batches.push(batch as number[])
+  for await (const batch of cursor.iter('xs').raw()) batches.push(batch as number[])
   assert.deepEqual(batches, [[10, 20, 30, 40]])
 })
 
 test('iter_select_single_path_yields_bare_values', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const totals = await db.iter('orders', { select: ['total'] }).collect()
+  const totals = await db.iter('orders', { select: ['total'] }).toArray()
   assert.deepEqual(totals, [120, 80, 50, 200, 999])
 })
 
 test('iter_select_map_yields_objects_in_declared_order', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows = await db.iter('orders', { select: { total: ['total'], country: ['customer', 'country'] } }).collect()
+  const rows = await db.iter('orders', { select: { total: ['total'], country: ['customer', 'country'] } }).toArray()
   assert.deepEqual(rows[0], { total: 120, country: 'US' })
   assert.deepEqual(Object.keys(rows[0] as object), ['total', 'country'])
 })
@@ -88,10 +88,10 @@ test('iter_select_bare_segment_is_shorthand_for_one_segment_path', async (t) => 
   // `select: 'id'` ≡ `select: ['id']`; `select: 0` ≡ `select: [0]`.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  assert.deepEqual(await db.iter('orders', { select: 'total' }).collect(), [120, 80, 50, 200, 999])
+  assert.deepEqual(await db.iter('orders', { select: 'total' }).toArray(), [120, 80, 50, 200, 999])
   const matrix = await open(memorySource(enc('{"rows":[[10,20],[30,40],[50,60]]}')))
   t.after(() => matrix.close())
-  assert.deepEqual(await matrix.iter('rows', { select: 0 }).collect(), [10, 30, 50])
+  assert.deepEqual(await matrix.iter('rows', { select: 0 }).toArray(), [10, 30, 50])
 })
 
 test('iter_select_map_infers_keys_and_accepts_bare_segment_subpaths', async (t) => {
@@ -103,7 +103,7 @@ test('iter_select_map_infers_keys_and_accepts_bare_segment_subpaths', async (t) 
   //     widens to `unknown`.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows = await db.iter('orders', { select: { id: 'id', country: ['customer', 'country'] } }).collect()
+  const rows = await db.iter('orders', { select: { id: 'id', country: ['customer', 'country'] } }).toArray()
   const first: { id: unknown; country: unknown } = rows[0]
   assert.equal(typeof first.id, 'string')
   assert.equal(first.country, 'US')
@@ -113,12 +113,12 @@ test('iter_select_map_infers_keys_and_accepts_bare_segment_subpaths', async (t) 
 test('iter_select_missing_sub_path_yields_null', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  assert.deepEqual(await db.iter('orders', { select: ['nope'] }).collect(), [null, null, null, null, null])
+  assert.deepEqual(await db.iter('orders', { select: ['nope'] }).toArray(), [null, null, null, null, null])
 })
 
 test('iter_select_batch_combined_byCountry_fold', async (t) => {
   // The doc's headline example: project, batch, fold in JS. Pins the batch shape,
-  // so it iterates `.batches()`.
+  // so it iterates `.raw()`.
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const byCountry = new Map<string, number>()
@@ -127,7 +127,7 @@ test('iter_select_batch_combined_byCountry_fold', async (t) => {
       select: { total: ['total'], country: ['customer', 'country'] },
       batch: 1024,
     })
-    .batches()) {
+    .raw()) {
     for (const row of rows as Array<{ total: number; country: string }>) {
       byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + row.total)
     }
@@ -144,7 +144,7 @@ test('iter_select_batch_with_small_chunks_stays_correct', async (t) => {
   const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256))
   t.after(() => db.close())
   let count = 0
-  for await (const batch of db.iter({ select: ['id'], batch: 256 }).batches()) count += batch.length
+  for await (const batch of db.iter({ select: ['id'], batch: 256 }).raw()) count += batch.length
   assert.equal(count, 4000)
 })
 
@@ -207,7 +207,7 @@ test('iter_batches_override_yields_arrays', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const sizes: number[] = []
-  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 }).batches()) sizes.push(batch.length)
+  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 }).raw()) sizes.push(batch.length)
   assert.deepEqual(sizes, [3, 2]) // 5 items, batch of 3
 })
 
@@ -233,7 +233,7 @@ test('iter_batch_rejects_above_max', async (t) => {
 
 test('iter_withKey_array_yields_index_value_tuples', async () => {
   const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
-  const pairs = await cursor.iter('xs', { withKey: true }).collect()
+  const pairs = await cursor.iter('xs', { withKey: true }).toArray()
   assert.deepEqual(pairs, [
     [0, 10],
     [1, 20],
@@ -244,7 +244,7 @@ test('iter_withKey_array_yields_index_value_tuples', async () => {
 test('iter_withKey_with_select_yields_index_and_projected_value', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
-  const rows = await db.iter('orders', { select: ['total'], withKey: true }).collect()
+  const rows = await db.iter('orders', { select: ['total'], withKey: true }).toArray()
   assert.deepEqual(rows, [
     [0, 120],
     [1, 80],
@@ -262,7 +262,7 @@ test('iter_withKey_with_select_map_yields_index_and_object', async (t) => {
       select: { total: ['total'], country: ['customer', 'country'] },
       withKey: true,
     })
-    .collect()
+    .toArray()
   assert.equal(rows.length, 5)
   assert.deepEqual(rows[0], [0, { total: 120, country: 'US' }])
   assert.deepEqual(rows[4], [4, { total: 999, country: 'US' }])
@@ -272,7 +272,7 @@ test('iter_withKey_batches_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)))
   t.after(() => db.close())
   const batches: Array<Array<[unknown, unknown]>> = []
-  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 }).batches()) {
+  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 }).raw()) {
     batches.push(batch as Array<[unknown, unknown]>)
   }
   assert.deepEqual(batches, [
@@ -306,7 +306,7 @@ test('iter_withKey_with_schema_validates_value_part_only', async (t) => {
       withKey: true,
       schema: numberSchema,
     })
-    .collect()
+    .toArray()
   assert.deepEqual(rows, [
     [0, 1200],
     [1, 800],
@@ -326,7 +326,7 @@ test('iter_withKey_with_skip_preserves_source_indices_across_skipped_items', asy
     },
   } as const
   const cursor = await open(memorySource(enc('{"xs":[10,11,12,13,14]}')))
-  const pairs = await cursor.iter('xs', { schema: evenOnly, withKey: true, onInvalid: 'skip' }).collect()
+  const pairs = await cursor.iter('xs', { schema: evenOnly, withKey: true, onInvalid: 'skip' }).toArray()
   assert.deepEqual(pairs, [
     [0, 10],
     [2, 12],
@@ -350,9 +350,9 @@ test('iter_missing_path_yields_zero_items', async () => {
   // A clean miss (unresolved path) yields zero items - the not-found sentinel
   // for iter, distinct from a present-scalar target which throws.
   const cursor = await open(memorySource(enc('{"xs":[1,2]}')))
-  assert.deepEqual(await cursor.iter('nope').collect(), [])
+  assert.deepEqual(await cursor.iter('nope').toArray(), [])
   const batches: unknown[][] = []
-  for await (const b of cursor.iter('nope').batches()) batches.push(b)
+  for await (const b of cursor.iter('nope').raw()) batches.push(b)
   assert.deepEqual(batches, [])
 })
 
@@ -389,12 +389,12 @@ test('iter_early_break_releases_scan_without_faulting_whole_doc', async () => {
 
 test('iter_object_yields_member_values', async () => {
   const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))
-  assert.deepEqual(await cursor.iter().collect(), [1, 'two', [3, 4]])
+  assert.deepEqual(await cursor.iter().toArray(), [1, 'two', [3, 4]])
 })
 
 test('iter_object_withKey_yields_name_value_pairs', async () => {
   const cursor = await open(memorySource(enc('{"first":1,"second":"two","third":[3,4]}')))
-  const pairs = await cursor.iter({ withKey: true }).collect()
+  const pairs = await cursor.iter({ withKey: true }).toArray()
   assert.deepEqual(pairs, [
     ['first', 1],
     ['second', 'two'],
@@ -407,7 +407,7 @@ test('iter_object_withKey_preserves_duplicate_keys', async () => {
   // occurrence (unlike JSON.parse, which keeps only the last). A desirable divergence.
   // TODO: Re-examine this we want to avoid different behaviour from JSON.parse
   const cursor = await open(memorySource(enc('{"a":1,"a":2,"b":3}')))
-  const pairs = await cursor.iter({ withKey: true }).collect()
+  const pairs = await cursor.iter({ withKey: true }).toArray()
   assert.deepEqual(pairs, [
     ['a', 1],
     ['a', 2],
@@ -419,7 +419,7 @@ test('iter_object_withKey_with_select_projects_each_value', async (t) => {
   const data = enc('{"users":{"alice":{"name":"Alice","age":30},"bob":{"name":"Bob","age":25}}}')
   const cursor = await open(memorySource(data))
   t.after(() => cursor.close())
-  const pairs = await cursor.iter('users', { withKey: true, select: 'name' }).collect()
+  const pairs = await cursor.iter('users', { withKey: true, select: 'name' }).toArray()
   assert.deepEqual(pairs, [
     ['alice', 'Alice'],
     ['bob', 'Bob'],
@@ -453,5 +453,156 @@ test('iter_object_withKey_large_with_small_chunks', async () => {
 
 test('iter_object_missing_path_yields_zero_items', async () => {
   const cursor = await open(memorySource(enc('{"o":{"a":1}}')))
-  assert.deepEqual(await cursor.iter('missing', { withKey: true }).collect(), [])
+  assert.deepEqual(await cursor.iter('missing', { withKey: true }).toArray(), [])
+})
+
+test('iter_map_transforms_each_item_with_zero_based_counter', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[10,20,30]}')))
+  assert.deepEqual(
+    await cursor
+      .iter('xs')
+      .map((x) => (x as number) * 2)
+      .toArray(),
+    [20, 40, 60],
+  )
+  const indexed = await open(memorySource(enc('{"xs":[10,20,30]}')))
+  assert.deepEqual(
+    await indexed
+      .iter('xs')
+      .map((_x, i) => i)
+      .toArray(),
+    [0, 1, 2],
+  )
+})
+
+test('iter_map_awaits_async_callback', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[1,2,3]}')))
+  const out = await cursor
+    .iter('xs')
+    .map((x) => Promise.resolve((x as number) + 100))
+    .toArray()
+  assert.deepEqual(out, [101, 102, 103])
+})
+
+test('iter_filter_keeps_matching_items', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const big = await db
+    .iter('orders', { select: 'total' })
+    .filter((n) => (n as number) >= 120)
+    .toArray()
+  assert.deepEqual(big, [120, 200, 999])
+})
+
+test('iter_filter_awaits_async_predicate', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const paid = await db
+    .iter('orders')
+    .filter((o) => Promise.resolve((o as { status: string }).status === 'paid'))
+    .map((o) => (o as { id: string }).id)
+    .toArray()
+  assert.deepEqual(paid, ['a', 'c', 'd'])
+})
+
+test('iter_filter_type_guard_narrows_element_type', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[1,"two",3,"four"]}')))
+  const nums: number[] = await cursor
+    .iter('xs')
+    .filter((x): x is number => typeof x === 'number')
+    .toArray()
+  assert.deepEqual(nums, [1, 3])
+})
+
+test('iter_take_yields_at_most_limit_then_stops', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.deepEqual(await db.iter('orders', { select: 'id' }).take(2).toArray(), ['a', 'b'])
+  const all = await open(memorySource(enc(ORDERS)))
+  t.after(() => all.close())
+  assert.deepEqual(await all.iter('orders', { select: 'id' }).take(99).toArray(), ['a', 'b', 'c', 'd', 'e'])
+})
+
+test('iter_take_zero_yields_nothing', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[1,2,3]}')))
+  assert.deepEqual(await cursor.iter('xs').take(0).toArray(), [])
+})
+
+test('iter_drop_skips_leading_items', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  assert.deepEqual(await db.iter('orders', { select: 'id' }).drop(3).toArray(), ['d', 'e'])
+})
+
+test('iter_chained_filter_map_take_composes_lazily', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const ids = await db
+    .iter('orders')
+    .filter((o) => (o as { total: number }).total > 60)
+    .map((o) => (o as { id: string }).id)
+    .take(2)
+    .toArray()
+  assert.deepEqual(ids, ['a', 'b'])
+})
+
+test('iter_find_returns_first_match_else_undefined', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)))
+  t.after(() => db.close())
+  const hit = await db.iter('orders').find((o) => (o as { total: number }).total === 50)
+  assert.deepEqual(hit, { id: 'c', status: 'paid', total: 50, customer: { country: 'US' } })
+  const miss = await open(memorySource(enc(ORDERS)))
+  t.after(() => miss.close())
+  assert.equal(await miss.iter('orders').find((o) => (o as { total: number }).total < 0), undefined)
+})
+
+test('iter_some_and_every_short_circuit_on_predicate', async (t) => {
+  const some = await open(memorySource(enc(ORDERS)))
+  t.after(() => some.close())
+  assert.equal(await some.iter('orders', { select: 'total' }).some((n) => (n as number) > 900), true)
+  const someNone = await open(memorySource(enc(ORDERS)))
+  t.after(() => someNone.close())
+  assert.equal(await someNone.iter('orders', { select: 'total' }).some((n) => (n as number) > 9999), false)
+  const every = await open(memorySource(enc(ORDERS)))
+  t.after(() => every.close())
+  assert.equal(await every.iter('orders', { select: 'total' }).every((n) => (n as number) > 0), true)
+  const everyFail = await open(memorySource(enc(ORDERS)))
+  t.after(() => everyFail.close())
+  assert.equal(await everyFail.iter('orders', { select: 'total' }).every((n) => (n as number) > 100), false)
+})
+
+test('iter_transform_batches_regroup_to_batch_size', async () => {
+  const cursor = await open(memorySource(enc('{"xs":[1,2,3,4,5]}')))
+  const sizes: number[] = []
+  for await (const batch of cursor
+    .iter('xs', { batch: 2 })
+    .map((x) => (x as number) + 1)
+    .raw())
+    sizes.push(batch.length)
+  assert.deepEqual(sizes, [2, 2, 1])
+})
+
+test('iter_take_stops_faulting_chunks_early', async () => {
+  const items = Array.from({ length: 400 }, (_, i) => i)
+  const data = enc(JSON.stringify({ xs: items }))
+  const full = countingSource(data, 64)
+  const fullCursor = await open(full.source)
+  await fullCursor.iter('xs').toArray()
+  const taken = countingSource(data, 64)
+  const takeCursor = await open(taken.source)
+  await takeCursor.iter('xs', { batch: 4 }).take(2).toArray()
+  assert.ok(taken.reads.n < full.reads.n, `take faulted ${taken.reads.n} chunks, full walk faulted ${full.reads.n}`)
+})
+
+test('iter_find_stops_faulting_chunks_after_match', async () => {
+  const items = Array.from({ length: 400 }, (_, i) => i)
+  const data = enc(JSON.stringify({ xs: items }))
+  const full = countingSource(data, 64)
+  const fullCursor = await open(full.source)
+  await fullCursor.iter('xs').toArray()
+  const found = countingSource(data, 64)
+  const findCursor = await open(found.source)
+  const hit = await findCursor.iter('xs', { batch: 4 }).find((x) => (x as number) === 1)
+  assert.equal(hit, 1)
+  assert.ok(found.reads.n < full.reads.n, `find faulted ${found.reads.n} chunks, full walk faulted ${full.reads.n}`)
 })

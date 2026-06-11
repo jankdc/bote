@@ -45,10 +45,10 @@ for await (const user of cursor.iter()) {
 }
 ```
 
-the item loop is the ergonomic default; it costs a flat ~10% over a full walk. for hot paths, `.batches()` hands back the raw fetch arrays with no per-item tax (the `batch` option sets their size and the memory bound):
+the item loop is the ergonomic default; it costs a flat ~10% over a full walk. for hot paths, `.raw()` hands back the raw fetch arrays with no per-item tax (the `batch` option sets their size and the memory bound):
 
 ```ts
-for await (const users of cursor.iter().batches()) {
+for await (const users of cursor.iter().raw()) {
   for (const user of users) {
     console.log(user)
   }
@@ -111,7 +111,7 @@ const cursor = await open(fromFile('./users.json'))
 const name = await cursor.get('users', 1000, 'name', User.shape.name)
 
 let emails: string[] = []
-// .batches() to hand each fetch's worth of recipients to the batched API at once
+// .raw() to hand each fetch's worth of recipients to the batched API at once
 for await (const user of cursor.iter('users', User)) {
   // user: User
   emails.push(user.email)

@@ -3,14 +3,14 @@ import { publish } from './message-bus'
 
 await using cursor = await open(fromFile('./some-large.json'))
 
-// .batches() to process each fetch's worth of orders concurrently with Promise.all
+// .raw() to process each fetch's worth of orders concurrently with Promise.all
 for await (const orders of cursor
   .iter('orders', {
     batch: 10,
     select: { id: 'id', status: 'status', total: ['payment', 'total'] },
     withKey: true,
   })
-  .batches()) {
+  .raw()) {
   const messages = await Promise.all(
     orders.map(async ([index, order]) => {
       if (order.status !== 'paid') {
