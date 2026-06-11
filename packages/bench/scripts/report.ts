@@ -33,12 +33,12 @@ const sorted = [...results].sort(
 const header = ['operation', 'document', 'bote'] as const;
 
 const rows = sorted.map((r): string[] => {
-  const batch = r.cell.batch !== undefined ? ` · batch=${r.cell.batch.toLocaleString()}` : '';
+  const batch = r.cell.batch !== undefined ? ` - batch=${r.cell.batch.toLocaleString()}` : '';
   const access = r.cell.consume ?? r.cell.accessPattern;
-  const op = `${r.cell.op} · ${access}${batch}`;
-  const doc = `${r.cell.docShape} · n=${r.cell.docSize.toLocaleString()}`;
+  const op = `${r.cell.op} - ${access}${batch}`;
+  const doc = `${r.cell.docShape} - n=${r.cell.docSize.toLocaleString()}`;
   if (r.error) {
-    return [op, doc, '⚠️ error'];
+    return [op, doc, '(!) error'];
   }
   let bote = fmtNs(r.timing.min_ns);
   if (r.timing.first_item_ns) {
@@ -57,8 +57,8 @@ const caption = chunk ? `file source, chunk=${fmtBytes(chunk)}` : 'no cells';
 // Column legend (moved here from the matrix driver): the table is the report,
 // so explain its columns next to it rather than the raw cell-id format.
 const legend = [
-  '`operation` - `<op> · <access>`: op is get | has | iter; access is how far the lookup reaches (shallow/deep), the traversal kind (iter-all/obj-iter/obj-iter-name/obj-iter-first), or the `iter` consumption mode (raw/toArray/forEach/reduce/find/some/every/map/filter/take/drop).',
-  '`document` - `<shape> · n=<size>`: shape is the JSON document shape; n is the array/object member or key count, or nesting depth for deep-nested.',
+  '`operation` - `<op> - <access>`: op is get | has | iter; access is how far the lookup reaches (shallow/deep), the traversal kind (iter-all/obj-iter/obj-iter-name/obj-iter-first), or the `iter` consumption mode (raw/toArray/forEach/reduce/find/some/every/map/filter/take/drop).',
+  '`document` - `<shape> - n=<size>`: shape is the JSON document shape; n is the array/object member or key count, or nesting depth for deep-nested.',
   '`bote` - fastest-sample whole-operation wall-clock (compare across runs on the same machine); `_(to 1st)_` marks time to the first member (obj-iter-first).',
 ]
   .map((l) => `- ${l}`)

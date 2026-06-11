@@ -13,7 +13,7 @@ export interface NodeRun {
 
 /** Spawn a fresh `node` running `args`, optionally feeding `input` to stdin, and
  *  resolve once it closes with the collected stdout. stderr streams through to
- *  our own. Never rejects — a spawn failure resolves with `error` set. */
+ *  our own. Never rejects -- a spawn failure resolves with `error` set. */
 export function runNode(args: readonly string[], opts?: { input?: string }): Promise<NodeRun> {
   return new Promise((resolve) => {
     const stdin = opts?.input !== undefined ? 'pipe' : 'ignore';

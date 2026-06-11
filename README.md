@@ -22,14 +22,14 @@ given a **seekable** source (e.g. a file, an HTTP range) and a path, it retrieve
 
 here's a run (Apple M1 Pro 2021, ~500MB JSON array file, cold-cache, default settings):
 
-| operation      | approach   |      time | js heap peak Δ | rust heap peak |
-| -------------- | ---------- | --------: | -------------: | -------------: |
-| items[0]       | JSON.parse |    1.81 s |        1.21 GB |            n/a |
-| items[535399]  | JSON.parse |    1.74 s |        1.21 GB |            n/a |
-| items[1070797] | JSON.parse |    1.74 s |        1.21 GB |            n/a |
-| items[0]       | bote       |   1.29 ms |        63.3 KB |       130.8 KB |
-| items[535399]  | bote       | 193.49 ms |       191.5 KB |        36.7 MB |
-| items[1070797] | bote       | 379.98 ms |       189.8 KB |        37.2 MB |
+| operation      | approach   |      time | js heap peak delta | rust heap peak |
+| -------------- | ---------- | --------: | -----------------: | -------------: |
+| items[0]       | JSON.parse |    1.81 s |            1.21 GB |            n/a |
+| items[535399]  | JSON.parse |    1.74 s |            1.21 GB |            n/a |
+| items[1070797] | JSON.parse |    1.74 s |            1.21 GB |            n/a |
+| items[0]       | bote       |   1.29 ms |            63.3 KB |       130.8 KB |
+| items[535399]  | bote       | 193.49 ms |           191.5 KB |        36.7 MB |
+| items[1070797] | bote       | 379.98 ms |           189.8 KB |        37.2 MB |
 
 ## array access
 

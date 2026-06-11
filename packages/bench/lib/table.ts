@@ -6,6 +6,6 @@ export function row(cells: readonly string[], widths: readonly number[], gap = '
   return cells.map((c, i) => c.padEnd(widths[i])).join(gap);
 }
 
-export function rule(widths: readonly number[], char = '─', gap = '  '): string {
+export function rule(widths: readonly number[], char = '-', gap = '  '): string {
   return widths.map((w) => char.repeat(w)).join(gap);
 }

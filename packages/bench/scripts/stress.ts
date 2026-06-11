@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { withTempDoc } from '#lib/fixtures.ts';
 import { fmtBytes } from '#lib/format.ts';
 
-const ITEMS = 2_000_000; // ≈ 110 MB at padWidth 7
+const ITEMS = 2_000_000; // ~ 110 MB at padWidth 7
 const PAD_WIDTH = 7;
 const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'stress-worker.ts');
 
@@ -54,7 +54,7 @@ function runChild(capMb: number, docPath: string): Promise<Result> {
   });
 }
 
-console.log(`Building doc (${ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})…`);
+console.log(`Building doc (${ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})...`);
 await withTempDoc(ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(`Doc size: ${fmtBytes(buf.byteLength)}`);
   console.log(`Each child walks every item end-to-end under its --max-old-space-size cap.\n`);

@@ -70,7 +70,7 @@ export function ensureFixture(targetBytes: number): { filePath: string; count: n
       return { filePath, count: meta.count, bytes: meta.bytes };
     }
   }
-  console.error(`generating fixture ~${fmtBytes(targetBytes)} at ${filePath}…`);
+  console.error(`generating fixture ~${fmtBytes(targetBytes)} at ${filePath}...`);
   const t0 = performance.now();
   const { count, bytes } = generate(filePath, targetBytes);
   writeFileSync(sidecarPath, JSON.stringify({ count, bytes }));

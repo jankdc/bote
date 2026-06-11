@@ -99,7 +99,7 @@ for (const cell of cells) {
     sink.write(
       JSON.stringify({ cell, meta: { ...meta, date: new Date().toISOString(), durationMs }, error: reason }) + '\n',
     );
-    console.error(`✗ ${cell.id}  worker failed: ${reason}`);
+    console.error(`x ${cell.id}  worker failed: ${reason}`);
     continue;
   }
 
@@ -109,7 +109,7 @@ for (const cell of cells) {
 
   if (result.error) {
     failed += 1;
-    console.error(`✗ ${cell.id}  ${result.error}`);
+    console.error(`x ${cell.id}  ${result.error}`);
     continue;
   }
 }

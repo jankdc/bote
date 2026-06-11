@@ -233,7 +233,7 @@ mod tests {
   fn parity_prefix_basic() {
     assert_eq!(parity_prefix(0), 0);
     assert_eq!(parity_prefix(1), !0); // bit 0 propagates to all higher bits
-                                      // bits 0,2 set → prefix parity 0b011
+                                      // bits 0,2 set -> prefix parity 0b011
     assert_eq!(parity_prefix(0b101), 0b011);
     assert_eq!(parity_prefix(1 << 63), 1 << 63);
   }

@@ -99,7 +99,7 @@ async function weakRefPhase(path: string): Promise<{ total: number; alive: numbe
 const verdicts: string[] = [];
 let failed = false;
 
-console.log(`Building doc (${HEAP_ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})…`);
+console.log(`Building doc (${HEAP_ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})...`);
 await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   console.log(`Doc size: ${fmtBytes(buf.byteLength)}`);
 
@@ -141,7 +141,7 @@ await withTempDoc(HEAP_ITEMS, PAD_WIDTH, async (path, buf) => {
   // survive in an async generator slot until the loop fully unwinds.
   const tolerance = Math.max(2, Math.floor(wr.total * 0.001));
   if (wr.alive <= tolerance) {
-    verdicts.push(`PASS  WeakRefs collected (${wr.alive} alive ≤ tolerance ${tolerance})`);
+    verdicts.push(`PASS  WeakRefs collected (${wr.alive} alive <= tolerance ${tolerance})`);
   } else {
     verdicts.push(
       `FAIL  ${wr.alive} WeakRefs still alive (tolerance ${tolerance}) - facade is retaining yielded Cursors`,

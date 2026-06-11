@@ -451,7 +451,7 @@ impl Session {
 }
 
 /// Cap on the adaptive doubling burst. The resolver restarts from the anchor on
-/// every chunk fault, so unbounded restarts give O(N²) traversal for an N-chunk
+/// every chunk fault, so unbounded restarts give O(N^2) traversal for an N-chunk
 /// query; doubling (1, 2, 4, ..., capped here) lets short queries avoid
 /// over-fetch and long ones converge to ~one pass. Also the dominant bound on
 /// resident source memory: the window holds at most ~one burst between prunes.

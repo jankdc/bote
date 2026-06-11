@@ -25,7 +25,7 @@ import { arg } from '#lib/cli.ts';
 import { withTempDoc } from '#lib/fixtures.ts';
 import { fmtBytes } from '#lib/format.ts';
 
-const DEFAULT_SYNTH_ITEMS = 7_000_000; // ≈ 385 MB at padWidth 7
+const DEFAULT_SYNTH_ITEMS = 7_000_000; // ~ 385 MB at padWidth 7
 const PAD_WIDTH = 7;
 
 async function iterAll(cursor: Cursor): Promise<number> {
@@ -74,7 +74,7 @@ if (userFile) {
   if (!Number.isFinite(items) || items <= 0) {
     throw new Error(`--items must be a positive number, got ${arg('--items')}`);
   }
-  console.log(`Synthesizing array-of-objects doc (${items.toLocaleString()} items, padWidth ${PAD_WIDTH})…`);
+  console.log(`Synthesizing array-of-objects doc (${items.toLocaleString()} items, padWidth ${PAD_WIDTH})...`);
   await withTempDoc(items, PAD_WIDTH, async (path, buf) => {
     await profile(path, buf.byteLength, outPath);
   });

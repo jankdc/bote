@@ -51,9 +51,9 @@ async function runOnce(approach: string, file: string, idx: number): Promise<num
 
 function fmtX(x: number): string {
   if (x >= 100) {
-    return `${Math.round(x)}×`;
+    return `${Math.round(x)}x`;
   }
-  return `${x.toFixed(x >= 10 ? 1 : 2)}×`;
+  return `${x.toFixed(x >= 10 ? 1 : 2)}x`;
 }
 
 function renderTable(results: RunResult[], cold: boolean): void {
@@ -74,7 +74,7 @@ function renderTable(results: RunResult[], cold: boolean): void {
     r === undefined ? '-' : r.error !== null ? 'FAILED' : fmtNs(r.time_ns ?? 0);
   const ratioCell = (op: string, r: RunResult | undefined): string => {
     if (r?.approach === 'json-parse') {
-      return '1×';
+      return '1x';
     }
     const parse = parseByOp.get(op);
     if (!parse || !r?.time_ns) {
@@ -94,7 +94,7 @@ function renderTable(results: RunResult[], cold: boolean): void {
   console.log(
     cold
       ? 'COLD start (OS page cache purged before each cell)'
-      : 'WARM (OS cache left primed — NOT a cold-start result)',
+      : 'WARM (OS cache left primed -- NOT a cold-start result)',
   );
   console.log(row(headers, widths));
   console.log(rule(widths));
@@ -140,7 +140,7 @@ if (!skipPurge) {
     console.error("error: 'purge' not found (needed to drop the OS page cache). Set SKIP_PURGE=1 to run warm.");
     process.exit(1);
   }
-  console.error('[sudo] priming credentials (you may be prompted once)…');
+  console.error('[sudo] priming credentials (you may be prompted once)...');
   execSync('sudo -v', { stdio: 'inherit' });
 }
 

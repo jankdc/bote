@@ -4,7 +4,7 @@
 // same ~500 MB array-of-records fixture and the same first/middle/last
 // access pattern, but instead of wall-clock it reports two memory columns:
 //
-//   - js heap peak Δ : peak `heapUsed` over a clean (post-GC) baseline.
+//   - js heap peak delta : peak `heapUsed` over a clean (post-GC) baseline.
 //       For JSON.parse this is the whole parsed tree + source string;
 //       for bote it's just the tiny facade/cursor state.
 //   - rust heap peak : peak live bytes in the native crate (dhat t-gmax),
@@ -123,7 +123,7 @@ async function measure(approach: string, file: string, idx: number): Promise<Omi
 }
 
 function renderTable(results: RunResult[]): void {
-  const headers = ['operation', 'approach', 'js heap peak Δ', 'rust heap peak'];
+  const headers = ['operation', 'approach', 'js heap peak delta', 'rust heap peak'];
   const anyRust = results.some((r) => r.approach === 'bote' && !r.rust_available);
   const jsCell = (r: RunResult): string => (r.error !== null ? `FAILED` : fmtBytes(r.js_heap_delta ?? 0));
   const rustCell = (r: RunResult): string => {

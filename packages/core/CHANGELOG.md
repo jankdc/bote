@@ -30,7 +30,7 @@
   being performant.
   - **Breaking:** the default iterator's yield type changes from `T[]` to `T`.
     Migrate a batch loop by appending `.batches()`:
-    `for await (const batch of cursor.iter(...))` → `for await (const batch of cursor.iter(...).batches())`.
+    `for await (const batch of cursor.iter(...))` -> `for await (const batch of cursor.iter(...).batches())`.
     TypeScript flags every site that treated a yield as an array.
   - Per-item iteration costs a flat ~10% over a full walk; every hot path keeps a
     zero-tax alternative (`batches()` and the `collect`/`forEach`/`reduce`
@@ -101,7 +101,7 @@
 
 ### Patch Changes
 
-- 7243a60: Fix a severe slowdown on repeated deep reads into a very wide object. The structural-index cache built its object member table with a linear scan (O(members²)) and could mint a table larger than the cache budget, only to evict it immediately and rebuild it on the next read. Member tables are now hash-backed (O(1) lookup/dedup) and clamped to the budget.
+- 7243a60: Fix a severe slowdown on repeated deep reads into a very wide object. The structural-index cache built its object member table with a linear scan (O(members^2)) and could mint a table larger than the cache budget, only to evict it immediately and rebuild it on the next read. Member tables are now hash-backed (O(1) lookup/dedup) and clamped to the budget.
 - Updated dependencies [893751a]
 - Updated dependencies [52fe8be]
 - Updated dependencies [7a49177]
@@ -120,7 +120,7 @@
   - **Fix.** Breaking out of a `for await` over `iter`/`walk` (or any early termination) now releases the underlying iterator and pins cleanly.
 
 - 381d12d: Replace the chunk cache with a structural-index cache.
-  - **Structural-index cache.** Warm queries now reuse the _containers_ walked, not source bytes: each container keeps an object child-table (`name → offset`) plus a resume offset (objects) or sorted `(index, offset)` landmarks (arrays), so a later query landing in a walked container starts its scan near the target and faults fewer chunks. The walk itself still caches no chunk or bitmap bytes.
+  - **Structural-index cache.** Warm queries now reuse the _containers_ walked, not source bytes: each container keeps an object child-table (`name -> offset`) plus a resume offset (objects) or sorted `(index, offset)` landmarks (arrays), so a later query landing in a walked container starts its scan near the target and faults fewer chunks. The walk itself still caches no chunk or bitmap bytes.
   - **New tuning knobs.** `open` accepts `indexCacheEntries` (cache slot budget, `0` disables, default 1024), `objectMemberCap` (max tabled members per object, `0` disables, default unbounded), and `arrayIndexInterval` (element stride between array landmarks, `0` disables, default 16).
   - **`chunkBytes` is now required** on the source descriptor (whole, multiple of 64).
   - **Removed.** `Cursor.cacheStats()` and the `CacheStats` type, the `BoteOptions`/`SessionOptions` second argument to `open`, and the `maxResidentChunks` knob. Bounded residency is now structural (the burst window), asserted in the native layer rather than sampled from JS.

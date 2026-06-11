@@ -97,7 +97,7 @@ test('iter_select_map_yields_objects_in_declared_order', async (t) => {
 });
 
 test('iter_select_bare_segment_is_shorthand_for_one_segment_path', async (t) => {
-  // `select: 'id'` ≡ `select: ['id']`; `select: 0` ≡ `select: [0]`.
+  // `select: 'id'` == `select: ['id']`; `select: 0` == `select: [0]`.
   const db = await open(memorySource(enc(ORDERS)));
   t.after(() => db.close());
   assert.deepEqual(await db.iter('orders', { select: 'total' }).toArray(), [120, 80, 50, 200, 999]);

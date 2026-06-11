@@ -3,7 +3,7 @@ export function fmtNs(ns: number): string {
     return `${ns.toFixed(0)} ns`;
   }
   if (ns < 1_000_000) {
-    return `${(ns / 1_000).toFixed(1)} µs`;
+    return `${(ns / 1_000).toFixed(1)} us`;
   }
   if (ns < 1_000_000_000) {
     return `${(ns / 1_000_000).toFixed(2)} ms`;

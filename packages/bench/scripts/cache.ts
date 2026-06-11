@@ -7,7 +7,7 @@
 //
 // `--index-cache-entries <n>` sets the structural-index cache slot budget for
 // every cursor opened by this run (both modes), so you can see how a larger or
-// smaller budget shifts warm reads — a budget too small to hold a scenario's
+// smaller budget shifts warm reads -- a budget too small to hold a scenario's
 // containers evicts them and warm climbs back toward cold.
 //
 // `--mb <n>` builds a fresh records-shaped JSON of about n megabytes and appends a
@@ -104,7 +104,7 @@ interface Scenario {
   name: string;
   doc: Uint8Array;
   chunkBytes: number;
-  /** Override the cold-timing sample count (a big doc scans too much to time 120×). */
+  /** Override the cold-timing sample count (a big doc scans too much to time 120x). */
   coldIters?: number;
   /** Primes the cache: the query a real caller would have made earlier. */
   warm: (c: Cur) => Promise<unknown>;
@@ -252,14 +252,14 @@ const scenarios: Scenario[] = [
 // `--mb <n>`: build a fresh records-shaped doc of about n megabytes and append a
 // combined detail view over its deepest record. Cold, the first get scans the
 // whole array to reach it; warm, the array-member grid and the record's container are
-// cached, so the same access resumes near the target — a gap that widens with size.
+// cached, so the same access resumes near the target -- a gap that widens with size.
 const docMbArg = arg('--mb');
 if (docMbArg != null && (!Number.isFinite(Number(docMbArg)) || Number(docMbArg) <= 0)) {
   throw new Error(`--mb must be a positive number of megabytes, got ${docMbArg}`);
 }
 if (docMbArg != null) {
   const mb = Number(docMbArg);
-  console.log(`building ~${mb} MB records doc…`);
+  console.log(`building ~${mb} MB records doc...`);
   const { buf, count } = buildRecordsBuffer(mb * 1024 * 1024);
   const view = detailViewAt(count - 1);
   scenarios.push({
@@ -318,21 +318,21 @@ async function measureTime(s: Scenario): Promise<{ cold: number; warm: number }>
 
 function pct(cold: number, warm: number): string {
   if (cold === 0) {
-    return '—';
+    return '-';
   }
   return `${(((cold - warm) / cold) * 100).toFixed(1)}%`;
 }
 
 function speedup(cold: number, warm: number): string {
   if (warm === 0) {
-    return '∞';
+    return 'inf';
   }
-  return `${(cold / warm).toFixed(1)}×`;
+  return `${(cold / warm).toFixed(1)}x`;
 }
 
 async function runScenarios(): Promise<void> {
   const skipTime = flag('--reads-only');
-  console.log(`bote structural-index cache — warm vs cold${budgetNote()}\n`);
+  console.log(`bote structural-index cache -- warm vs cold${budgetNote()}\n`);
   const header = skipTime
     ? ['scenario'.padEnd(42), 'cold reads'.padStart(11), 'warm reads'.padStart(11), 'saved'.padStart(8)]
     : [
@@ -367,7 +367,7 @@ async function runScenarios(): Promise<void> {
   }
 
   console.log(
-    `\nReads are deterministic and machine-independent — the headline signal.` +
+    `\nReads are deterministic and machine-independent -- the headline signal.` +
       (skipTime ? '' : ` Times are indicative (this box only).`),
   );
 }

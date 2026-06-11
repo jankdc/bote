@@ -42,7 +42,7 @@ export function median(xs: number[]): number {
   );
 }
 
-/** Coefficient of variation (population stddev ÷ mean); 0 when the mean is 0. */
+/** Coefficient of variation (population stddev / mean); 0 when the mean is 0. */
 export function cv(xs: number[]): number {
   const m = mean(xs);
   if (m === 0) {
