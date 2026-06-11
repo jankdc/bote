@@ -1,6 +1,6 @@
 {
   "name": "@botejs/core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -35,7 +35,7 @@
     "prepublishOnly": "cp ../../README.md ./README.md && tsc"
   },
   "dependencies": {
-    "@botejs/native": "^0.4.0"
+    "@botejs/native": "^0.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
