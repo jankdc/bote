@@ -7,31 +7,24 @@ export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024;
 
 export interface OpenOptions {
   /**
-   * Slot budget for the structural-index cache: one slot per cached container
-   * plus one per tabled object member. When a scan tips the cache over this
-   * budget, the deepest (least navigationally useful) containers are evicted
-   * first, LRU-tiebroken, keeping the shallow backbone that resumes future
-   * scans. Bounds resident cache memory regardless of document size. `0`
-   * disables the cache entirely. Omit for the native default (1024).
+   * How much of the index that speeds up repeat lookups to keep in memory,
+   * measured in entries. Higher means faster repeat queries but more memory;
+   * lower means less memory but slower repeats. Set to `0` to turn the cache
+   * off. Defaults to 1024.
    */
   indexCacheEntries?: number;
   /**
-   * Max object members tabled per walked container in the structural-index
-   * cache. The table is a dense prefix; past the cap, lookups of later members
-   * resume-scan from the cap boundary. Lower trades cache memory for resume work
-   * on pathologically large objects. `0` disables object member indexing. Omit
-   * for the native default (unbounded).
+   * How many keys per object to index for fast lookup. Higher speeds up access
+   * to keys later in large objects but uses more memory; lower saves memory at
+   * the cost of slower lookups for those keys. Set to `0` to skip indexing
+   * object keys. Defaults to unlimited.
    */
   objectMemberCap?: number;
   /**
-   * Element-index stride between sampled array members in the structural-index
-   * cache. A later index resumes from the nearest array member at or before it, so
-   * a smaller stride means denser array members (more memory, shorter resume
-   * scans). `0` disables array-member indexing. Omit for the native default (16).
-   *
-   * Setting both `objectMemberCap` and `arrayIndexInterval` to `0` disables the
-   * cache entirely (no source bytes are ever cached either way), as does
-   * `indexCacheEntries: 0`.
+   * How often to index array positions, e.g. every 16th element. Lower means
+   * faster access to arbitrary array elements but more memory; higher saves
+   * memory at the cost of slower access. Set to `0` to skip indexing array
+   * positions. Defaults to 16.
    */
   arrayIndexInterval?: number;
 }
