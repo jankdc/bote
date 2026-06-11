@@ -207,9 +207,14 @@ fn map_err(e: SessionError) -> NapiError {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  use async_trait::async_trait;
+  use bytes::Bytes;
+
   use super::*;
   use crate::session::MAX_BURST;
-  use crate::source::{ByteStream, InMemoryStream};
+  use crate::source::{ByteStream, InMemoryStream, SourceError};
   use napi::bindgen_prelude::AsyncGenerator;
 
   fn items_path() -> Vec<Segment> {
@@ -226,6 +231,41 @@ mod tests {
       crate::session::DEFAULT_ARRAY_INDEX_INTERVAL,
     )
     .unwrap()
+  }
+
+  /// Wraps an [`InMemoryStream`] and counts `read` calls, so an abandoned scan's
+  /// effect on chunk faulting is observable in-process.
+  struct CountingStream {
+    inner: InMemoryStream,
+    reads: Arc<AtomicUsize>,
+  }
+
+  #[async_trait]
+  impl ByteStream for CountingStream {
+    fn size(&self) -> u64 {
+      self.inner.size()
+    }
+    async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+      self.reads.fetch_add(1, Ordering::Relaxed);
+      self.inner.read(offset, length).await
+    }
+  }
+
+  fn counting_session(doc: Vec<u8>, chunk_bytes: usize) -> (Arc<Session>, Arc<AtomicUsize>) {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source: Arc<dyn ByteStream> = Arc::new(CountingStream {
+      inner: InMemoryStream::new(doc),
+      reads: reads.clone(),
+    });
+    let s = Session::new(
+      source,
+      chunk_bytes,
+      crate::session::DEFAULT_INDEX_CACHE_ENTRIES,
+      crate::session::DEFAULT_OBJECT_MEMBER_CAP,
+      crate::session::DEFAULT_ARRAY_INDEX_INTERVAL,
+    )
+    .unwrap();
+    (s, reads)
   }
 
   /// `{"items":[{"name":"i0000",...}, ...]}` sized to span many chunks so an iter
@@ -303,6 +343,34 @@ mod tests {
       "complete() must clear the window after a batch"
     );
     assert!(guard.child_cursor.is_none());
+  }
+
+  #[tokio::test]
+  async fn pins_iter_complete_stops_reads_far_below_full_walk() {
+    let (full, full_reads) = counting_session(array_doc(5000), 256);
+    let mut walk = CursorIter::new(full, items_path(), 0, 0, None, 1, false);
+    while walk.next(None).await.unwrap().is_some() {}
+    let full_n = full_reads.load(Ordering::Relaxed);
+
+    let (partial, partial_reads) = counting_session(array_doc(5000), 256);
+    let mut it = CursorIter::new(partial, items_path(), 0, 0, None, 1, false);
+    for _ in 0..3 {
+      assert!(it.next(None).await.unwrap().is_some());
+    }
+    it.complete(None).await.unwrap();
+    let after_complete = partial_reads.load(Ordering::Relaxed);
+
+    // A completed iter is exhausted and faults nothing more.
+    assert!(it.next(None).await.unwrap().is_none());
+    assert_eq!(
+      partial_reads.load(Ordering::Relaxed),
+      after_complete,
+      "complete() must not fault further chunks"
+    );
+    assert!(
+      after_complete < full_n / 10,
+      "abandoned scan faulted {after_complete} reads; should be far below the full walk's {full_n}"
+    );
   }
 
   #[tokio::test]

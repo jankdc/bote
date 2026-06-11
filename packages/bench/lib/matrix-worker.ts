@@ -40,13 +40,15 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
       return 1
     case 'iter': {
       if (cell.accessPattern === 'obj-iter-first') {
-        for await (const batch of cursor.iter(...path, { batch: 1 })) return batch.length
+        // Time to the first item through the default item iterator (the path a
+        // caller actually writes); `batch: 1` makes the fetch yield it eagerly.
+        for await (const _item of cursor.iter(...path, { batch: 1 })) return 1
         return 0
       }
       const batch = cell.batch ?? DEFAULT_ITER_BATCH
       const opts = cell.accessPattern === 'obj-iter-name' ? { batch, select: 'name' } : { batch }
       let n = 0
-      for await (const b of cursor.iter(...path, opts)) n += b.length
+      for await (const _item of cursor.iter(...path, opts)) n += 1
       return n
     }
   }

@@ -98,9 +98,7 @@ test('transparency_iter_object_then_out_of_order_multi_get_on_child_is_consisten
   const cursor = await open(memorySource(enc('{"rows":{"r0":{"a":1,"b":2,"c":3},"r1":{"a":4,"b":5,"c":6}}}')))
   t.after(() => cursor.close())
   const keys: string[] = []
-  for await (const batch of cursor.iter('rows', { withKey: true, select: 'a' })) {
-    for (const [key] of batch as Array<[string, unknown]>) keys.push(key)
-  }
+  for await (const [key] of cursor.iter('rows', { withKey: true, select: 'a' })) keys.push(key as string)
   const seen: Array<[unknown, unknown, unknown]> = []
   for (const key of keys) {
     const row = await cursor.hop('rows', key)

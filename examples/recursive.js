@@ -3,9 +3,7 @@ import { open, fromFile } from '@botejs/core'
 await using cursor = await open(fromFile('./thread.json'))
 
 async function* memberKeys(node, ...path) {
-  for await (const batch of node.iter(...path, { withKey: true, select: 'id' })) {
-    for (const [key] of batch) yield key
-  }
+  for await (const [key] of node.iter(...path, { withKey: true, select: 'id' })) yield key
 }
 
 // descend example

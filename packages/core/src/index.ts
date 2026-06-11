@@ -18,6 +18,7 @@ export {
   type RootCursor,
   type OpenOptions,
   type IterKey,
+  type IterStream,
 } from './open.ts'
 
 export {

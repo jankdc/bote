@@ -3,7 +3,12 @@ import type { Path, Segment, StandardSchemaV1 } from './validate.ts'
 
 export interface IterOptions {
   select?: Segment | Path | Record<string, Segment | Path>
-  /** How many items are yielded per batch. Higher is faster, but takes more memory to materialise those items. */
+  /** How many items cross the native boundary per fetch, which also bounds the
+   *  resident materialization window (the memory knob) and sets the array size
+   *  yielded by `IterStream.batches()`. The default item loop drains each fetch
+   *  one item at a time, so this doesn't change what item iteration yields, only
+   *  how much is fetched and held at once. Higher is faster but holds more in
+   *  memory. */
   batch?: number
   /** Validate each yielded item against this schema (after `select`). */
   schema?: StandardSchemaV1

@@ -66,12 +66,12 @@ test('hop_supports_iter_from_the_anchor', async () => {
   const orders = await cursor.hop('orders')
   assert.ok(orders)
   const ids: unknown[] = []
-  for await (const batch of orders.iter()) ids.push(...batch)
+  for await (const id of orders.iter()) ids.push(id)
   assert.deepEqual(ids, [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
   const meta = await cursor.hop('meta')
   assert.ok(meta)
   const keys: unknown[] = []
-  for await (const batch of meta.iter({ withKey: true })) for (const [key] of batch) keys.push(key)
+  for await (const [key] of meta.iter({ withKey: true })) keys.push(key)
   assert.deepEqual(keys, ['a', 'b'])
 })
 
