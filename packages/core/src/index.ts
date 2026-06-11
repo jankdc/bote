@@ -1,4 +1,4 @@
-export { type IterOptions } from './args.ts'
+export { type IterOptions } from './args.ts';
 
 export {
   ValidationError,
@@ -8,9 +8,9 @@ export {
   type PathFaultCode,
   type Segment,
   type StandardSchemaV1,
-} from './validate.ts'
+} from './validate.ts';
 
-export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type IterKey } from './cursor.ts'
+export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type IterKey } from './cursor.ts';
 
 export {
   fromBuffer,
@@ -20,8 +20,8 @@ export {
   type Source,
   type SourceReader,
   type HttpRangeOptions,
-} from './sources.ts'
+} from './sources.ts';
 
-export { type IterStream } from './stream.ts'
+export { type IterStream } from './stream.ts';
 
-export { open, type OpenOptions } from './open.ts'
+export { open, type OpenOptions } from './open.ts';

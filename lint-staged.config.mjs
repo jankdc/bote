@@ -6,4 +6,4 @@ export default {
   '*.js': ['oxlint --fix', 'prettier --write'],
   '*.{yml,yaml,md,json}': ['prettier --write'],
   '*.rs': [() => 'cargo fmt', () => 'cargo clippy --all-targets -- -D warnings'],
-}
+};

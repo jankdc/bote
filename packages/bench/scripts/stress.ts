@@ -9,39 +9,39 @@
 // can't help). Each child runs `stress-worker.ts` against a temp doc;
 // the parent collects exit codes. Any OOM crash = test failure.
 
-import { spawn } from 'node:child_process'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { withTempDoc } from '#lib/fixtures.ts'
-import { fmtBytes } from '#lib/format.ts'
+import { withTempDoc } from '#lib/fixtures.ts';
+import { fmtBytes } from '#lib/format.ts';
 
-const ITEMS = 2_000_000 // ≈ 110 MB at padWidth 7
-const PAD_WIDTH = 7
-const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'stress-worker.ts')
+const ITEMS = 2_000_000; // ≈ 110 MB at padWidth 7
+const PAD_WIDTH = 7;
+const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'stress-worker.ts');
 
 // V8 needs some headroom for code, semi-space, and parser state; under
 // ~24 MB it OOMs before user code runs even on a trivial program. 32 MB
 // is the realistic floor for "tight but functional."
-const CAPS_MB = [32, 64, 128, 256]
+const CAPS_MB = [32, 64, 128, 256];
 
 interface Result {
-  capMb: number
-  exitCode: number | null
-  signal: NodeJS.Signals | null
-  durationMs: number
-  stderrTail: string
+  capMb: number;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
+  stderrTail: string;
 }
 
 function runChild(capMb: number, docPath: string): Promise<Result> {
   return new Promise((resolve) => {
-    const args = [`--max-old-space-size=${capMb}`, WORKER, docPath]
-    const start = Date.now()
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'inherit', 'pipe'] })
-    let stderr = ''
+    const args = [`--max-old-space-size=${capMb}`, WORKER, docPath];
+    const start = Date.now();
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'inherit', 'pipe'] });
+    let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
+      stderr += chunk.toString();
+    });
     child.on('exit', (code, signal) => {
       resolve({
         capMb,
@@ -49,32 +49,34 @@ function runChild(capMb: number, docPath: string): Promise<Result> {
         signal,
         durationMs: Date.now() - start,
         stderrTail: stderr.trim().split('\n').slice(-3).join(' | '),
-      })
-    })
-  })
+      });
+    });
+  });
 }
 
-console.log(`Building doc (${ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})…`)
+console.log(`Building doc (${ITEMS.toLocaleString()} items, padWidth ${PAD_WIDTH})…`);
 await withTempDoc(ITEMS, PAD_WIDTH, async (path, buf) => {
-  console.log(`Doc size: ${fmtBytes(buf.byteLength)}`)
-  console.log(`Each child walks every item end-to-end under its --max-old-space-size cap.\n`)
+  console.log(`Doc size: ${fmtBytes(buf.byteLength)}`);
+  console.log(`Each child walks every item end-to-end under its --max-old-space-size cap.\n`);
 
-  let failed = false
+  let failed = false;
   for (const capMb of CAPS_MB) {
-    const r = await runChild(capMb, path)
-    const status = r.exitCode === 0 ? 'PASS' : 'FAIL'
-    if (r.exitCode !== 0) failed = true
-    const exit = r.exitCode !== null ? `exit=${r.exitCode}` : `signal=${r.signal}`
+    const r = await runChild(capMb, path);
+    const status = r.exitCode === 0 ? 'PASS' : 'FAIL';
+    if (r.exitCode !== 0) {
+      failed = true;
+    }
+    const exit = r.exitCode !== null ? `exit=${r.exitCode}` : `signal=${r.signal}`;
     console.log(
       `${status}  --max-old-space-size=${String(capMb).padStart(4)} MB  ${exit.padEnd(12)}  ${(r.durationMs / 1000).toFixed(2)}s` +
         (r.stderrTail ? `\n      ${r.stderrTail}` : ''),
-    )
+    );
   }
 
   if (failed) {
-    console.log(`\nFAIL - at least one cap triggered an OOM. Native bytes are leaking into the V8 heap.`)
-    process.exit(1)
+    console.log(`\nFAIL - at least one cap triggered an OOM. Native bytes are leaking into the V8 heap.`);
+    process.exit(1);
   } else {
-    console.log(`\nPASS - every cap survived. Source bytes live in native memory, as advertised.`)
+    console.log(`\nPASS - every cap survived. Source bytes live in native memory, as advertised.`);
   }
-})
+});
