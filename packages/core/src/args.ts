@@ -1,22 +1,27 @@
 import { validatePath } from './path.ts';
 import type { Path, Segment, StandardSchemaV1 } from './validate.ts';
 
+/** Trailing options object for `Cursor.iter`, tuning how the iteration yields items. */
 export interface IterOptions {
+  /** Project each member before it is yielded. A single segment or path picks a
+   *  sub-value; a field map (`{ name: 'name', city: ['address', 'city'] }`)
+   *  builds an object from several sub-paths. */
   select?: Segment | Path | Record<string, Segment | Path>;
   /** How many items cross the native boundary per fetch, which also bounds the
-   *  resident materialization window (the memory knob) and sets the array size
-   *  yielded by `IterStream.raw()`. The default item loop drains each fetch
-   *  one item at a time, so this doesn't change what item iteration yields, only
-   *  how much is fetched and held at once. Higher is faster but holds more in
-   *  memory. */
+   *  resident memory to that batch and sets the array size yielded by `IterStream.raw()`.
+   *  The default item loop drains each fetch one item at a time, so this doesn't change
+   *  what item iteration yields, only how much is fetched and held at once.
+   *  Higher is faster but holds more in memory.
+   *
+   * Default is `1000`. */
   batch?: number;
   /** Validate each yielded item against this schema (after `select`). */
   schema?: StandardSchemaV1;
-  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
-  onInvalid?: 'throw' | 'skip';
   /** Yield `[key, value]` tuples instead of bare values. `key` is the member
    *  name for objects and the zero-based index for arrays. */
   withKey?: boolean;
+  /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
+  onInvalid?: 'throw' | 'skip';
 }
 
 export type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail];

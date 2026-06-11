@@ -25,16 +25,63 @@ export const DEFAULT_ITER_BATCH = 1000;
 export const MAX_ITER_BATCH = 1_000_000;
 
 export interface Cursor {
+  /**
+   * Resolve `path` to a container and return a new cursor anchored there, or
+   * `null` if it is absent. Child cursors share the root's source and lifetime;
+   * closing the root closes them too.
+   *
+   * @example
+   * const user = await root.hop('users', 0);
+   * const name = await user?.get('name');
+   */
   hop(...path: Segment[]): Promise<Cursor | null>;
 
+  /**
+   * Report whether a value exists at `path`. With a trailing Standard Schema,
+   * also require the value to validate against it (a parse/validation miss
+   * yields `false` rather than throwing).
+   *
+   * @example
+   * await root.has('users', 0, 'email');
+   * await root.has('users', 0, 'age', z.number());
+   */
   has(...path: Segment[]): Promise<boolean>;
   has(...args: [...Segment[], StandardSchemaV1]): Promise<boolean>;
 
+  /**
+   * Read and decode the value at `path`, or `undefined` if absent. With a
+   * trailing Standard Schema, validate and return its parsed output, throwing
+   * on failure.
+   *
+   * @example
+   * const name = await root.get('users', 0, 'name');
+   * const age = await root.get('users', 0, 'age', z.number());
+   */
   get(...path: Segment[]): Promise<unknown>;
   get<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): Promise<InferOutput<Sch>>;
 
+  /**
+   * Count the members of the array or object at `path`.
+   *
+   * @example
+   * const total = await root.count('users');
+   */
   count(...path: Segment[]): Promise<number>;
 
+  /**
+   * Stream the members of the array or object at `path` as an async iterable.
+   * A trailing Standard Schema validates each item; a trailing {@link IterOptions}
+   * object tunes the iteration (see its fields for the available knobs).
+   *
+   * @example
+   * for await (const user of root.iter('users')) {
+   *   console.log(user);
+   * }
+   *
+   * for await (const [i, name] of root.iter('users', { withKey: true, select: ['name'] })) {
+   *   console.log(i, name);
+   * }
+   */
   iter(...path: Segment[]): IterStream<unknown>;
   iter<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): IterStream<InferOutput<Sch>>;
   iter<Sch extends StandardSchemaV1>(
@@ -59,15 +106,6 @@ export interface RootCursor extends Cursor, AsyncDisposable {
 }
 
 export type CursorState = { closed: boolean };
-
-/** Throw a uniform error for any operation on a closed cursor, so use-after-close
- *  is one defined contract regardless of source (some readers' reads keep working
- *  after close, others throw an opaque I/O error). */
-export function ensureOpen(state: CursorState): void {
-  if (state.closed) {
-    throw new Error('bote: cursor is closed');
-  }
-}
 
 export function wrap(native: NativeCursor, state: CursorState): Cursor {
   const cursor = {
@@ -165,6 +203,12 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
   };
 
   return cursor as Cursor;
+}
+
+export function ensureOpen(state: CursorState): void {
+  if (state.closed) {
+    throw new Error('bote: cursor is closed');
+  }
 }
 
 function nativeStream(
