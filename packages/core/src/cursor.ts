@@ -1,8 +1,8 @@
 import type { Cursor as NativeCursor } from '@botejs/native';
 
-import { validatePath, type Path, type Segment } from './path.ts';
-import { parseValue, deserializeError } from './decode.ts';
+import { formatPath, validatePath, type Path, type Segment } from './path.ts';
 import { makeStream, type IterStream } from './stream.ts';
+import { deserializeError } from './error.ts';
 
 import { runStandardSchema, validateItem, type StandardSchemaV1 } from './validate.ts';
 
@@ -227,4 +227,12 @@ function nativeStream(
     }
   }
   return makeStream(batches, batchSize);
+}
+
+function parseValue(text: string, path: Path): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`bote: malformed JSON value at ${formatPath(path)}`);
+  }
 }

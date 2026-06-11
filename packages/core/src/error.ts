@@ -1,4 +1,4 @@
-import { PathError, formatPath, type Path, type PathFaultCode } from './path.ts';
+import { PathError, type Path, type PathFaultCode } from './path.ts';
 
 const NATIVE_PATH_ERROR = /^bote:path:([a-z_]+)(?::(\d+))?$/;
 
@@ -11,12 +11,4 @@ export function deserializeError(err: unknown, path: Path): unknown {
     }
   }
   return err;
-}
-
-export function parseValue(text: string, path: Path): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`bote: malformed JSON value at ${formatPath(path)}`);
-  }
 }
