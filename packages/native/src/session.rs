@@ -527,8 +527,9 @@ pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
 
 impl Session {
   /// The shared chunk-fault retry loop: build a fresh [`Walker`] over the
-  /// window, run a sync `step`, and on `ChunkMiss(off)` read a burst (sized by
-  /// `burst_for`) into the window, drop everything below `min_reachable`, retry.
+  /// window, run a sync `step`, and on `ChunkMiss(off)` drop everything below
+  /// `min_reachable`, then read a burst (sized by `burst_for`) into the window
+  /// and retry.
   ///
   /// `min_reachable` is the lowest offset the step might still read; the step
   /// advances it as it commits forward progress. Dropping below it keeps the
@@ -549,11 +550,11 @@ impl Session {
       match outcome {
         Ok(v) => return Ok(v),
         Err(TraverseError::Pending(ChunkMiss(off))) => {
+          window.drop_below(min_reachable.load(Ordering::Relaxed));
           let n = burst_for(off);
           for (o, b) in self.reader.read_chunks(off, n).await? {
             window.insert(o, b);
           }
-          window.drop_below(min_reachable.load(Ordering::Relaxed));
         }
         Err(e) => return Err(e.into()),
       }
@@ -1021,5 +1022,52 @@ mod tests {
       );
     }
     assert!(seen > 1000, "scanned {seen} elements");
+  }
+
+  #[tokio::test]
+  async fn window_peak_stays_within_one_burst_during_scan() {
+    // 4 MiB flat array, 4 KiB chunks => ~1000 chunks, enough faults for the
+    // doubling burst to reach and hold MAX_BURST.
+    let mut doc = String::from("{\"items\":[");
+    let mut i = 0;
+    while doc.len() < 4 * 1024 * 1024 {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!("{{\"n\":{i}}}"));
+      i += 1;
+    }
+    doc.push_str("]}");
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
+    let session = Session::new(
+      source,
+      4096,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    )
+    .unwrap();
+
+    let mut window = session.new_window();
+    let items = session
+      .run_locate(&[Segment::Member("items".into())], 0, 0, &mut window)
+      .await
+      .unwrap()
+      .expect("items resolves");
+    // Skip the whole array in one drive call: a single scan that faults many
+    // times, so the transient mid-fault peak is what `peak_len` records.
+    session.skip_value_at(items, &mut window).await.unwrap();
+
+    assert!(
+      window.peak_len() >= MAX_BURST as usize,
+      "burst never reached MAX_BURST (peak {}); fixture too small to be meaningful",
+      window.peak_len()
+    );
+    let bound = (MAX_BURST as usize) + 4; // one burst + small slack
+    assert!(
+      window.peak_len() <= bound,
+      "window peaked at {} chunks mid-fault (bound {bound}); prune-before-insert regressed",
+      window.peak_len()
+    );
   }
 }
