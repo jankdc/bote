@@ -124,10 +124,13 @@ impl IterState {
     let anchor_start = self.anchor_start;
     let base_depth = self.base_depth;
     let base_value_start = *base_value_start;
-    let child_depth = base_depth + path.len() as u32 + 1;
     let select = select.as_ref();
     let batch = self.batch;
     let with_key = self.with_key;
+
+    let sampling_interval = session.array_landmark_sampling_interval();
+    let mut landmarks: Vec<(usize, u64)> = Vec::new();
+
     // The window is pruned after each item, so the buffer (not chunks) is the
     // in-flight batch and needs no cleanup on early termination via `complete`.
     let outcome: Result<BatchFill, SessionError> = async {
@@ -166,8 +169,18 @@ impl IterState {
           None
         };
         let loc = child.location;
+        // Sample array landmarks on the absolute index grid so a later random
+        // index resumes from the nearest one. Index 0 is the array's open, so
+        // it's implicit; skip it. Objects (member keys) have no index landmark.
+        if sampling_interval > 0 {
+          if let ChildKey::Index(idx) = child.key {
+            if idx != 0 && idx.is_multiple_of(sampling_interval) {
+              landmarks.push((idx, loc.start));
+            }
+          }
+        }
         let value = match select {
-          Some(sel) => crate::eval::project(session, sel, loc.start, child_depth, window).await?,
+          Some(sel) => crate::eval::project(session, sel, loc.start, window).await?,
           None => session.materialize(loc, window).await?,
         };
         session.prune_window(window, cursor.next_offset);
@@ -195,6 +208,11 @@ impl IterState {
       }
     }
     .await;
+
+    if let Some(vs) = base_value_start {
+      session.store_array_landmarks(base_depth, anchor_start, path, vs, &landmarks);
+    }
+
     let next_offset = cursor.next_offset;
     match outcome {
       // The stream is known done: free the final chunk now and make later

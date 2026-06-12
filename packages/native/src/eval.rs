@@ -18,14 +18,11 @@ pub async fn project(
   session: &Session,
   select: &CompiledSelect,
   child_start: u64,
-  base_depth: u32,
   window: &mut ChunkWindow,
 ) -> Result<Vec<u8>, SessionError> {
   match select {
-    CompiledSelect::One(path) => project_one(session, path, child_start, base_depth, window).await,
-    CompiledSelect::Map(fields) => {
-      project_map(session, fields, child_start, base_depth, window).await
-    }
+    CompiledSelect::One(path) => project_one(session, path, child_start, window).await,
+    CompiledSelect::Map(fields) => project_map(session, fields, child_start, window).await,
   }
 }
 
@@ -33,7 +30,6 @@ async fn project_map(
   session: &Session,
   fields: &[(String, Vec<Segment>)],
   child_start: u64,
-  base_depth: u32,
   window: &mut ChunkWindow,
 ) -> Result<Vec<u8>, SessionError> {
   let mut matched: Vec<Option<ValueLocation>> = vec![None; fields.len()];
@@ -94,7 +90,7 @@ async fn project_map(
     match (path.len(), loc) {
       // defensive: facade rejects empty sub-paths; treat as the whole child
       (0, _) => {
-        let v = project_one(session, path, child_start, base_depth, window).await?;
+        let v = project_one(session, path, child_start, window).await?;
         out.extend_from_slice(&v);
       }
       (_, None) => out.extend_from_slice(b"null"),
@@ -105,7 +101,7 @@ async fn project_map(
       }
       // resolve the tail from the matched entry's start
       (_, Some(loc)) => {
-        let v = project_one(session, &path[1..], loc.start, base_depth + 1, window).await?;
+        let v = project_one(session, &path[1..], loc.start, window).await?;
         out.extend_from_slice(&v);
       }
     }
@@ -118,13 +114,9 @@ async fn project_one(
   session: &Session,
   path: &[Segment],
   child_start: u64,
-  base_depth: u32,
   window: &mut ChunkWindow,
 ) -> Result<Vec<u8>, SessionError> {
-  match session
-    .run_resolve(path, child_start, base_depth, window)
-    .await
-  {
+  match session.run_resolve_direct(path, child_start, window).await {
     Ok(None) => Ok(b"null".to_vec()),
     Ok(Some(loc)) => session.materialize(loc, window).await,
     Err(SessionError::Path(_)) => Ok(b"null".to_vec()),

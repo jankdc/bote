@@ -270,7 +270,7 @@ impl Session {
     }
   }
 
-  /// Resolve `path` to a full `[start, end)` byte range.
+  /// Resolve `path` to a full `[start, end)` byte range, with structural index caching.
   pub(crate) async fn run_resolve(
     &self,
     path: &[Segment],
@@ -302,6 +302,31 @@ impl Session {
     if let Some(kind) = kind {
       self.store_close(base_depth, anchor_start, path, kind, start, end);
     }
+    Ok(Some(ValueLocation { start, end }))
+  }
+
+  /// Resolve `path` to a full `[start, end)` byte range, without caching.
+  pub(crate) async fn run_resolve_direct(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    window: &mut ChunkWindow,
+  ) -> Result<Option<ValueLocation>, SessionError> {
+    let mut state = ResolveState::resume(anchor_start, 0, None, false, 0);
+    let min_reachable = AtomicU64::new(anchor_start);
+    let resolved = self
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
+        let r = resolve::resolve_step(walker, path, &mut state);
+        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
+        r
+      })
+      .await?;
+    let start = match resolved {
+      Resolved::Found(start) => start,
+      Resolved::Absent => return Ok(None),
+      Resolved::NotNavigable(fault) => return Err(SessionError::Path(fault)),
+    };
+    let end = self.skip_value_at(start, window).await?;
     Ok(Some(ValueLocation { start, end }))
   }
 
@@ -417,14 +442,6 @@ impl Session {
       .with_cache(|c| c.store_exhausted(base_depth, anchor, path, kind, value_start, count, close));
   }
 
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
-  /// learned it - lets a repeat `count` skip the scan.
-  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
-    self
-      .with_cache(|c| c.get(anchor, path)?.child_count())
-      .flatten()
-  }
-
   /// Record an array resume-point member `(index, offset)` so a later random
   /// index resumes near where `iter` stopped.
   pub(crate) fn store_array_resume_point(
@@ -439,6 +456,44 @@ impl Session {
     self.with_cache(|c| {
       c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)])
     });
+  }
+
+  /// Merge `iter`-sampled array landmarks `(index, offset)` into the array node
+  /// in one batched write (`merge_array` sorts the node's whole set, so feeding
+  /// it per element is quadratic). Members cost no cache slots - `arrayIndexInterval`
+  /// already bounds them per node.
+  pub(crate) fn store_array_landmarks(
+    &self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    value_start: u64,
+    members: &[(usize, u64)],
+  ) {
+    if members.is_empty() {
+      return;
+    }
+    self.with_cache(|c| c.merge_array_scan(base_depth, anchor, path, value_start, members));
+  }
+
+  /// Stride for `iter`-time array-landmark sampling, or `0` when array indexing
+  /// is off (cache disabled or `arrayIndexInterval == 0`). Mirrors the absolute
+  /// grid resolve-time sampling uses, so landmarks from a scan and an iteration
+  /// of the same array align on the same indices.
+  pub(crate) fn array_landmark_sampling_interval(&self) -> usize {
+    if self.cache_enabled {
+      self.array_interval
+    } else {
+      0
+    }
+  }
+
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
+  /// learned it - lets a repeat `count` skip the scan.
+  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
+    self
+      .with_cache(|c| c.get(anchor, path)?.child_count())
+      .flatten()
   }
 
   /// Run `f` against the cache under the lock, skipping when caching is off. The
