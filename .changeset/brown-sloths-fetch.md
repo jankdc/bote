@@ -1,5 +1,5 @@
 ---
-'@botejs/native': patch
+'@botejs/native': minor
 ---
 
 Adjust the structural-index caching strategy for iteration and projection.
@@ -21,3 +21,6 @@ burst instead of after, so a multi-fault scan now holds at most one burst of
 chunks resident at a time rather than the spent burst plus the freshly read one.
 This roughly halves peak native memory during a full scan (around 36 MiB down to
 20 MiB at the default 64 KiB chunk size) with no change to throughput.
+
+Renamed `Source` to `SeekableSource` to make room for a forthcoming forward-only
+streaming source.
