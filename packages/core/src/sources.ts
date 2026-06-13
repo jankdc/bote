@@ -25,7 +25,7 @@ export interface ReadResult {
  *   - `false`: a single forward pass. `read` is called with non-decreasing
  *     offsets; the cache is forced off. `size` may be omitted (the end is found
  *     via `eof`). Rewinding to an earlier offset re-acquires the stream (see
- *     `fromReadable`'s `replay`/`buffer` options) or throws {@link ForwardReplayError}.
+ *     `fromReadable`'s `rewind` option) or throws {@link ForwardReplayError}.
  */
 export interface Reader {
   /** Whether reads may target any offset/order (`true`) or a single forward pass (`false`). */
@@ -97,20 +97,18 @@ export interface ReadableOptions extends FactoryOptions {
   /** Transform applied to every (re)acquired stream, e.g. `s => s.pipeThrough(new DecompressionStream('gzip'))`. */
   decode?: (raw: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
   /**
-   * Allow re-acquiring the stream from the start to serve a later query. Only
-   * safe when the producer is idempotent (yields the same bytes each call).
-   * Defaults to `false`: a rewind throws {@link ForwardReplayError} instead.
+   * What a later query that must re-read from an earlier offset does. Defaults
+   * to `'forbid'`. The three settings trade resident memory for re-read ability:
+   *   - `'forbid'`: a single forward pass; a rewind throws {@link ForwardReplayError}.
+   *   - `'replay'`: re-acquire the stream from the start. Only safe when the
+   *     producer is idempotent (yields the same bytes each call). No extra memory.
+   *   - `'buffer'`: snapshot the whole stream into memory on first read, enabling
+   *     random access at O(n) resident memory.
    */
-  replay?: boolean;
-  /**
-   * Snapshot the whole stream into memory on first read, enabling random access
-   * at O(n) resident memory. Defaults to `false`. Mutually exclusive in effect
-   * with `replay` (a snapshot never needs to rewind the source).
-   */
-  buffer?: boolean;
+  rewind?: 'forbid' | 'replay' | 'buffer';
 }
 
-export interface HttpOptions extends Omit<ReadableOptions, 'size'> {
+export interface HttpStreamOptions extends Omit<ReadableOptions, 'size'> {
   /** Merged into every `fetch` (headers, credentials, signal, etc.). */
   init?: RequestInit;
 }
@@ -254,34 +252,35 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Seekable
 /**
  * A forward-only source backed by a re-openable readable stream. `produce` is
  * called to acquire each pass: once up front, and again on a rewind when
- * `replay` is set. A plain `Readable` instance cannot be re-streamed, so pass a
- * thunk (`() => createReadStream(path)`), not a live stream.
+ * `rewind: 'replay'` is set. A plain `Readable` instance cannot be re-streamed,
+ * so pass a thunk (`() => createReadStream(path)`), not a live stream.
  *
  * Because every cursor operation is an independent scan from the start, a single
  * forward pass serves exactly one query; a second query (or `hop` then `get`)
- * rewinds. By default that throws {@link ForwardReplayError}; opt into `replay`
- * (idempotent producer) or `buffer` (in-memory snapshot) for multi-query access.
+ * rewinds. By default that throws {@link ForwardReplayError}; opt into
+ * `rewind: 'replay'` (idempotent producer) or `rewind: 'buffer'` (in-memory
+ * snapshot) for multi-query access.
  */
 export function fromReadable(produce: ReadableProducer, options?: ReadableOptions): ForwardSource {
   const chunkBytes = options?.chunkBytes ?? DEFAULT_STREAM_CHUNK_BYTES;
   const size = options?.size;
   const decode = options?.decode;
-  const replay = options?.replay ?? false;
-  const buffer = options?.buffer ?? false;
+  const rewind = options?.rewind ?? 'forbid';
   return {
     seekable: false,
-    open: () => makeForwardReader(produce, { chunkBytes, size, decode, replay, buffer }),
+    open: () => makeForwardReader(produce, { chunkBytes, size, decode, rewind }),
   };
 }
 
 /**
- * A forward-only source over an HTTP GET body. A convenience wrapper around
- * {@link fromReadable} whose producer re-fetches `url` (reusing `init`, so auth
- * headers, credentials, and an `AbortSignal` survive each acquisition). For
- * repeated or random access over HTTP, prefer the seekable {@link fromHttpRange}.
+ * A forward-only source over an HTTP GET body, streamed in a single pass. A
+ * convenience wrapper around {@link fromReadable} whose producer re-fetches `url`
+ * (reusing `init`, so auth headers, credentials, and an `AbortSignal` survive
+ * each acquisition). For repeated or random access over HTTP, prefer the seekable
+ * {@link fromHttpRange}.
  */
-export function fromHttp(url: string, options?: HttpOptions): ForwardSource {
-  const init = options?.init;
+export function fromHttpStream(url: string, options?: HttpStreamOptions): ForwardSource {
+  const { init, ...readable } = options ?? {};
   const produce: ReadableProducer = async () => {
     const res = await fetch(url, { ...init, method: 'GET' });
     if (!res.ok) {
@@ -292,24 +291,20 @@ export function fromHttp(url: string, options?: HttpOptions): ForwardSource {
     }
     return res.body;
   };
-  return fromReadable(produce, {
-    chunkBytes: options?.chunkBytes,
-    decode: options?.decode,
-    replay: options?.replay,
-    buffer: options?.buffer,
-  });
+  return fromReadable(produce, readable);
 }
 
 interface ForwardConfig {
   chunkBytes: number;
   size?: number;
   decode?: (raw: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
-  replay: boolean;
-  buffer: boolean;
+  rewind: 'forbid' | 'replay' | 'buffer';
 }
 
 async function makeForwardReader(produce: ReadableProducer, config: ForwardConfig): Promise<Reader> {
-  const { chunkBytes, size, decode, replay, buffer } = config;
+  const { chunkBytes, size, decode, rewind } = config;
+  const replay = rewind === 'replay';
+  const buffer = rewind === 'buffer';
 
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let pos = 0; // bytes consumed from the active pass (served + skipped)

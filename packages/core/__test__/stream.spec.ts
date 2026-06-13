@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 
-import { open, fromReadable, fromHttp, ForwardReplayError, SourceReadError } from '../src/index.ts';
+import { open, fromReadable, fromHttpStream, ForwardReplayError, SourceReadError } from '../src/index.ts';
 import { DOC, enc } from './fixtures.ts';
 
 /** A fresh web stream over `data`, emitted in small chunks so reads must reassemble. */
@@ -70,6 +70,9 @@ test('forward_second_query_throws_replay_error', async (t) => {
   const err = await cursor.get('meta', 'version').catch((e) => e);
   assert.ok(err instanceof ForwardReplayError, `expected ForwardReplayError, got ${err}`);
   assert.equal(err.code, 'forward_replay');
+  // The guidance must name the actual opt-in shape, so it can't drift from the API.
+  assert.match(err.message, /rewind: 'replay'/);
+  assert.match(err.message, /rewind: 'buffer'/);
 });
 
 test('forward_hop_then_get_throws_without_replay', async (t) => {
@@ -104,7 +107,7 @@ test('replay_serves_second_query', async (t) => {
       acquisitions++;
       return webStreamOf(enc(DOC));
     },
-    { replay: true },
+    { rewind: 'replay' },
   );
   const cursor = await open(source);
   t.after(() => cursor.close());
@@ -120,7 +123,7 @@ test('buffer_serves_out_of_order_queries', async (t) => {
       acquisitions++;
       return webStreamOf(enc(DOC));
     },
-    { buffer: true },
+    { rewind: 'buffer' },
   );
   const cursor = await open(source);
   t.after(() => cursor.close());
@@ -134,7 +137,7 @@ test('decode_gzip_per_acquisition', async (t) => {
   const compressed = new Uint8Array(gzipSync(Buffer.from(DOC)));
   const cursor = await open(
     fromReadable(() => webStreamOf(compressed), {
-      replay: true,
+      rewind: 'replay',
       // DecompressionStream's writable is typed WritableStream<BufferSource>, which
       // the DOM lib won't unify with pipeThrough's Uint8Array chunk; cast the pair.
       decode: (raw) =>
@@ -151,7 +154,7 @@ test('http_get_reads_forward_body', async (t) => {
   const data = enc(DOC);
   const restore = mockFetch(() => new Response(data.slice().buffer as ArrayBuffer, { status: 200 }));
   t.after(restore);
-  const cursor = await open(fromHttp('https://example.test/doc.json'));
+  const cursor = await open(fromHttpStream('https://example.test/doc.json'));
   t.after(() => cursor.close());
   assert.equal(await cursor.get('users', 1, 'name'), 'Bob');
 });
@@ -165,7 +168,10 @@ test('http_authorization_header_survives_refetch', async (t) => {
   });
   t.after(restore);
   const cursor = await open(
-    fromHttp('https://example.test/doc.json', { replay: true, init: { headers: { Authorization: 'Bearer t0ken' } } }),
+    fromHttpStream('https://example.test/doc.json', {
+      rewind: 'replay',
+      init: { headers: { Authorization: 'Bearer t0ken' } },
+    }),
   );
   t.after(() => cursor.close());
   assert.equal(await cursor.get('users', 0, 'name'), 'Alice');
@@ -182,7 +188,7 @@ test('http_failed_status_rejects_open', async (t) => {
   // same site fromHttpRange surfaces a failed HEAD.
   const restore = mockFetch(() => new Response(null, { status: 503, statusText: 'Unavailable' }));
   t.after(restore);
-  await assert.rejects(() => open(fromHttp('https://example.test/doc.json')), /failed: 503/);
+  await assert.rejects(() => open(fromHttpStream('https://example.test/doc.json')), /failed: 503/);
 });
 
 test('open_rejects_cache_knobs_on_forward_source', async () => {

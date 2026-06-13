@@ -83,7 +83,7 @@ export class ForwardReplayError extends BoteError {
     super(
       'forward_replay',
       `bote: forward source cannot rewind to offset ${offset} from ${position}: the stream has already advanced. ` +
-        'Pass { replay: true } if the producer is idempotent, { buffer: true } to snapshot it in memory, ' +
+        "Pass { rewind: 'replay' } if the producer is idempotent, { rewind: 'buffer' } to snapshot it in memory, " +
         'or use a seekable source (fromFile/fromBuffer/fromHttpRange) for repeated or out-of-order access.',
       options,
     );

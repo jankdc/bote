@@ -21,20 +21,20 @@ export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type 
 
 export {
   fromFile,
-  fromHttp,
   fromBuffer,
   fromReadable,
   fromHttpRange,
+  fromHttpStream,
   type Source,
   type Reader,
   type ReadResult,
-  type HttpOptions,
   type ForwardSource,
   type FactoryOptions,
   type SeekableSource,
   type HttpRangeOptions,
   type ReadableOptions,
   type ReadableProducer,
+  type HttpStreamOptions,
 } from './sources.ts';
 
 export { type IterStream } from './stream.ts';

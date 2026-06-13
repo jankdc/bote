@@ -42,7 +42,7 @@ export type ForwardOpenOptions = { [K in keyof OpenOptions]?: never };
  * Open a cursor over a source.
  *
  * A seekable source (`fromFile`/`fromBuffer`/`fromHttpRange`) supports the cache
- * and repeated, out-of-order queries. A forward source (`fromReadable`/`fromHttp`)
+ * and repeated, out-of-order queries. A forward source (`fromReadable`/`fromHttpStream`)
  * is a single forward pass: the cache is forced off, so its cache knobs are
  * rejected at compile time and at runtime.
  *
