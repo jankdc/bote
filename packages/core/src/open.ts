@@ -1,7 +1,7 @@
 import { open as openNative, type Cursor as NativeCursor } from '@botejs/native';
 
 import { wrap, type CursorState, type RootCursor } from './cursor.ts';
-import type { Source, Reader, SeekableSource, ForwardSource } from './sources.ts';
+import type { Source, Reader, SeekableSource, ForwardSource } from './source/base.ts';
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024;
 
