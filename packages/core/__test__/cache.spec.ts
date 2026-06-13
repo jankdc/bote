@@ -4,19 +4,22 @@ import assert from 'node:assert/strict';
 import { open, type SeekableSource } from '../src/index.ts';
 import { memorySource, enc, bigObject } from './fixtures.ts';
 
-/** A `SeekableSource` that counts `read` calls, so the cache's effect on chunk faulting
+/** A `Source` that counts `read` calls, so the cache's effect on chunk faulting
  *  is observable from the facade (the only public signal - there is no
  *  `cacheStats()`). `reads.n` is the live count; assign 0 to reset it. */
 function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: data.length,
         chunkBytes,
         read: (offset, length) => {
           reads.n++;
-          return Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length)));
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
         },
       }),
   };
@@ -40,13 +43,16 @@ test('reads_are_chunk_aligned_and_coalesce_into_multi_chunk_bursts', async () =>
   const data = enc('[' + Array.from({ length: 200 }, () => '1').join(',') + ']');
   const reads: Array<{ offset: number; length: number }> = [];
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: data.length,
         chunkBytes: 64,
         read: (offset, length) => {
           reads.push({ offset, length });
-          return Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length)));
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
         },
       }),
   };

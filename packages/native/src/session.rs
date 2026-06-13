@@ -1142,4 +1142,55 @@ mod tests {
       window.peak_len()
     );
   }
+
+  #[tokio::test]
+  async fn forward_scan_never_reads_backward() {
+    use std::sync::Mutex;
+
+    struct RecordingForward {
+      inner: ForwardStream,
+      offsets: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait]
+    impl ByteStream for RecordingForward {
+      fn size(&self) -> Option<u64> {
+        None
+      }
+      async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
+        self.offsets.lock().unwrap().push(offset);
+        self.inner.read(offset, length).await
+      }
+    }
+
+    // `d` is the last member of `b`, so resolving it faults many chunks forward.
+    let path = vec![member("a"), member("b"), member("d")];
+    let offsets = Arc::new(Mutex::new(Vec::new()));
+    let source: Arc<dyn ByteStream> = Arc::new(RecordingForward {
+      inner: ForwardStream::new(deep_object_doc().into_bytes()),
+      offsets: offsets.clone(),
+    });
+    let session = Session::new(source, 64, 0, 0, 0).unwrap();
+    let mut window = session.new_window();
+    session
+      .run_resolve_direct(&path, 0, &mut window)
+      .await
+      .unwrap()
+      .expect("forward resolves d");
+
+    let seen = offsets.lock().unwrap();
+    assert!(
+      seen.len() > 1,
+      "expected multiple faulting reads, saw {}",
+      seen.len()
+    );
+    for pair in seen.windows(2) {
+      assert!(
+        pair[1] >= pair[0],
+        "forward scan issued a backward read: offset {} after {}",
+        pair[1],
+        pair[0],
+      );
+    }
+  }
 }

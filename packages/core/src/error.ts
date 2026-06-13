@@ -5,7 +5,13 @@ import { formatPath, type Path } from './path.ts';
 
 export type { PathFaultCode, JsonFaultCode, SourceFaultCode };
 
-export type BoteErrorCode = PathFaultCode | JsonFaultCode | SourceFaultCode | 'validation' | 'closed';
+export type BoteErrorCode =
+  | PathFaultCode
+  | JsonFaultCode
+  | SourceFaultCode
+  | 'validation'
+  | 'closed'
+  | 'forward_replay';
 
 /** Base class for every error bote raises from its own logic. Catch this to
  *  catch anything bote throws; branch on {@link BoteError.code} for the precise
@@ -68,6 +74,25 @@ export class SourceReadError extends BoteError {
   }
 }
 
+export class ForwardReplayError extends BoteError {
+  declare readonly code: 'forward_replay';
+  readonly offset: number;
+  readonly position: number;
+
+  constructor(offset: number, position: number, options?: ErrorOptions) {
+    super(
+      'forward_replay',
+      `bote: forward source cannot rewind to offset ${offset} from ${position}: the stream has already advanced. ` +
+        'Pass { replay: true } if the producer is idempotent, { buffer: true } to snapshot it in memory, ' +
+        'or use a seekable source (fromFile/fromBuffer/fromHttpRange) for repeated or out-of-order access.',
+      options,
+    );
+    this.name = 'ForwardReplayError';
+    this.offset = offset;
+    this.position = position;
+  }
+}
+
 export class ClosedCursorError extends BoteError {
   declare readonly code: 'closed';
 
@@ -87,6 +112,7 @@ const NATIVE_ERROR = /^bote:([a-z_]+)(?::([\s\S]*))?$/;
 const PATH_CODES = ['through_scalar', 'scalar_target', 'wrong_kind'] as const satisfies readonly PathFaultCode[];
 const JSON_CODES = ['malformed_json', 'unexpected_eof'] as const satisfies readonly JsonFaultCode[];
 const SOURCE_CODE: SourceFaultCode = 'source_io';
+const FORWARD_REWIND = /forward source cannot rewind to offset (\d+) from (\d+)/;
 
 /** Rebuild a typed {@link BoteError} from a native addon error, anchoring it to
  *  the `path` of the call it surfaced through. Pass-through for anything that
@@ -109,6 +135,13 @@ export function deserializeNativeError(err: unknown, path: Path): unknown {
     return new MalformedJsonError(path, code as JsonFaultCode, { cause: err });
   }
   if (code === SOURCE_CODE) {
+    // A forward reader rejects its read() with a ForwardReplayError; the native
+    // layer can only relay it as a generic source_io fault, so rebuild the typed
+    // error from the message it wrapped (offset/position survive in the detail).
+    const rewind = FORWARD_REWIND.exec(detail ?? '');
+    if (rewind) {
+      return new ForwardReplayError(Number(rewind[1]), Number(rewind[2]), { cause: err });
+    }
     return new SourceReadError(path, detail ?? '', { cause: err });
   }
   return err;

@@ -41,16 +41,21 @@ test('source_from_file_reads_from_disk', async (t) => {
 test('source_open_is_deferred_until_open_call', async () => {
   let opened = 0;
   const source: SeekableSource = {
+    seekable: true,
     open: () => {
       opened += 1;
       const data = enc(DOC);
       return Promise.resolve({
+        seekable: true,
         size: data.length,
-        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
+        read: (offset, length) => {
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
+        },
       });
     },
   };
-  assert.equal(opened, 0, 'constructing a SeekableSource must not trigger open()');
+  assert.equal(opened, 0, 'constructing a Source must not trigger open()');
   const cursor = await open(source);
   assert.equal(opened, 1);
   await cursor.close();
@@ -70,7 +75,9 @@ test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
 
 test('source_rejects_invalid_size_in_facade', async () => {
   const withSize = (size: number): SeekableSource => ({
-    open: () => Promise.resolve({ size, read: () => Promise.resolve(new Uint8Array()) }),
+    seekable: true,
+    open: () =>
+      Promise.resolve({ seekable: true, size, read: () => Promise.resolve({ data: new Uint8Array(), eof: true }) }),
   });
   await assert.rejects(() => open(withSize(Number.NaN)), /source size must be a non-negative integer, got NaN/);
   await assert.rejects(
@@ -160,10 +167,12 @@ test('source_zero_byte_read_errors_instead_of_hanging', async () => {
   // the same offset forever. The timeout race turns a regression (hang) into a
   // failure instead of stalling the suite.
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: 1024, // declares bytes that read() never delivers
-        read: () => Promise.resolve(new Uint8Array()),
+        read: () => Promise.resolve({ data: new Uint8Array(), eof: false }),
       }),
   };
   const cursor = await open(source);
@@ -175,11 +184,16 @@ test('source_zero_byte_read_errors_instead_of_hanging', async () => {
 test('lifecycle_close_drives_reader_close_exactly_once', async () => {
   let closeCalls = 0;
   const source: SeekableSource = {
+    seekable: true,
     open: () => {
       const data = enc(DOC);
       return Promise.resolve({
+        seekable: true,
         size: data.length,
-        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
+        read: (offset, length) => {
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
+        },
         close: async () => {
           closeCalls += 1;
         },
@@ -215,11 +229,16 @@ test('lifecycle_use_after_close_throws_uniformly', async () => {
 test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
   let closeCalls = 0;
   const source: SeekableSource = {
+    seekable: true,
     open: () => {
       const data = enc(DOC);
       return Promise.resolve({
+        seekable: true,
         size: data.length,
-        read: (offset, length) => Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length))),
+        read: (offset, length) => {
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
+        },
         close: async () => {
           closeCalls += 1;
         },
@@ -242,10 +261,12 @@ test('lifecycle_open_failure_still_closes_reader', async () => {
   // `source.open()` has succeeded - otherwise a failed open leaks a file handle.
   let closeCalls = 0;
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: Number.NaN,
-        read: () => Promise.resolve(new Uint8Array()),
+        read: () => Promise.resolve({ data: new Uint8Array(), eof: true }),
         close: async () => {
           closeCalls += 1;
         },
@@ -260,10 +281,12 @@ test('lifecycle_cleanup_failure_does_not_mask_open_error', async () => {
   // must still see the original open failure, not the cleanup error - the close
   // failure rides along as `.cause`.
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: Number.NaN,
-        read: () => Promise.resolve(new Uint8Array()),
+        read: () => Promise.resolve({ data: new Uint8Array(), eof: true }),
         close: async () => {
           throw new Error('close blew up');
         },
