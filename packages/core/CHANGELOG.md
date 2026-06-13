@@ -1,5 +1,68 @@
 # @botejs/core
 
+## 0.6.0
+
+### Minor Changes
+
+- 30fab5b: Consolidate every error bote raises under one `BoteError` base class.
+
+  `BoteError` (exported from `@botejs/core`) is the abstract base for everything bote throws from its own logic. Catch it to catch anything bote raises, then branch on the new `code` field (`BoteErrorCode`) for the precise kind. Every message stays `bote:`-prefixed.
+
+  The concrete subclasses are now all exported and all carry `code`:
+  - `PathError` (`code`: `PathFaultCode`) - a path that contradicts the document's shape; carries `path`.
+  - `ValidationError` (`code`: `'validation'`) - schema validation failure; carries `issues` and `path`.
+  - `MalformedJsonError` (`code`: `JsonFaultCode`) - a malformed value, now distinguishing `unexpected_eof` from `malformed_json`; carries `path`. Was a plain `Error`.
+  - `SourceReadError` (`code`: `'source_io'`) - a failing source `read()`; carries `path`. Was a plain `Error`.
+  - `ClosedCursorError` (`code`: `'closed'`) - any call on a closed cursor. Was a plain `Error`.
+
+  New exported native fault-code types: `BoteErrorCode`, `JsonFaultCode`, `SourceFaultCode` (alongside the existing `PathFaultCode`). The native addon now emits typed `bote:<code>[:<detail>]` fault lines that the facade rebuilds into the typed errors above, so the human-readable messages live entirely on the JS side.
+
+- 717f41b: ## Breaking Changes
+  - Rename `fromHttpStream` to `fromHttpRequest` and its options type `HttpStreamOptions` to `HttpRequestOptions`. The request method is no longer pinned to GET (it remains the default), so callers can override it via `init.method`.
+
+- beb3d3c: Add forward-only streaming sources, so a document can be scanned as it arrives
+  instead of requiring a seekable backing store.
+
+  Two new factories produce a `ForwardSource`:
+  - `fromReadable(produce, options?)` - wraps a thunk that yields a Node or web
+    `ReadableStream`. `produce` is called to (re)acquire the stream, with an
+    optional `decode` transform (e.g. `s => s.pipeThrough(new DecompressionStream('gzip'))`).
+  - `fromHttpStream(url, options?)` - streams a URL's body without range requests;
+    takes the same options plus a `fetch` `init`.
+
+  A source now declares `seekable`, and `open` is overloaded on it. Seekable
+  sources (`fromFile`/`fromBuffer`/`fromHttpRange`) keep the structural-index cache
+  and repeated, out-of-order access. A forward source is a single forward pass: the
+  cache is forced off, and its cache knobs are rejected both at compile time (via
+  the new `ForwardOpenOptions`) and at runtime. A source may now omit `size`; an
+  unknown-size stream discovers its end from an `eof` flag on each read.
+
+  A query that must re-read from an earlier offset on a forward source is governed
+  by `rewind` (default `'forbid'`):
+  - `'forbid'` - a single pass; a backward read throws `ForwardReplayError`.
+  - `'replay'` - re-acquire the stream from the start; only safe when the producer
+    is idempotent. No extra resident memory.
+  - `'buffer'` - snapshot the stream into memory on first read for O(n) random
+    access.
+
+  New error: `ForwardReplayError` (`code: 'forward_replay'`), carrying the
+  requested `offset` and the stream's current `position`. The native read contract
+  changes accordingly: `read(args)` now resolves to `{ data, eof }` (was a bare
+  `Uint8Array`), and `size` is optional.
+
+  New exports from `@botejs/core`: `fromReadable`, `fromHttpStream`,
+  `ForwardReplayError`, and the types `Source`, `Reader`, `ReadResult`,
+  `ForwardSource`, `ReadableProducer`, `ReadableOptions`, `HttpStreamOptions`, and
+  `ForwardOpenOptions`. The reader interface was renamed `SourceReader` ->
+  `Reader`.
+
+### Patch Changes
+
+- Updated dependencies [305fd88]
+- Updated dependencies [30fab5b]
+- Updated dependencies [beb3d3c]
+  - @botejs/native@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
