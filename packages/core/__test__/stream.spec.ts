@@ -193,8 +193,8 @@ test('http_failed_status_rejects_open', async (t) => {
 
 test('open_rejects_cache_knobs_on_forward_source', async () => {
   await assert.rejects(
-    // @ts-expect-error - cache knobs are not part of a forward source's options
     () =>
+      // @ts-expect-error - cache knobs are not part of a forward source's options
       open(
         fromReadable(() => webStreamOf(enc(DOC))),
         { objectMemberCap: 8 },
