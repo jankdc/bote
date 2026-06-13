@@ -32,10 +32,10 @@ export { fromFile, fromBuffer, fromHttpRange, type HttpRangeOptions } from './so
 
 export {
   fromReadable,
-  fromHttpStream,
+  fromHttpRequest,
   type ReadableOptions,
   type ReadableProducer,
-  type HttpStreamOptions,
+  type HttpRequestOptions,
 } from './source/forward.ts';
 
 export { type IterStream } from './stream.ts';

@@ -36,7 +36,7 @@ export interface ReadableOptions extends FactoryOptions {
   rewind?: 'forbid' | 'replay' | 'buffer';
 }
 
-export interface HttpStreamOptions extends Omit<ReadableOptions, 'size'> {
+export interface HttpRequestOptions extends Omit<ReadableOptions, 'size'> {
   /** Merged into every `fetch` (headers, credentials, signal, etc.). */
   init?: RequestInit;
 }
@@ -65,21 +65,21 @@ export function fromReadable(produce: ReadableProducer, options?: ReadableOption
 }
 
 /**
- * A forward-only source over an HTTP GET body, streamed in a single pass. A
+ * A forward-only source over an HTTP request (GET is default), streamed in a single pass. A
  * convenience wrapper around {@link fromReadable} whose producer re-fetches `url`
  * (reusing `init`, so auth headers, credentials, and an `AbortSignal` survive
  * each acquisition). For repeated or random access over HTTP, prefer the seekable
  * {@link fromHttpRange}.
  */
-export function fromHttpStream(url: string, options?: HttpStreamOptions): ForwardSource {
+export function fromHttpRequest(url: string, options?: HttpRequestOptions): ForwardSource {
   const { init, ...readable } = options ?? {};
   const produce: ReadableProducer = async () => {
-    const res = await fetch(url, { ...init, method: 'GET' });
+    const res = await fetch(url, { ...init });
     if (!res.ok) {
-      throw new Error(`GET ${url} failed: ${res.status} ${res.statusText}`);
+      throw new Error(`${url} failed: ${res.status} ${res.statusText}`);
     }
     if (!res.body) {
-      throw new Error(`GET ${url} returned no body`);
+      throw new Error(`${url} returned no body`);
     }
     return res.body;
   };

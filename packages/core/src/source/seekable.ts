@@ -112,7 +112,7 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Seekable
           const headers = new Headers(init?.headers);
           headers.set('Range', `bytes=${offset}-${end}`);
           headers.set('Accept-Encoding', 'identity');
-          const res = await fetch(url, { ...init, headers, method: 'GET', signal: controller.signal });
+          const res = await fetch(url, { ...init, headers, signal: controller.signal });
           if (res.status === 206) {
             const data = new Uint8Array(await res.arrayBuffer());
             return { data, eof: offset + data.byteLength >= size };
@@ -121,10 +121,10 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Seekable
           // body. We throw here since the point of using ranges is to not have to
           // buffer the whole thing in memory.
           if (res.status === 200) {
-            throw new Error(`Range GET ${url} (bytes=${offset}-${end}) ignored Range and returned 200.`);
+            throw new Error(`Range ${url} (bytes=${offset}-${end}) ignored Range and returned 200.`);
           }
 
-          throw new Error(`Range GET ${url} (bytes=${offset}-${end}) failed: ${res.status}`);
+          throw new Error(`Range ${url} (bytes=${offset}-${end}) failed: ${res.status}`);
         },
         close: async () => {
           if (closed) {
