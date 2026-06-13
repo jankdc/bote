@@ -19,7 +19,8 @@ import {
 /** A source whose every `read` rejects, to drive the I/O fault path. */
 function failingSource(message: string): SeekableSource {
   return {
-    open: () => Promise.resolve({ size: 64, read: () => Promise.reject(new Error(message)) }),
+    seekable: true,
+    open: () => Promise.resolve({ seekable: true, size: 64, read: () => Promise.reject(new Error(message)) }),
   };
 }
 

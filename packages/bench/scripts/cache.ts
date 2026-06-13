@@ -28,7 +28,7 @@
 import { closeSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { fromBuffer, open, type SeekableSource, type SourceReader } from '@botejs/core';
+import { fromBuffer, open, type SeekableSource, type Reader } from '@botejs/core';
 
 import { arg, flag } from '#lib/cli.ts';
 import { buildArrayDoc } from '#lib/fixtures.ts';
@@ -61,15 +61,17 @@ const budgetNote = (): string =>
  *  observable from the facade (there is no `cacheStats()`). */
 function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
-  const reader: SourceReader = {
+  const reader: Reader = {
+    seekable: true,
     size: data.length,
     chunkBytes,
     read: (offset, length) => {
       reads.n++;
-      return Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length)));
+      const slice = data.subarray(offset, Math.min(offset + length, data.length));
+      return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
     },
   };
-  return { source: { open: () => Promise.resolve(reader) }, reads };
+  return { source: { seekable: true, open: () => Promise.resolve(reader) }, reads };
 }
 
 // A deep object whose target container `b` holds many members, so a cold scan

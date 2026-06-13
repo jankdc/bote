@@ -13,11 +13,14 @@ use thiserror::Error;
 
 #[async_trait]
 pub trait ByteStream: Send + Sync {
-  fn size(&self) -> u64;
+  fn size(&self) -> Option<u64>;
+  async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError>;
+}
 
-  /// Read up to `length` bytes at `offset`; returns fewer only when the range
-  /// extends past `size()`.
-  async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError>;
+#[derive(Debug)]
+pub struct ReadOutcome {
+  pub bytes: Bytes,
+  pub eof: bool,
 }
 
 #[derive(Debug, Error)]
@@ -45,9 +48,18 @@ impl SourceFaultCode {
 
 /// Arguments passed to the JS `read(args)` callback.
 #[napi_derive::napi(object)]
-pub struct ReadArgs {
+pub struct JsReadArgs {
   pub offset: f64,
   pub length: f64,
+}
+
+/// Value the JS `read(args)` callback resolves to: the bytes plus an
+/// end-of-stream flag. `eof` lets an unknown-size source declare where the data
+/// ends; for a sized source it's ignored (the engine already knows the end).
+#[napi_derive::napi(object)]
+pub struct JsReadResult {
+  pub data: Uint8Array,
+  pub eof: bool,
 }
 
 /// `CalleeHandled = false`: the call takes args directly. We invoke it via
@@ -58,28 +70,29 @@ pub struct ReadArgs {
 /// dormant Cursor's tsfn doesn't pin the Node event loop (pending `await`s keep
 /// it alive).
 pub type ReadFn =
-  ThreadsafeFunction<ReadArgs, Promise<Uint8Array>, ReadArgs, napi::Status, false, true>;
+  ThreadsafeFunction<JsReadArgs, Promise<JsReadResult>, JsReadArgs, napi::Status, false, true>;
 
-/// ByteStream backed by a JS `read(args): Promise<Uint8Array>`, held as a
-/// [`ThreadsafeFunction`] so it can be awaited from any tokio task.
+/// ByteStream backed by a JS `read(args): Promise<ReadResult>`, held as a
+/// [`ThreadsafeFunction`] so it can be awaited from any tokio task. `size` is
+/// `None` for a forward source whose end is discovered from `read`'s `eof`.
 pub struct JsByteStream {
   read_fn: ReadFn,
-  size: u64,
+  size: Option<u64>,
 }
 
 impl JsByteStream {
-  pub fn new(read_fn: ReadFn, size: u64) -> Self {
+  pub fn new(read_fn: ReadFn, size: Option<u64>) -> Self {
     Self { read_fn, size }
   }
 }
 
 #[async_trait]
 impl ByteStream for JsByteStream {
-  fn size(&self) -> u64 {
+  fn size(&self) -> Option<u64> {
     self.size
   }
 
-  async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+  async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
     // Pulling the buffer *from* JS (vs pushing a Rust-owned `with_external_data`
     // view *to* JS) keeps it V8-owned/V8-GC'd: a pushed view needs a strong napi
     // ref whose drop queues through `CUSTOM_GC_TSFN`, and under a continuous scan
@@ -87,29 +100,35 @@ impl ByteStream for JsByteStream {
     // with bytes-read.
     let promise = self
       .read_fn
-      .call_async_catch(ReadArgs {
+      .call_async_catch(JsReadArgs {
         offset: offset as f64,
         length: length as f64,
       })
       .await
       .map_err(|e| SourceError::Io(format!("read() call failed: {e}")))?;
-    let view: Uint8Array = promise
+    let result: JsReadResult = promise
       .await
       .map_err(|e| SourceError::Io(format!("read() promise rejected: {e}")))?;
 
+    let view = result.data;
     let view_len = view.len();
     if view_len > length {
       return Err(SourceError::Io(format!(
         "read() returned {view_len} bytes for a {length}-byte request"
       )));
     }
-    if view_len == 0 && length > 0 {
+    // A non-eof read must make progress; 0 bytes without `eof` is a stuck source,
+    // not the end. (With `eof`, 0 bytes legitimately means end-of-stream.)
+    if view_len == 0 && length > 0 && !result.eof {
       return Err(SourceError::Io(format!(
-        "read() returned 0 bytes for a {length}-byte request at offset {offset} (before declared EOF)"
+        "read() returned 0 bytes for a {length}-byte request at offset {offset} without signaling eof"
       )));
     }
     // Copy out so `Bytes` owns its allocation; don't carry the JS view further.
-    Ok(Bytes::copy_from_slice(&view[..view_len]))
+    Ok(ReadOutcome {
+      bytes: Bytes::copy_from_slice(&view[..view_len]),
+      eof: result.eof,
+    })
   }
 }
 
@@ -130,18 +149,54 @@ impl InMemoryStream {
 #[cfg(test)]
 #[async_trait]
 impl ByteStream for InMemoryStream {
-  fn size(&self) -> u64 {
-    self.data.len() as u64
+  fn size(&self) -> Option<u64> {
+    Some(self.data.len() as u64)
   }
 
-  async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
-    let size = self.size();
+  async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
+    let size = self.data.len() as u64;
     if offset > size {
       return Err(SourceError::OutOfBounds { offset, size });
     }
     let start = offset as usize;
     let end = start.saturating_add(length).min(self.data.len());
-    Ok(self.data.slice(start..end))
+    Ok(ReadOutcome {
+      bytes: self.data.slice(start..end),
+      eof: end as u64 >= size,
+    })
+  }
+}
+
+#[cfg(test)]
+pub struct ForwardStream {
+  data: Bytes,
+}
+
+#[cfg(test)]
+impl ForwardStream {
+  pub fn new(data: impl Into<Bytes>) -> Self {
+    Self { data: data.into() }
+  }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ByteStream for ForwardStream {
+  fn size(&self) -> Option<u64> {
+    None
+  }
+
+  async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
+    let size = self.data.len() as u64;
+    if offset > size {
+      return Err(SourceError::OutOfBounds { offset, size });
+    }
+    let start = offset as usize;
+    let end = start.saturating_add(length).min(self.data.len());
+    Ok(ReadOutcome {
+      bytes: self.data.slice(start..end),
+      eof: end as u64 >= size,
+    })
   }
 }
 
@@ -152,23 +207,26 @@ mod tests {
   #[tokio::test]
   async fn in_memory_basic_read() {
     let src = InMemoryStream::new(b"hello, world".to_vec());
-    assert_eq!(src.size(), 12);
+    assert_eq!(src.size(), Some(12));
     let chunk = src.read(0, 5).await.unwrap();
-    assert_eq!(&chunk[..], b"hello");
+    assert_eq!(&chunk.bytes[..], b"hello");
+    assert!(!chunk.eof, "a read short of the end is not eof");
   }
 
   #[tokio::test]
   async fn in_memory_read_clipped_to_size() {
     let src = InMemoryStream::new(b"abc".to_vec());
     let chunk = src.read(1, 100).await.unwrap();
-    assert_eq!(&chunk[..], b"bc");
+    assert_eq!(&chunk.bytes[..], b"bc");
+    assert!(chunk.eof, "a read reaching the end is eof");
   }
 
   #[tokio::test]
   async fn in_memory_read_at_exact_end_returns_empty() {
     let src = InMemoryStream::new(b"abc".to_vec());
     let chunk = src.read(3, 16).await.unwrap();
-    assert!(chunk.is_empty());
+    assert!(chunk.bytes.is_empty());
+    assert!(chunk.eof);
   }
 
   #[tokio::test]
@@ -179,5 +237,17 @@ mod tests {
       err,
       SourceError::OutOfBounds { offset: 4, size: 3 }
     ));
+  }
+
+  #[tokio::test]
+  async fn forward_stream_reports_no_size_and_eof_at_end() {
+    let src = ForwardStream::new(b"abcde".to_vec());
+    assert_eq!(src.size(), None, "a forward source has no known size");
+    let mid = src.read(0, 3).await.unwrap();
+    assert_eq!(&mid.bytes[..], b"abc");
+    assert!(!mid.eof);
+    let tail = src.read(3, 100).await.unwrap();
+    assert_eq!(&tail.bytes[..], b"de");
+    assert!(tail.eof, "the read reaching the end declares eof");
   }
 }

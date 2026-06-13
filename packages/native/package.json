@@ -44,6 +44,7 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "create-npm-dirs": "napi create-npm-dirs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint .",
     "test": "cargo test",
     "preversion": "napi build --platform && git add .",

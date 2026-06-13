@@ -229,11 +229,10 @@ mod tests {
   use std::sync::atomic::{AtomicUsize, Ordering};
 
   use async_trait::async_trait;
-  use bytes::Bytes;
 
   use super::*;
   use crate::session::MAX_BURST;
-  use crate::source::{ByteStream, InMemoryStream, SourceError};
+  use crate::source::{ByteStream, InMemoryStream, ReadOutcome, SourceError};
   use napi::bindgen_prelude::AsyncGenerator;
 
   fn items_path() -> Vec<Segment> {
@@ -261,10 +260,10 @@ mod tests {
 
   #[async_trait]
   impl ByteStream for CountingStream {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Option<u64> {
       self.inner.size()
     }
-    async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+    async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
       self.reads.fetch_add(1, Ordering::Relaxed);
       self.inner.read(offset, length).await
     }

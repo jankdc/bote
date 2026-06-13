@@ -1,7 +1,7 @@
 import { open as openNative, type Cursor as NativeCursor } from '@botejs/native';
 
 import { wrap, type CursorState, type RootCursor } from './cursor.ts';
-import type { SeekableSource, SourceReader } from './sources.ts';
+import type { Source, Reader, SeekableSource, ForwardSource } from './sources.ts';
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024;
 
@@ -29,28 +29,58 @@ export interface OpenOptions {
   arrayIndexInterval?: number;
 }
 
+const CACHE_KNOBS = ['indexCacheEntries', 'objectMemberCap', 'arrayIndexInterval'] as const;
+
 /**
- * Open a cursor over a seekable source.
- *
- * The returned `RootCursor` owns the reader: `close()` (or `await using`)
- * drives the reader's own `close()` exactly once.
+ * Options for a forward source: every cache knob is forbidden (the structural-index
+ * cache is forced off). `Omit` would collapse to `{}` and silently permit them, so
+ * the knobs are mapped to `never` to reject them at compile time.
  */
-export async function open(source: SeekableSource, options?: OpenOptions): Promise<RootCursor> {
-  const { indexCacheEntries, objectMemberCap, arrayIndexInterval } = options ?? {};
-  for (const [name, value] of [
-    ['indexCacheEntries', indexCacheEntries],
-    ['objectMemberCap', objectMemberCap],
-    ['arrayIndexInterval', arrayIndexInterval],
-  ] as const) {
+export type ForwardOpenOptions = { [K in keyof OpenOptions]?: never };
+
+/**
+ * Open a cursor over a source.
+ *
+ * A seekable source (`fromFile`/`fromBuffer`/`fromHttpRange`) supports the cache
+ * and repeated, out-of-order queries. A forward source (`fromReadable`/`fromHttpStream`)
+ * is a single forward pass: the cache is forced off, so its cache knobs are
+ * rejected at compile time and at runtime.
+ *
+ * The returned `RootCursor` owns the reader: `close()` (or `await using`) drives
+ * the reader's own `close()` exactly once.
+ */
+export function open(source: SeekableSource, options?: OpenOptions): Promise<RootCursor>;
+export function open(source: ForwardSource, options?: ForwardOpenOptions): Promise<RootCursor>;
+export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
+  if (!source.seekable) {
+    for (const name of CACHE_KNOBS) {
+      if (options?.[name] !== undefined) {
+        throw new RangeError(
+          `open: ${name} is not allowed for a forward source; the structural-index cache is forced off`,
+        );
+      }
+    }
+  }
+  for (const name of CACHE_KNOBS) {
+    const value = options?.[name];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
       throw new RangeError(`open: ${name} must be a non-negative integer (0 disables), got ${value}`);
     }
   }
+
+  // A forward source disables every cache dimension, so the engine never resolves
+  // a cached container offset into a backward read on a stream it cannot rewind.
+  const knobs = source.seekable ? options : { indexCacheEntries: 0, objectMemberCap: 0, arrayIndexInterval: 0 };
+
   const reader = await source.open();
   const chunkBytes = reader.chunkBytes ?? DEFAULT_SOURCE_CHUNK_BYTES;
+
   let native: NativeCursor;
   try {
-    if (!Number.isInteger(reader.size) || reader.size < 0) {
+    if (reader.seekable && reader.size === undefined) {
+      throw new RangeError('open: a seekable source must report a size');
+    }
+    if (reader.size !== undefined && (!Number.isInteger(reader.size) || reader.size < 0)) {
       throw new RangeError(`open: source size must be a non-negative integer, got ${reader.size}`);
     }
     if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) {
@@ -62,10 +92,10 @@ export async function open(source: SeekableSource, options?: OpenOptions): Promi
     native = openNative({
       size: reader.size,
       chunkBytes,
-      indexCacheEntries,
-      objectMemberCap,
-      arrayIndexInterval,
-      read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
+      objectMemberCap: knobs?.objectMemberCap,
+      indexCacheEntries: knobs?.indexCacheEntries,
+      arrayIndexInterval: knobs?.arrayIndexInterval,
+      read: ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
     });
   } catch (err) {
     // Don't let a failing cleanup mask the original open error; attach it as cause.
@@ -93,7 +123,7 @@ export async function open(source: SeekableSource, options?: OpenOptions): Promi
   }) as RootCursor;
 }
 
-async function closeReader(reader: SourceReader): Promise<void> {
+async function closeReader(reader: Reader): Promise<void> {
   if (reader.close) {
     await reader.close();
   }

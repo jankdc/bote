@@ -24,12 +24,12 @@ mod cursor;
 
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, Uint8Array};
+use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise};
 use napi_derive::napi;
 
 use crate::cursor::Cursor;
 use crate::session::Session;
-use crate::source::{JsByteStream, ReadArgs};
+use crate::source::{JsByteStream, JsReadArgs, JsReadResult};
 
 #[cfg(feature = "heap-profile")]
 #[global_allocator]
@@ -39,9 +39,11 @@ static GLOBAL: dhat::Alloc = dhat::Alloc;
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
 /// Build a [`Cursor`] from a JS source object:
-///   - `size: number` total source size in bytes
-///   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
-///     `.byteLength` is the actual count read, `<= length`
+///   - `size?: number` total source size in bytes; omit for a forward source
+///     whose end is discovered from `read`'s `eof`
+///   - `read(args): Promise<ReadResult>` (`args.offset`, `args.length`); resolves
+///     to `{ data, eof }` where `data.byteLength` is the actual count read
+///     (`<= length`) and `eof` marks end-of-stream
 ///   - `chunkBytes: number` read granularity (whole, multiple of 64)
 ///   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
 ///   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
@@ -49,17 +51,23 @@ static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::ne
 #[napi(catch_unwind)]
 pub fn open(
   #[napi(
-    ts_arg_type = "{ size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }"
+    ts_arg_type = "{ size?: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<ReadResult> }"
   )]
   source: Object<'_>,
 ) -> napi::Result<Cursor> {
-  let size = source.get_named_property::<f64>("size")?;
-  if !size.is_finite() || size < 0.0 {
-    return Err(napi::Error::from_reason(format!(
-      "source.size must be a non-negative finite number, got {size}"
-    )));
-  }
-  let read_fn: Function<ReadArgs, Promise<Uint8Array>> = source.get_named_property("read")?;
+  let size = match source.get_named_property::<Option<f64>>("size") {
+    Ok(Some(n)) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64 => {
+      Some(n as u64)
+    }
+    Ok(Some(n)) => {
+      return Err(napi::Error::from_reason(format!(
+        "source.size must be a non-negative whole number, got {n}"
+      )));
+    }
+    Ok(None) => None,
+    Err(e) => return Err(e),
+  };
+  let read_fn: Function<JsReadArgs, Promise<JsReadResult>> = source.get_named_property("read")?;
   let ts_read_fn = read_fn.build_threadsafe_function().weak::<true>().build()?;
 
   // reject non-whole/non-positive rather than truncating (`0.5 as usize == 0`).
@@ -98,7 +106,7 @@ pub fn open(
   )?;
 
   let session = Session::new(
-    Arc::new(JsByteStream::new(ts_read_fn, size as u64)),
+    Arc::new(JsByteStream::new(ts_read_fn, size)),
     chunk_bytes,
     index_cache_budget,
     object_member_cap,

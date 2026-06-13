@@ -49,7 +49,7 @@ pub enum SessionError {
 }
 
 pub struct Session {
-  pub source_size: u64,
+  pub source_size: Option<u64>,
   pub chunk_bytes: u64,
   pub reader: Arc<ChunkReader>,
   /// Shared across every cursor over this source. The lock is held only for the
@@ -86,18 +86,23 @@ impl Session {
   }
 
   pub(crate) fn new_window(&self) -> ChunkWindow {
-    ChunkWindow::new(self.chunk_bytes, self.source_size)
+    match self.source_size {
+      Some(size) => ChunkWindow::new(self.chunk_bytes, size),
+      None => ChunkWindow::new_unsized(self.chunk_bytes),
+    }
   }
 
   /// Prune a streaming window to the scan position: keep just the chunk
   /// covering `next_offset` so the next yield's first read is hot, dropping the
   /// rest (clearing once iteration walks off the end). Bounds resident chunks to
   /// ~1 between yields.
+  ///
+  /// Consults the window's learned size (not the session's), so a forward source
+  /// that discovered its end mid-scan can still clear off the end.
   pub(crate) fn prune_window(&self, window: &mut ChunkWindow, next_offset: u64) {
-    if next_offset >= self.source_size {
-      window.clear();
-    } else {
-      window.drop_below(next_offset);
+    match window.known_size() {
+      Some(size) if next_offset >= size => window.clear(),
+      _ => window.drop_below(next_offset),
     }
   }
 }
@@ -552,8 +557,12 @@ impl Session {
         Err(TraverseError::Pending(ChunkMiss(off))) => {
           window.drop_below(min_reachable.load(Ordering::Relaxed));
           let n = burst_for(off);
-          for (o, b) in self.reader.read_chunks(off, n).await? {
+          let (chunks, discovered_end) = self.reader.read_chunks(off, n).await?;
+          for (o, b) in chunks {
             window.insert(o, b);
+          }
+          if let Some(end) = discovered_end {
+            window.set_source_size(end);
           }
         }
         Err(e) => return Err(e.into()),
@@ -567,10 +576,9 @@ mod tests {
   use std::sync::atomic::AtomicUsize;
 
   use async_trait::async_trait;
-  use bytes::Bytes;
 
   use super::*;
-  use crate::source::{InMemoryStream, SourceError};
+  use crate::source::{ForwardStream, InMemoryStream, ReadOutcome, SourceError};
 
   /// Counts `read` calls so the cache's effect on chunk faulting is observable.
   struct CountingSource {
@@ -580,10 +588,10 @@ mod tests {
 
   #[async_trait]
   impl ByteStream for CountingSource {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Option<u64> {
       self.inner.size()
     }
-    async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+    async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
       self.reads.fetch_add(1, Ordering::Relaxed);
       self.inner.read(offset, length).await
     }
@@ -1069,5 +1077,120 @@ mod tests {
       "window peaked at {} chunks mid-fault (bound {bound}); prune-before-insert regressed",
       window.peak_len()
     );
+  }
+
+  #[tokio::test]
+  async fn forward_source_resolves_same_as_sized() {
+    let doc = r#"{"a":{"b":[10,20,30]},"c":"tail"}"#;
+    let path = vec![member("a"), member("b"), Segment::Element(2)];
+    for chunk in [64usize, 128, 4096] {
+      let sized: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.as_bytes().to_vec()));
+      let fwd: Arc<dyn ByteStream> = Arc::new(ForwardStream::new(doc.as_bytes().to_vec()));
+      let s = Session::new(sized, chunk, 0, 0, 0).unwrap();
+      let f = Session::new(fwd, chunk, 0, 0, 0).unwrap();
+      assert_eq!(s.source_size, Some(doc.len() as u64));
+      assert_eq!(f.source_size, None);
+
+      let mut ws = s.new_window();
+      let mut wf = f.new_window();
+      let rs = s
+        .run_resolve_direct(&path, 0, &mut ws)
+        .await
+        .unwrap()
+        .expect("sized resolves");
+      let rf = f
+        .run_resolve_direct(&path, 0, &mut wf)
+        .await
+        .unwrap()
+        .expect("forward resolves");
+      assert_eq!((rf.start, rf.end), (rs.start, rs.end), "chunk {chunk}");
+      let bytes = f.read_range(rf.start, rf.end, &mut wf).await.unwrap();
+      assert_eq!(&bytes, b"30", "chunk {chunk}");
+    }
+  }
+
+  #[tokio::test]
+  async fn forward_window_bounded_scanning_to_discovered_eof() {
+    let mut doc = String::from("{\"items\":[");
+    let mut i = 0;
+    while doc.len() < 4 * 1024 * 1024 {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!("{{\"n\":{i}}}"));
+      i += 1;
+    }
+    doc.push_str("]}");
+    let len = doc.len();
+    let source: Arc<dyn ByteStream> = Arc::new(ForwardStream::new(doc.into_bytes()));
+    let session = Session::new(source, 4096, 0, 0, 0).unwrap();
+    assert_eq!(session.source_size, None);
+
+    let mut window = session.new_window();
+    let end = session.skip_value_at(0, &mut window).await.unwrap();
+    assert_eq!(end as usize, len, "skip reaches the discovered end");
+    assert_eq!(
+      window.known_size(),
+      Some(len as u64),
+      "the end was learned from eof"
+    );
+
+    let bound = (MAX_BURST as usize) + 4;
+    assert!(
+      window.peak_len() <= bound,
+      "forward window peaked at {} chunks (bound {bound}); unknown size must not load everything",
+      window.peak_len()
+    );
+  }
+
+  #[tokio::test]
+  async fn forward_scan_never_reads_backward() {
+    use std::sync::Mutex;
+
+    struct RecordingForward {
+      inner: ForwardStream,
+      offsets: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait]
+    impl ByteStream for RecordingForward {
+      fn size(&self) -> Option<u64> {
+        None
+      }
+      async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
+        self.offsets.lock().unwrap().push(offset);
+        self.inner.read(offset, length).await
+      }
+    }
+
+    // `d` is the last member of `b`, so resolving it faults many chunks forward.
+    let path = vec![member("a"), member("b"), member("d")];
+    let offsets = Arc::new(Mutex::new(Vec::new()));
+    let source: Arc<dyn ByteStream> = Arc::new(RecordingForward {
+      inner: ForwardStream::new(deep_object_doc().into_bytes()),
+      offsets: offsets.clone(),
+    });
+    let session = Session::new(source, 64, 0, 0, 0).unwrap();
+    let mut window = session.new_window();
+    session
+      .run_resolve_direct(&path, 0, &mut window)
+      .await
+      .unwrap()
+      .expect("forward resolves d");
+
+    let seen = offsets.lock().unwrap();
+    assert!(
+      seen.len() > 1,
+      "expected multiple faulting reads, saw {}",
+      seen.len()
+    );
+    for pair in seen.windows(2) {
+      assert!(
+        pair[1] >= pair[0],
+        "forward scan issued a backward read: offset {} after {}",
+        pair[1],
+        pair[0],
+      );
+    }
   }
 }

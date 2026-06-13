@@ -7,13 +7,16 @@ import { memorySource, enc, ORDERS } from './fixtures.ts';
 function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
   const source: SeekableSource = {
+    seekable: true,
     open: () =>
       Promise.resolve({
+        seekable: true,
         size: data.length,
         chunkBytes,
         read: (offset, length) => {
           reads.n++;
-          return Promise.resolve(data.subarray(offset, Math.min(offset + length, data.length)));
+          const slice = data.subarray(offset, Math.min(offset + length, data.length));
+          return Promise.resolve({ data: slice, eof: offset + slice.length >= data.length });
         },
       }),
   };
