@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::source::{ByteStream, SourceError};
+use crate::source::{ByteStream, ReadOutcome, SourceError};
 
 /// Primitive needed a non-resident chunk; the async driver reads the chunk at
 /// this offset and retries.
@@ -18,12 +18,22 @@ pub struct ChunkWindow {
   #[cfg(test)]
   peak_len: usize,
   chunk_bytes: u64,
-  source_size: u64,
+  source_size: Option<u64>,
   chunks: HashMap<u64, Bytes>,
 }
 
 impl ChunkWindow {
+  /// Window over a source of known size.
   pub fn new(chunk_bytes: u64, source_size: u64) -> Self {
+    Self::with_size(chunk_bytes, Some(source_size))
+  }
+
+  /// Window over a forward source whose size isn't known until [`Self::learn_eof`].
+  pub fn new_unsized(chunk_bytes: u64) -> Self {
+    Self::with_size(chunk_bytes, None)
+  }
+
+  fn with_size(chunk_bytes: u64, source_size: Option<u64>) -> Self {
     Self {
       #[cfg(test)]
       peak_len: 0,
@@ -33,12 +43,25 @@ impl ChunkWindow {
     }
   }
 
+  /// Source size as a scan bound: the known size, or `u64::MAX` while still
+  /// unknown so loops run until a chunk fault discovers the end.
   pub fn source_size(&self) -> u64 {
+    self.source_size.unwrap_or(u64::MAX)
+  }
+
+  /// The known size, or `None` for a forward source whose end isn't found yet.
+  pub fn known_size(&self) -> Option<u64> {
     self.source_size
   }
 
   pub fn chunk_bytes(&self) -> u64 {
     self.chunk_bytes
+  }
+
+  /// Record the end discovered from a `read`'s eof. First write wins; a known
+  /// size never moves.
+  pub fn set_source_size(&mut self, end: u64) {
+    self.source_size.get_or_insert(end);
   }
 
   #[inline]
@@ -140,37 +163,49 @@ impl ChunkReader {
   /// Read `n` chunks from chunk-aligned `start` (ascending), coalescing
   /// contiguous chunks into reads of at most [`MAX_COALESCED_READ_BYTES`] and
   /// splitting each back into per-chunk `Bytes` so dropping one frees its bytes
-  /// without retaining the whole coalesced buffer. Clamps to end-of-source; the
-  /// final chunk may be a partial tail.
-  pub async fn read_chunks(&self, start: u64, n: u64) -> Result<Vec<(u64, Bytes)>, ReaderError> {
+  /// without retaining the whole coalesced buffer. The final chunk may be a
+  /// partial tail.
+  ///
+  /// `n` bounds the request, the source's `eof` bounds reality - so no size
+  /// clamp is needed (a sized source clamps its own reads). When a read reports
+  /// eof, the returned `Option` is the discovered end-of-source offset, which
+  /// the caller folds back into the window via [`ChunkWindow::learn_eof`].
+  pub async fn read_chunks(
+    &self,
+    start: u64,
+    n: u64,
+  ) -> Result<(Vec<(u64, Bytes)>, Option<u64>), ReaderError> {
     debug_assert!(start.is_multiple_of(self.chunk_bytes));
     let cs = self.chunk_bytes;
-    let span_end = start
-      .saturating_add(n.saturating_mul(cs))
-      .min(self.source.size());
+    let span_end = start.saturating_add(n.saturating_mul(cs));
     let max_per_read = (MAX_COALESCED_READ_BYTES / self.chunk_bytes as usize).max(1) as u64;
-    let span_chunks = span_end.saturating_sub(start).div_ceil(cs) as usize;
-    let mut out = Vec::with_capacity(span_chunks);
+    let mut out = Vec::with_capacity(n as usize);
+    let mut discovered_end = None;
 
     let mut cur = start;
     while cur < span_end {
       let run_end = cur
         .saturating_add(max_per_read.saturating_mul(cs))
         .min(span_end);
-      let buf = self.source.read(cur, (run_end - cur) as usize).await?;
+      let ReadOutcome { bytes: buf, eof } = self.source.read(cur, (run_end - cur) as usize).await?;
+      let got = buf.len() as u64;
       let mut off = cur;
       while off < run_end {
         let rel = (off - cur) as usize;
         if rel >= buf.len() {
-          break; // defensive: a short read before EOF violates the contract
+          break; // short read: the rest of this run is past end-of-source
         }
         let end = (rel + self.chunk_bytes as usize).min(buf.len());
         out.push((off, Bytes::copy_from_slice(&buf[rel..end])));
         off += cs;
       }
+      if eof {
+        discovered_end = Some(cur + got);
+        break;
+      }
       cur = run_end;
     }
-    Ok(out)
+    Ok((out, discovered_end))
   }
 }
 
@@ -181,7 +216,7 @@ mod tests {
   use async_trait::async_trait;
 
   use super::*;
-  use crate::source::InMemoryStream;
+  use crate::source::{ForwardStream, InMemoryStream};
 
   fn window(chunk_bytes: u64, source: &[u8]) -> ChunkWindow {
     let mut w = ChunkWindow::new(chunk_bytes, source.len() as u64);
@@ -224,10 +259,10 @@ mod tests {
 
   #[async_trait]
   impl ByteStream for CountingSource {
-    fn size(&self) -> u64 {
+    fn size(&self) -> Option<u64> {
       self.inner.size()
     }
-    async fn read(&self, offset: u64, length: usize) -> Result<Bytes, SourceError> {
+    async fn read(&self, offset: u64, length: usize) -> Result<ReadOutcome, SourceError> {
       self.reads.fetch_add(1, Ordering::Relaxed);
       self.inner.read(offset, length).await
     }
@@ -247,8 +282,9 @@ mod tests {
   async fn reader_coalesces_contiguous_run_into_one_read() {
     // 4 MiB cap dwarfs the 512 B span, so 8 chunks fold into one read
     let (reader, reads) = reader(512, 64);
-    let chunks = reader.read_chunks(0, 8).await.unwrap();
+    let (chunks, discovered) = reader.read_chunks(0, 8).await.unwrap();
     assert_eq!(chunks.len(), 8, "one entry per chunk in the span");
+    assert_eq!(discovered, Some(512), "the full read reaches the end");
     assert_eq!(
       reads.load(Ordering::Relaxed),
       1,
@@ -268,10 +304,28 @@ mod tests {
   async fn reader_clamps_span_to_source_end() {
     // 4 full chunks + a 20-byte partial tail; ask for 8.
     let (reader, _reads) = reader(64 * 4 + 20, 64);
-    let chunks = reader.read_chunks(0, 8).await.unwrap();
+    let (chunks, discovered) = reader.read_chunks(0, 8).await.unwrap();
     assert_eq!(chunks.len(), 5, "4 full chunks + 1 partial tail");
     assert_eq!(chunks.last().unwrap().0, 256);
     assert_eq!(chunks.last().unwrap().1.len(), 20, "tail chunk is partial");
+    assert_eq!(
+      discovered,
+      Some(64 * 4 + 20),
+      "end discovered from the short read"
+    );
+  }
+
+  #[tokio::test]
+  async fn reader_discovers_eof_for_unsized_source() {
+    // Same shape behind a forward (unknown-size) source: the reader learns the
+    // end from the source's eof, not from a size clamp.
+    let data: Vec<u8> = (0..64 * 4 + 20).map(|i| (i % 251) as u8).collect();
+    let source: Arc<dyn ByteStream> = Arc::new(ForwardStream::new(data));
+    let reader = ChunkReader::new(source, 64).unwrap();
+    let (chunks, discovered) = reader.read_chunks(0, 8).await.unwrap();
+    assert_eq!(chunks.len(), 5, "4 full chunks + 1 partial tail");
+    assert_eq!(chunks.last().unwrap().1.len(), 20, "tail chunk is partial");
+    assert_eq!(discovered, Some(64 * 4 + 20), "end discovered from eof");
   }
 
   #[tokio::test]
@@ -279,7 +333,7 @@ mod tests {
     // can't observe the allocator; copy_from_slice gives each chunk its own
     // Bytes, so dropping one can't keep the others alive.
     let (reader, _reads) = reader(512, 64);
-    let chunks = reader.read_chunks(0, 8).await.unwrap();
+    let (chunks, _discovered) = reader.read_chunks(0, 8).await.unwrap();
     for (_, data) in &chunks {
       assert_eq!(data.len(), 64);
     }

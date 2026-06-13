@@ -592,6 +592,6 @@ module.exports.heapProfilePeakBytes = nativeBinding.heapProfilePeakBytes
 module.exports.heapProfileStart = nativeBinding.heapProfileStart
 module.exports.heapProfileStop = nativeBinding.heapProfileStop
 module.exports.JsonFaultCode = nativeBinding.JsonFaultCode
+module.exports.open = nativeBinding.open
 module.exports.PathFaultCode = nativeBinding.PathFaultCode
 module.exports.SourceFaultCode = nativeBinding.SourceFaultCode
-module.exports.open = nativeBinding.open

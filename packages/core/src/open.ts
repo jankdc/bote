@@ -65,7 +65,10 @@ export async function open(source: SeekableSource, options?: OpenOptions): Promi
       indexCacheEntries,
       objectMemberCap,
       arrayIndexInterval,
-      read: async ({ offset, length }: { offset: number; length: number }) => reader.read(offset, length),
+      read: async ({ offset, length }: { offset: number; length: number }) => {
+        const data = await reader.read(offset, length);
+        return { data, eof: offset + data.byteLength >= reader.size };
+      },
     });
   } catch (err) {
     // Don't let a failing cleanup mask the original open error; attach it as cause.

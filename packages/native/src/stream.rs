@@ -237,7 +237,8 @@ impl IterState {
 
   pub(crate) fn record_early_break(&self, session: &Session) {
     if let (Some(w), Some(vs)) = (self.child_cursor.as_ref(), self.base_value_start) {
-      if w.kind == ContainerKind::Array && w.index > 0 && w.next_offset < session.source_size {
+      let before_end = session.source_size.is_none_or(|size| w.next_offset < size);
+      if w.kind == ContainerKind::Array && w.index > 0 && before_end {
         session.store_array_resume_point(
           self.base_depth,
           self.anchor_start,

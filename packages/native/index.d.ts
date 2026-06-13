@@ -44,26 +44,38 @@ export interface IterArgs {
 export type JsonFaultCode =  'malformed_json'|
 'unexpected_eof';
 
+/** Arguments passed to the JS `read(args)` callback. */
+export interface JsReadArgs {
+  offset: number
+  length: number
+}
+
+/**
+ * Value the JS `read(args)` callback resolves to: the bytes plus an
+ * end-of-stream flag. `eof` lets an unknown-size source declare where the data
+ * ends; for a sized source it's ignored (the engine already knows the end).
+ */
+export interface JsReadResult {
+  data: Uint8Array
+  eof: boolean
+}
+
 /**
  * Build a [`Cursor`] from a JS source object:
- *   - `size: number` total source size in bytes
- *   - `read(args): Promise<Uint8Array>` (`args.offset`, `args.length`); resolved
- *     `.byteLength` is the actual count read, `<= length`
+ *   - `size?: number` total source size in bytes; omit for a forward source
+ *     whose end is discovered from `read`'s `eof`
+ *   - `read(args): Promise<ReadResult>` (`args.offset`, `args.length`); resolves
+ *     to `{ data, eof }` where `data.byteLength` is the actual count read
+ *     (`<= length`) and `eof` marks end-of-stream
  *   - `chunkBytes: number` read granularity (whole, multiple of 64)
  *   - `indexCacheEntries?: number` structural-index cache slot budget (0 disables; default 1024)
  *   - `objectMemberCap?: number` max tabled members per object (0 disables; default unbounded)
  *   - `arrayIndexInterval?: number` element stride between array members (0 disables; default 16)
  */
-export declare function open(source: { size: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<Uint8Array> }): Cursor
+export declare function open(source: { size?: number; chunkBytes: number; indexCacheEntries?: number; objectMemberCap?: number; arrayIndexInterval?: number; read: (args: ReadArgs) => Promise<ReadResult> }): Cursor
 
 export type PathFaultCode =  'through_scalar'|
 'scalar_target'|
 'wrong_kind';
-
-/** Arguments passed to the JS `read(args)` callback. */
-export interface ReadArgs {
-  offset: number
-  length: number
-}
 
 export type SourceFaultCode =  'source_io';
