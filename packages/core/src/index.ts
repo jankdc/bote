@@ -20,22 +20,23 @@ export { formatPath, type Path, type Segment } from './path.ts';
 export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type IterKey } from './cursor.ts';
 
 export {
-  fromFile,
-  fromBuffer,
-  fromReadable,
-  fromHttpRange,
-  fromHttpStream,
   type Source,
   type Reader,
   type ReadResult,
   type ForwardSource,
   type FactoryOptions,
   type SeekableSource,
-  type HttpRangeOptions,
+} from './source/base.ts';
+
+export { fromFile, fromBuffer, fromHttpRange, type HttpRangeOptions } from './source/seekable.ts';
+
+export {
+  fromReadable,
+  fromHttpRequest,
   type ReadableOptions,
   type ReadableProducer,
-  type HttpStreamOptions,
-} from './sources.ts';
+  type HttpRequestOptions,
+} from './source/forward.ts';
 
 export { type IterStream } from './stream.ts';
 
