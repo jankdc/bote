@@ -16,7 +16,7 @@
     "bench": "npm run bench -w @botejs/bench",
     "lint": "npm run lint --workspaces --if-present",
     "format": "prettier . -w && cargo fmt",
-    "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/bench/tsconfig.json && tsc --noEmit -p packages/native/tsconfig.json",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "changeset": "changeset",
     "release": "changeset publish",
     "prepare": "husky",

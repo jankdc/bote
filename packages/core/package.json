@@ -31,6 +31,7 @@
     "build": "tsc",
     "build:debug": "tsc --sourceMap",
     "test": "node --test __test__/*.spec.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p __test__/tsconfig.json",
     "lint": "oxlint src",
     "prepublishOnly": "cp ../../README.md ./README.md && tsc"
   },

@@ -138,11 +138,10 @@ test('get_path_error_carries_machine_code', async (t) => {
 test('get_rejects_fractional_negative_nan_and_non_string_number_segments', async (t) => {
   const cursor = await open(memorySource(enc('{"xs":[1,2,3]}')));
   t.after(() => cursor.close());
-  // @ts-expect-error fractional index is not a valid segment
+  // A fractional, negative, or NaN index types as a plain `number`, so only the
+  // runtime rejects it; `null` below is also a compile error, hence its directive.
   await assert.rejects(() => cursor.get('xs', 1.5), TypeError);
-  // @ts-expect-error negative index is not a valid segment
   await assert.rejects(() => cursor.get('xs', -1), TypeError);
-  // @ts-expect-error NaN is not a valid segment
   await assert.rejects(() => cursor.get('xs', Number.NaN), TypeError);
   // @ts-expect-error a non-string/non-number segment is rejected
   await assert.rejects(() => cursor.get('xs', null), TypeError);
@@ -178,10 +177,9 @@ test('has_resolves_value_like_get', async () => {
 test('iter_select_rejects_bad_sub_path_segments', async (t) => {
   const cursor = await open(memorySource(enc('{"xs":[{"a":1}]}')));
   t.after(() => cursor.close());
-  // Sub-path validation runs at .iter() construction (synchronous), so the
-  // throw lands before any iteration starts.
-  // @ts-expect-error fractional segment is rejected
+  // Sub-path validation runs at .iter() construction (synchronous), so the throw
+  // lands before any iteration starts. A fractional or negative index types as
+  // `number`, so the rejection here is purely a runtime guard.
   assert.throws(() => cursor.iter('xs', { select: ['a', 1.5] }), TypeError);
-  // @ts-expect-error sub-path in a map is also validated
   assert.throws(() => cursor.iter('xs', { select: { a: [-1] } }), TypeError);
 });
