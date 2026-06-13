@@ -3,7 +3,7 @@ import { open as fsOpen } from 'node:fs/promises';
 /**
  * A handle on an opened seekable byte stream. The reader owns whatever
  * resources back the stream (a file handle, an `AbortController`, etc.) and
- * surfaces them through `close()`. Constructed by `Source.open()`; never by
+ * surfaces them through `close()`. Constructed by `SeekableSource.open()`; never by
  * library callers directly.
  */
 export interface SourceReader {
@@ -22,10 +22,15 @@ export interface SourceReader {
 }
 
 /**
- * Describes how to obtain a seekable byte stream. Provide your own object implementing
- * this interface to plug in custom backends.
+ * Describes how to obtain a seekable byte stream: one whose reader accepts
+ * `read(offset, length)` at any offset, in any order. This random access is
+ * what lets the structural-index cache resume scans near a target. Provide your
+ * own object implementing this interface to plug in custom backends.
+ *
+ * Forward-only inputs (e.g. a `fetch` body that cannot rewind) would be modelled
+ * by a separate `ForwardSource`, not this one.
  */
-export interface Source {
+export interface SeekableSource {
   /** Acquire the stream. Resolves to a `SourceReader` that owns any underlying resources. */
   open(): Promise<SourceReader>;
 }
@@ -49,7 +54,7 @@ const DEFAULT_FILE_CHUNK_BYTES = 64 * 1024;
 /** Default chunk size, in bytes, for HTTP range reads: amortizes RTT across more data. */
 const DEFAULT_URL_CHUNK_BYTES = 256 * 1024;
 
-export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptions): Source {
+export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptions): SeekableSource {
   const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   const chunkBytes = options?.chunkBytes ?? DEFAULT_BUFFER_CHUNK_BYTES;
   return {
@@ -62,7 +67,7 @@ export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptio
   };
 }
 
-export function fromFile(path: string, options?: FactoryOptions): Source {
+export function fromFile(path: string, options?: FactoryOptions): SeekableSource {
   const chunkBytes = options?.chunkBytes ?? DEFAULT_FILE_CHUNK_BYTES;
   return {
     open: async () => {
@@ -96,7 +101,7 @@ export function fromFile(path: string, options?: FactoryOptions): Source {
   };
 }
 
-export function fromHttpRange(url: string, options?: HttpRangeOptions): Source {
+export function fromHttpRange(url: string, options?: HttpRangeOptions): SeekableSource {
   const init = options?.init;
   const chunkBytes = options?.chunkBytes ?? DEFAULT_URL_CHUNK_BYTES;
   return {

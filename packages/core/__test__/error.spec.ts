@@ -12,12 +12,12 @@ import {
   MalformedJsonError,
   SourceReadError,
   ClosedCursorError,
-  type Source,
+  type SeekableSource,
   type StandardSchemaV1,
 } from '../src/index.ts';
 
 /** A source whose every `read` rejects, to drive the I/O fault path. */
-function failingSource(message: string): Source {
+function failingSource(message: string): SeekableSource {
   return {
     open: () => Promise.resolve({ size: 64, read: () => Promise.reject(new Error(message)) }),
   };

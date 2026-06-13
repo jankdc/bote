@@ -2,8 +2,8 @@
 //! ranges via `read(offset, length)`.
 //!
 //! `ByteStream` corresponds to the TS `SourceReader` (the live stream), not the
-//! TS `Source` (a factory that `open()`s a reader). The facade opens its
-//! `Source`, then hands the resulting reader to `open()` as a `JsByteStream`.
+//! TS `SeekableSource` (a factory that `open()`s a reader). The facade opens its
+//! `SeekableSource`, then hands the resulting reader to `open()` as a `JsByteStream`.
 
 use async_trait::async_trait;
 use bytes::Bytes;

@@ -129,7 +129,7 @@ the defaults are good, but `open` takes a few knobs: `indexCacheEntries`, `objec
 
 ## sources
 
-bote ships `fromFile`, `fromHttpRange`, and `fromBuffer` as pre-built sources. create your own by implementing the `Source` interface. see [`sources-custom.ts`](./examples/sources-custom.ts) or [./packages/core/src/sources.ts](./packages/core/src/sources.ts) for how it works.
+bote ships `fromFile`, `fromHttpRange`, and `fromBuffer` as pre-built sources. create your own by implementing the `SeekableSource` interface. see [`sources-custom.ts`](./examples/sources-custom.ts) or [./packages/core/src/sources.ts](./packages/core/src/sources.ts) for how it works.
 
 ## status
 

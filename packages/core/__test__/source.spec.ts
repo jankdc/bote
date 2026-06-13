@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { open, fromBuffer, fromFile, fromHttpRange, type Source } from '../src/index.ts';
+import { open, fromBuffer, fromFile, fromHttpRange, type SeekableSource } from '../src/index.ts';
 import { DOC, enc } from './fixtures.ts';
 
 /** Replace `globalThis.fetch` for the duration of a test; returns a restore fn. */
@@ -40,7 +40,7 @@ test('source_from_file_reads_from_disk', async (t) => {
 
 test('source_open_is_deferred_until_open_call', async () => {
   let opened = 0;
-  const source: Source = {
+  const source: SeekableSource = {
     open: () => {
       opened += 1;
       const data = enc(DOC);
@@ -50,7 +50,7 @@ test('source_open_is_deferred_until_open_call', async () => {
       });
     },
   };
-  assert.equal(opened, 0, 'constructing a Source must not trigger open()');
+  assert.equal(opened, 0, 'constructing a SeekableSource must not trigger open()');
   const cursor = await open(source);
   assert.equal(opened, 1);
   await cursor.close();
@@ -69,7 +69,7 @@ test('source_rejects_chunk_bytes_not_multiple_of_64', async () => {
 });
 
 test('source_rejects_invalid_size_in_facade', async () => {
-  const withSize = (size: number): Source => ({
+  const withSize = (size: number): SeekableSource => ({
     open: () => Promise.resolve({ size, read: () => Promise.resolve(new Uint8Array()) }),
   });
   await assert.rejects(() => open(withSize(Number.NaN)), /source size must be a non-negative integer, got NaN/);
@@ -159,7 +159,7 @@ test('source_zero_byte_read_errors_instead_of_hanging', async () => {
   // contract violation, not EOF. The scan must surface it rather than re-faulting
   // the same offset forever. The timeout race turns a regression (hang) into a
   // failure instead of stalling the suite.
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: 1024, // declares bytes that read() never delivers
@@ -174,7 +174,7 @@ test('source_zero_byte_read_errors_instead_of_hanging', async () => {
 
 test('lifecycle_close_drives_reader_close_exactly_once', async () => {
   let closeCalls = 0;
-  const source: Source = {
+  const source: SeekableSource = {
     open: () => {
       const data = enc(DOC);
       return Promise.resolve({
@@ -214,7 +214,7 @@ test('lifecycle_use_after_close_throws_uniformly', async () => {
 
 test('lifecycle_await_using_disposes_reader_at_scope_exit', async () => {
   let closeCalls = 0;
-  const source: Source = {
+  const source: SeekableSource = {
     open: () => {
       const data = enc(DOC);
       return Promise.resolve({
@@ -241,7 +241,7 @@ test('lifecycle_open_failure_still_closes_reader', async () => {
   // still drive the reader's `close()` when validation fails after
   // `source.open()` has succeeded - otherwise a failed open leaks a file handle.
   let closeCalls = 0;
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: Number.NaN,
@@ -259,7 +259,7 @@ test('lifecycle_cleanup_failure_does_not_mask_open_error', async () => {
   // openNative rejects (size: NaN) AND reader.close() also throws. The caller
   // must still see the original open failure, not the cleanup error - the close
   // failure rides along as `.cause`.
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: Number.NaN,

@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { open, type Source } from '../src/index.ts';
+import { open, type SeekableSource } from '../src/index.ts';
 import { memorySource, enc, bigObject } from './fixtures.ts';
 
-/** A `Source` that counts `read` calls, so the cache's effect on chunk faulting
+/** A `SeekableSource` that counts `read` calls, so the cache's effect on chunk faulting
  *  is observable from the facade (the only public signal - there is no
  *  `cacheStats()`). `reads.n` is the live count; assign 0 to reset it. */
-function countingSource(data: Uint8Array, chunkBytes: number): { source: Source; reads: { n: number } } {
+function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: data.length,
@@ -39,7 +39,7 @@ function flatArrayDoc(n: number): Uint8Array {
 test('reads_are_chunk_aligned_and_coalesce_into_multi_chunk_bursts', async () => {
   const data = enc('[' + Array.from({ length: 200 }, () => '1').join(',') + ']');
   const reads: Array<{ offset: number; length: number }> = [];
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: data.length,

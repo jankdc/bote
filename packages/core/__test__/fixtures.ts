@@ -1,6 +1,6 @@
-import { fromBuffer, type Source } from '../src/index.ts';
+import { fromBuffer, type SeekableSource } from '../src/index.ts';
 
-export function memorySource(data: Uint8Array, chunkBytes?: number): Source {
+export function memorySource(data: Uint8Array, chunkBytes?: number): SeekableSource {
   return fromBuffer(data, chunkBytes === undefined ? undefined : { chunkBytes });
 }
 
