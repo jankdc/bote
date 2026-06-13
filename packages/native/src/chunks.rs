@@ -15,6 +15,8 @@ use crate::source::{ByteStream, SourceError};
 pub struct ChunkMiss(pub u64);
 
 pub struct ChunkWindow {
+  #[cfg(test)]
+  peak_len: usize,
   chunk_bytes: u64,
   source_size: u64,
   chunks: HashMap<u64, Bytes>,
@@ -23,6 +25,8 @@ pub struct ChunkWindow {
 impl ChunkWindow {
   pub fn new(chunk_bytes: u64, source_size: u64) -> Self {
     Self {
+      #[cfg(test)]
+      peak_len: 0,
       chunk_bytes,
       source_size,
       chunks: HashMap::new(),
@@ -48,6 +52,10 @@ impl ChunkWindow {
 
   pub fn insert(&mut self, chunk_start: u64, bytes: Bytes) {
     self.chunks.insert(chunk_start, bytes);
+    #[cfg(test)]
+    {
+      self.peak_len = self.peak_len.max(self.chunks.len());
+    }
   }
 
   /// Drop every chunk below the one containing `min_reachable`. Forward-only
@@ -84,6 +92,13 @@ impl ChunkWindow {
       .get(&chunk_start)
       .map(|b| &b[..])
       .ok_or(ChunkMiss(chunk_start))
+  }
+
+  /// Highest `len()` ever reached, including the transient peak mid-fault before
+  /// a prune. Lets tests catch a burst that balloons the window past one burst.
+  #[cfg(test)]
+  pub fn peak_len(&self) -> usize {
+    self.peak_len
   }
 }
 

@@ -270,7 +270,7 @@ impl Session {
     }
   }
 
-  /// Resolve `path` to a full `[start, end)` byte range.
+  /// Resolve `path` to a full `[start, end)` byte range, with structural index caching.
   pub(crate) async fn run_resolve(
     &self,
     path: &[Segment],
@@ -302,6 +302,31 @@ impl Session {
     if let Some(kind) = kind {
       self.store_close(base_depth, anchor_start, path, kind, start, end);
     }
+    Ok(Some(ValueLocation { start, end }))
+  }
+
+  /// Resolve `path` to a full `[start, end)` byte range, without caching.
+  pub(crate) async fn run_resolve_direct(
+    &self,
+    path: &[Segment],
+    anchor_start: u64,
+    window: &mut ChunkWindow,
+  ) -> Result<Option<ValueLocation>, SessionError> {
+    let mut state = ResolveState::resume(anchor_start, 0, None, false, 0);
+    let min_reachable = AtomicU64::new(anchor_start);
+    let resolved = self
+      .drive(window, &min_reachable, doubling_burst(), |walker| {
+        let r = resolve::resolve_step(walker, path, &mut state);
+        min_reachable.store(state.min_reachable(), Ordering::Relaxed);
+        r
+      })
+      .await?;
+    let start = match resolved {
+      Resolved::Found(start) => start,
+      Resolved::Absent => return Ok(None),
+      Resolved::NotNavigable(fault) => return Err(SessionError::Path(fault)),
+    };
+    let end = self.skip_value_at(start, window).await?;
     Ok(Some(ValueLocation { start, end }))
   }
 
@@ -417,14 +442,6 @@ impl Session {
       .with_cache(|c| c.store_exhausted(base_depth, anchor, path, kind, value_start, count, close));
   }
 
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
-  /// learned it - lets a repeat `count` skip the scan.
-  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
-    self
-      .with_cache(|c| c.get(anchor, path)?.child_count())
-      .flatten()
-  }
-
   /// Record an array resume-point member `(index, offset)` so a later random
   /// index resumes near where `iter` stopped.
   pub(crate) fn store_array_resume_point(
@@ -439,6 +456,44 @@ impl Session {
     self.with_cache(|c| {
       c.merge_array_scan(base_depth, anchor, path, value_start, &[(index, offset)])
     });
+  }
+
+  /// Merge `iter`-sampled array landmarks `(index, offset)` into the array node
+  /// in one batched write (`merge_array` sorts the node's whole set, so feeding
+  /// it per element is quadratic). Members cost no cache slots - `arrayIndexInterval`
+  /// already bounds them per node.
+  pub(crate) fn store_array_landmarks(
+    &self,
+    base_depth: u32,
+    anchor: u64,
+    path: &[Segment],
+    value_start: u64,
+    members: &[(usize, u64)],
+  ) {
+    if members.is_empty() {
+      return;
+    }
+    self.with_cache(|c| c.merge_array_scan(base_depth, anchor, path, value_start, members));
+  }
+
+  /// Stride for `iter`-time array-landmark sampling, or `0` when array indexing
+  /// is off (cache disabled or `arrayIndexInterval == 0`). Mirrors the absolute
+  /// grid resolve-time sampling uses, so landmarks from a scan and an iteration
+  /// of the same array align on the same indices.
+  pub(crate) fn array_landmark_sampling_interval(&self) -> usize {
+    if self.cache_enabled {
+      self.array_interval
+    } else {
+      0
+    }
+  }
+
+  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
+  /// learned it - lets a repeat `count` skip the scan.
+  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
+    self
+      .with_cache(|c| c.get(anchor, path)?.child_count())
+      .flatten()
   }
 
   /// Run `f` against the cache under the lock, skipping when caching is off. The
@@ -472,8 +527,9 @@ pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
 
 impl Session {
   /// The shared chunk-fault retry loop: build a fresh [`Walker`] over the
-  /// window, run a sync `step`, and on `ChunkMiss(off)` read a burst (sized by
-  /// `burst_for`) into the window, drop everything below `min_reachable`, retry.
+  /// window, run a sync `step`, and on `ChunkMiss(off)` drop everything below
+  /// `min_reachable`, then read a burst (sized by `burst_for`) into the window
+  /// and retry.
   ///
   /// `min_reachable` is the lowest offset the step might still read; the step
   /// advances it as it commits forward progress. Dropping below it keeps the
@@ -494,11 +550,11 @@ impl Session {
       match outcome {
         Ok(v) => return Ok(v),
         Err(TraverseError::Pending(ChunkMiss(off))) => {
+          window.drop_below(min_reachable.load(Ordering::Relaxed));
           let n = burst_for(off);
           for (o, b) in self.reader.read_chunks(off, n).await? {
             window.insert(o, b);
           }
-          window.drop_below(min_reachable.load(Ordering::Relaxed));
         }
         Err(e) => return Err(e.into()),
       }
@@ -966,5 +1022,52 @@ mod tests {
       );
     }
     assert!(seen > 1000, "scanned {seen} elements");
+  }
+
+  #[tokio::test]
+  async fn window_peak_stays_within_one_burst_during_scan() {
+    // 4 MiB flat array, 4 KiB chunks => ~1000 chunks, enough faults for the
+    // doubling burst to reach and hold MAX_BURST.
+    let mut doc = String::from("{\"items\":[");
+    let mut i = 0;
+    while doc.len() < 4 * 1024 * 1024 {
+      if i > 0 {
+        doc.push(',');
+      }
+      doc.push_str(&format!("{{\"n\":{i}}}"));
+      i += 1;
+    }
+    doc.push_str("]}");
+    let source: Arc<dyn ByteStream> = Arc::new(InMemoryStream::new(doc.into_bytes()));
+    let session = Session::new(
+      source,
+      4096,
+      DEFAULT_INDEX_CACHE_ENTRIES,
+      DEFAULT_OBJECT_MEMBER_CAP,
+      DEFAULT_ARRAY_INDEX_INTERVAL,
+    )
+    .unwrap();
+
+    let mut window = session.new_window();
+    let items = session
+      .run_locate(&[Segment::Member("items".into())], 0, 0, &mut window)
+      .await
+      .unwrap()
+      .expect("items resolves");
+    // Skip the whole array in one drive call: a single scan that faults many
+    // times, so the transient mid-fault peak is what `peak_len` records.
+    session.skip_value_at(items, &mut window).await.unwrap();
+
+    assert!(
+      window.peak_len() >= MAX_BURST as usize,
+      "burst never reached MAX_BURST (peak {}); fixture too small to be meaningful",
+      window.peak_len()
+    );
+    let bound = (MAX_BURST as usize) + 4; // one burst + small slack
+    assert!(
+      window.peak_len() <= bound,
+      "window peaked at {} chunks mid-fault (bound {bound}); prune-before-insert regressed",
+      window.peak_len()
+    );
   }
 }

@@ -23,7 +23,7 @@ export {
   fromBuffer,
   fromHttpRange,
   type FactoryOptions,
-  type Source,
+  type SeekableSource,
   type SourceReader,
   type HttpRangeOptions,
 } from './sources.ts';

@@ -28,7 +28,7 @@
 import { closeSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { fromBuffer, open, type Source, type SourceReader } from '@botejs/core';
+import { fromBuffer, open, type SeekableSource, type SourceReader } from '@botejs/core';
 
 import { arg, flag } from '#lib/cli.ts';
 import { buildArrayDoc } from '#lib/fixtures.ts';
@@ -57,9 +57,9 @@ const budgetNote = (): string =>
     ? '  (indexCacheEntries=native default)'
     : `  (indexCacheEntries=${indexCacheEntries})`;
 
-/** A `Source` that counts `read` calls so cache-driven fault reduction is
+/** A `SeekableSource` that counts `read` calls so cache-driven fault reduction is
  *  observable from the facade (there is no `cacheStats()`). */
-function countingSource(data: Uint8Array, chunkBytes: number): { source: Source; reads: { n: number } } {
+function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
   const reader: SourceReader = {
     size: data.length,

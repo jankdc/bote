@@ -1,7 +1,7 @@
 import { open as openNative, type Cursor as NativeCursor } from '@botejs/native';
 
 import { wrap, type CursorState, type RootCursor } from './cursor.ts';
-import type { Source, SourceReader } from './sources.ts';
+import type { SeekableSource, SourceReader } from './sources.ts';
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024;
 
@@ -35,7 +35,7 @@ export interface OpenOptions {
  * The returned `RootCursor` owns the reader: `close()` (or `await using`)
  * drives the reader's own `close()` exactly once.
  */
-export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
+export async function open(source: SeekableSource, options?: OpenOptions): Promise<RootCursor> {
   const { indexCacheEntries, objectMemberCap, arrayIndexInterval } = options ?? {};
   for (const [name, value] of [
     ['indexCacheEntries', indexCacheEntries],

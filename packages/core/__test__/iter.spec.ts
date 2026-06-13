@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { open, DEFAULT_ITER_BATCH, MAX_ITER_BATCH, PathError, type Source } from '../src/index.ts';
+import { open, DEFAULT_ITER_BATCH, MAX_ITER_BATCH, PathError, type SeekableSource } from '../src/index.ts';
 import { memorySource, enc, ORDERS } from './fixtures.ts';
 
-function countingSource(data: Uint8Array, chunkBytes: number): { source: Source; reads: { n: number } } {
+function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
-  const source: Source = {
+  const source: SeekableSource = {
     open: () =>
       Promise.resolve({
         size: data.length,
