@@ -38,7 +38,7 @@ console.log([...byStreet].sort((a, b) => b[1] - a[1]).slice(0, 10));
 // [[ 'UNKNOWN', 2843 ], [ 'MASON', 2651 ], [ 'PINE', 1799 ], ... ]
 ```
 
-Given a **seekable** source (e.g. a file, an HTTP range) and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
+Given a **seekable** source (e.g. a file, an HTTP range) or "forward-only" source (e.g. HTTP GET request) and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
 
 Here's a comparison of running above (using Apple M1 Pro 2021's `/usr/bin/time -l`):
 
