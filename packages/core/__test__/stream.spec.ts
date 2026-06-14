@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 
-import { open, fromReadable, fromHttpRequest, ForwardReplayError, SourceReadError } from '../src/index.ts';
+import { open, fromReadable, fromBuffer, fromHttpRequest, ForwardReplayError, SourceReadError } from '../src/index.ts';
 import { DOC, enc } from './fixtures.ts';
 
 /** A fresh web stream over `data`, emitted in small chunks so reads must reassemble. */
@@ -194,13 +194,34 @@ test('http_failed_status_rejects_open', async (t) => {
 test('open_rejects_cache_knobs_on_forward_source', async () => {
   await assert.rejects(
     () =>
-      // @ts-expect-error - cache knobs are not part of a forward source's options
       open(
+        // @ts-expect-error - a forward source's overload takes no cache-knob options
         fromReadable(() => webStreamOf(enc(DOC))),
         { objectMemberCap: 8 },
       ),
     /is not allowed for a forward source/,
   );
+});
+
+test('open_forward_overload_rejects_knobs_at_compile_time', () => {
+  async function _typeChecks() {
+    const forward = fromReadable(() => webStreamOf(enc(DOC)));
+    const seekable = fromBuffer(enc(DOC));
+
+    await open(forward); // forward overload takes no options
+
+    // @ts-expect-error - indexCacheEntries is not allowed for a forward source
+    await open(forward, { indexCacheEntries: 0 });
+
+    // @ts-expect-error - objectMemberCap is not allowed for a forward source
+    await open(forward, { objectMemberCap: 0 });
+
+    // @ts-expect-error - arrayIndexInterval is not allowed for a forward source
+    await open(forward, { arrayIndexInterval: 16 });
+
+    await open(seekable, { arrayIndexInterval: 16 }); // seekable accepts the knobs
+  }
+  assert.equal(typeof _typeChecks, 'function');
 });
 
 test('forward_producer_deferred_until_open', async () => {
