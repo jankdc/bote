@@ -1,6 +1,6 @@
 //! The `iter` streaming operation: a stateful, batch-filling stream over one
 //! container's children. Sits above [`Session`] in the operations layer
-//! alongside [`crate::count`] and [`crate::eval`].
+//! alongside [`crate::eval`].
 
 use crate::chunks::ChunkWindow;
 use crate::path::Segment;
