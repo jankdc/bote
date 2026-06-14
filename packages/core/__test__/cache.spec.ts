@@ -269,6 +269,18 @@ test('effect_warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => 
   assert.ok(warmReads < coldReads, `warm scattered revisit (${warmReads} reads) should be < cold (${coldReads})`);
 });
 
+test('effect_repeat_identical_hop_faults_zero_reads', async (t) => {
+  const data = enc('{"xs":[' + Array.from({ length: 300 }, (_, i) => `${i}`).join(',') + ']}');
+  const { source, reads } = countingSource(data, 256);
+  const cursor = await open(source);
+  t.after(() => cursor.close());
+  assert.ok(await cursor.hop('xs'));
+  assert.ok(reads.n > 0, 'the cold hop must read');
+  reads.n = 0;
+  assert.ok(await cursor.hop('xs'));
+  assert.equal(reads.n, 0, 'a repeat identical hop must be served from the cache with no reads');
+});
+
 test('knobs_open_rejects_invalid_cache_knobs', async () => {
   await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: -1 }), RangeError);
   await assert.rejects(() => open(memorySource(enc('{}')), { objectMemberCap: 1.5 }), RangeError);
