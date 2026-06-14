@@ -61,14 +61,6 @@ export interface Cursor {
   get<Sch extends StandardSchemaV1>(...args: [...Segment[], Sch]): Promise<InferOutput<Sch>>;
 
   /**
-   * Count the members of the array or object at `path`.
-   *
-   * @example
-   * const total = await root.count('users');
-   */
-  count(...path: Segment[]): Promise<number>;
-
-  /**
    * Stream the members of the array or object at `path` as an async iterable.
    * A trailing Standard Schema validates each item; a trailing {@link IterOptions}
    * object tunes the iteration (see its fields for the available knobs).
@@ -144,11 +136,6 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
         return value;
       }
       return runStandardSchema(schema, value, path);
-    },
-    async count(...path: Segment[]): Promise<number> {
-      ensureOpen(state);
-      validatePath(path);
-      return withPath(path, () => native.count(path));
     },
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): IterStream<unknown> {
       ensureOpen(state);

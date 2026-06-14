@@ -236,13 +236,6 @@ const scenarios: Scenario[] = [
     target: (c) => c.get('items', ARRAY_ITEMS - 1, 'name'),
   },
   {
-    name: 'repeated count (full hit)',
-    doc: arrayDoc,
-    chunkBytes: CHUNK,
-    warm: (c) => c.count('items'),
-    target: (c) => c.count('items'),
-  },
-  {
     name: 'detail view: get + object iter + iter (combined)',
     doc: recDoc,
     chunkBytes: CHUNK,

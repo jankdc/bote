@@ -93,7 +93,7 @@ test('error_use_after_close_throws_ClosedCursorError', async () => {
 });
 
 test('error_native_faults_are_typed_across_every_entry_point', async (t) => {
-  // A reader that fails identically for get/has/count/hop/iter, so each surfaces
+  // A reader that fails identically for get/has/hop/iter, so each surfaces
   // the same typed SourceReadError rather than a bare Error.
   const cursor = await open(failingSource('io down'));
   t.after(() => cursor.close());
@@ -101,7 +101,6 @@ test('error_native_faults_are_typed_across_every_entry_point', async (t) => {
   for (const op of [
     () => cursor.get('a'),
     () => cursor.has('a'),
-    () => cursor.count('a'),
     () => cursor.hop('a'),
     async () => {
       for await (const _ of cursor.iter('a')) {

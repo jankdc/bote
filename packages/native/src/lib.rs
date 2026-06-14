@@ -16,7 +16,6 @@ mod select;
 mod cache;
 mod session;
 
-mod count;
 mod eval;
 mod stream;
 

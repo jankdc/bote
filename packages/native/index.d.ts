@@ -3,7 +3,6 @@
 export declare class Cursor {
   has(path: Array<string | number>): Promise<boolean>
   get(path: Array<string | number>): Promise<string | undefined>
-  count(path: Array<string | number>): Promise<number>
   iter(path: Array<string | number>, options: IterArgs): CursorIter
   hop(path: Array<string | number>): Promise<Cursor | null>
 }

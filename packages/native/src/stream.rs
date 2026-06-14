@@ -20,10 +20,8 @@ pub(crate) struct IterState {
   /// Document depth of `anchor_start`; children sit at `base_depth + path.len() + 1`.
   pub(crate) base_depth: u32,
   /// `value_start` of the base container, once resolved. Where the stream
-  /// records `close`/`child_count`/resume-point array members.
+  /// records `close`/resume-point array members.
   pub(crate) base_value_start: Option<u64>,
-  /// Children yielded so far - the child count once iteration runs to the end.
-  pub(crate) yielded: u64,
   /// At rest holds at most the chunk covering `next_offset` so the next yield's
   /// first read hits; everything else is pruned per yield, bounding resident
   /// chunks to ~1 between yields.
@@ -55,7 +53,6 @@ impl IterState {
       initialized: false,
       child_cursor: None,
       base_value_start: None,
-      yielded: 0,
       window: session.new_window(),
       select_ir,
       select: None,
@@ -112,7 +109,6 @@ impl IterState {
       path,
       child_cursor,
       base_value_start,
-      yielded,
       window,
       select,
       ..
@@ -138,16 +134,15 @@ impl IterState {
       let mut count = 0usize;
       loop {
         let Some(child) = session.next_child(cursor, window).await? else {
-          // Exhausted: the cursor sits AT the close. Record child count + close
-          // on the base node, keyed on the entered container kind.
+          // Exhausted: the cursor sits AT the close. Record the close offset on
+          // the base node, keyed on the entered container kind.
           if let Some(vs) = base_value_start {
-            session.store_exhausted(
+            session.store_close(
               base_depth,
               anchor_start,
               path,
               kind,
               vs,
-              *yielded,
               cursor.close_offset(),
             );
           }
@@ -160,7 +155,6 @@ impl IterState {
             String::from_utf8_unchecked(buf)
           })));
         };
-        *yielded += 1;
         // Render the key before materialize/prune: a member's raw span sits
         // behind the value, so its chunk is only guaranteed resident now.
         let key_json = if with_key {
