@@ -1,5 +1,12 @@
 # @botejs/core
 
+## 0.8.0
+
+### Minor Changes
+
+- 272420c: Breaking: Had to adjust OpenOptions to differentiate between
+  seekable options and forward-only options.
+
 ## 0.7.0
 
 ### Minor Changes
