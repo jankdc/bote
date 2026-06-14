@@ -7,21 +7,14 @@ npm install @botejs/core
 ```
 
 ```ts
-// node examples/citylots.js
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { open, fromFile } from '@botejs/core';
 
 // 181 MB GeoJSON:
 // { type: "...", features: [{ properties: { STREET: "..." }}] }
-const filePath = join(import.meta.dirname, 'citylots.json');
+const filePath = fileURLToPath(new URL('../citylots.json', import.meta.url));
 
 await using cursor = await open(fromFile(filePath));
-
-console.log(`type: ${await cursor.get('type')}`);
-// type: 'FeatureCollection'
-
-console.log(`features: ${await cursor.count('features')}`);
-// features: 206_560
 
 const byStreet = await cursor
   .iter('features', {
@@ -35,21 +28,34 @@ const byStreet = await cursor
   }, new Map());
 
 console.log([...byStreet].sort((a, b) => b[1] - a[1]).slice(0, 10));
-// [[ 'UNKNOWN', 2843 ], [ 'MASON', 2651 ], [ 'PINE', 1799 ], ... ]
 ```
 
-Given a **seekable** source (e.g. a file, an HTTP range) or "forward-only" source (e.g. HTTP GET request) and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
+Given a **seekable** or **forward** source and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
 
-Here's a comparison of running above (using Apple M1 Pro 2021's `/usr/bin/time -l`):
+Here's a run (Apple M1 Pro 2021, default settings, RUNS=100):
 
-| method             | mean time | mean peak footprint (MB) |
-| ------------------ | --------- | ------------------------ |
-| JSON.parse         | 0.81 s    | 647.0                    |
-| bote               | 1.062 s   | 89.0                     |
-| @streamparser/json | 4.363 s   | 98.7                     |
-| JSONStream         | 4.417 s   | 60.7                     |
-| oboe.js            | 9.649 s   | 102.6                    |
-| stream-json        | 18.693 s  | 184.3                    |
+| method             | mean time (seconds) | mean peak footprint (MB) |
+| ------------------ | -----------------   | ------------------------ |
+| bote               | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
+| JSON.parse         | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
+| JSONStream         | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
+| @streamparser/json | 5.103 ± 0.084 s     | 47.9 ± 2.3               |
+| oboe.js            | 8.566 ± 0.295 s     | 100.0 ± 4.6              |
+| stream-json        | 13.346 ± 0.569 s    | 207.6 ± 8.4              |
+
+For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
+
+## Features
+
+* Modern `AsyncIterator` API with helpers that emulate the [tc39 ones](https://github.com/tc39/proposal-async-iterator-helpers)
+* Validate with [Standard Schema](https://standardschema.dev/), avoiding those pesky `unknown`s
+* Supports multiple sources of data (e.g. file, network, stream) or write a custom one (see [example](./examples/))
+* For forward-only sources, there's support for replaying/buffering, allowing navigation to previous values
+
+## Documentation
+
+Coming soon. Check the [./examples](./examples/) folder for usages. I've also heavily JSDoc'ed the hell out of the API so have fun
+playing around with it for now.
 
 ## Status
 
