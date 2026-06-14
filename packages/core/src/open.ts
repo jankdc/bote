@@ -5,7 +5,7 @@ import type { Source, Reader, SeekableSource, ForwardSource } from './source/bas
 
 export const DEFAULT_SOURCE_CHUNK_BYTES = 64 * 1024;
 
-export interface OpenOptions {
+export interface SeekableOpenOptions {
   /**
    * How much of the index that speeds up repeat lookups to keep in memory,
    * measured in entries. Higher means faster repeat queries but more memory;
@@ -32,13 +32,6 @@ export interface OpenOptions {
 const CACHE_KNOBS = ['indexCacheEntries', 'objectMemberCap', 'arrayIndexInterval'] as const;
 
 /**
- * Options for a forward source: every cache knob is forbidden (the structural-index
- * cache is forced off). `Omit` would collapse to `{}` and silently permit them, so
- * the knobs are mapped to `never` to reject them at compile time.
- */
-export type ForwardOpenOptions = { [K in keyof OpenOptions]?: never };
-
-/**
  * Open a cursor over a source.
  *
  * A seekable source (`fromFile`/`fromBuffer`/`fromHttpRange`) supports the cache
@@ -49,9 +42,9 @@ export type ForwardOpenOptions = { [K in keyof OpenOptions]?: never };
  * The returned `RootCursor` owns the reader: `close()` (or `await using`) drives
  * the reader's own `close()` exactly once.
  */
-export function open(source: SeekableSource, options?: OpenOptions): Promise<RootCursor>;
-export function open(source: ForwardSource, options?: ForwardOpenOptions): Promise<RootCursor>;
-export async function open(source: Source, options?: OpenOptions): Promise<RootCursor> {
+export function open(source: SeekableSource, options?: SeekableOpenOptions): Promise<RootCursor>;
+export function open(source: ForwardSource): Promise<RootCursor>;
+export async function open(source: Source, options?: SeekableOpenOptions): Promise<RootCursor> {
   if (!source.seekable) {
     for (const name of CACHE_KNOBS) {
       if (options?.[name] !== undefined) {

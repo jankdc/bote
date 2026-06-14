@@ -40,4 +40,4 @@ export {
 
 export { type IterStream } from './stream.ts';
 
-export { open, type OpenOptions, type ForwardOpenOptions } from './open.ts';
+export { open, type SeekableOpenOptions } from './open.ts';
