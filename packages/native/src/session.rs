@@ -167,8 +167,8 @@ impl Session {
   }
 }
 
-/// Container-stepping seams for the operations layer (`stream`, `eval`,
-/// `count`). Each takes a caller-owned window: streaming callers prune it to
+/// Container-stepping seams for the operations layer (`stream`, `eval`).
+/// Each takes a caller-owned window: streaming callers prune it to
 /// the scan frontier between yields via [`Session::prune_window`]; one-shot
 /// callers use a transient window dropped on return.
 impl Session {
@@ -224,7 +224,7 @@ impl Session {
   /// start offset (no extent walk).
   ///
   /// Memoization seam: every path resolution flows through here (or its wrapper
-  /// `run_resolve`) - `get`/`has`/`count`/`iter`/`select` all route in. So the
+  /// `run_resolve`) - `get`/`has`/`iter`/`select` all route in. So the
   /// structural-index cache lives here: cached container hops start the scan as
   /// deep as possible (an all-hit returns the offset faulting no chunks), the
   /// first uncached level resumes from the deepest array member, and the scan's
@@ -402,8 +402,8 @@ impl Session {
 }
 
 /// Structural-index cache accessors (table logic itself lives in `cache.rs`).
-/// Each is a no-op when caching is disabled. Called from `count.rs` /
-/// `stream.rs` as scans learn child counts, closes, and array members.
+/// Each is a no-op when caching is disabled. Called from `stream.rs` as scans
+/// learn closes and array members.
 impl Session {
   /// Record the close offset (`}`/`]` + 1) of the container at `(anchor, path)`.
   pub(crate) fn store_close(
@@ -416,35 +416,6 @@ impl Session {
     close: u64,
   ) {
     self.with_cache(|c| c.store_close(base_depth, anchor, path, kind, value_start, close));
-  }
-
-  pub(crate) fn store_child_count(
-    &self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-  ) {
-    self.with_cache(|c| c.store_child_count(base_depth, anchor, path, kind, value_start, count));
-  }
-
-  /// Record a fully-scanned container's child count and close offset in one
-  /// cache write.
-  #[allow(clippy::too_many_arguments)]
-  pub(crate) fn store_exhausted(
-    &self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-    close: u64,
-  ) {
-    self
-      .with_cache(|c| c.store_exhausted(base_depth, anchor, path, kind, value_start, count, close));
   }
 
   /// Record an array resume-point member `(index, offset)` so a later random
@@ -493,14 +464,6 @@ impl Session {
     }
   }
 
-  /// Cached child count for `(anchor, path)` if a prior `count`/`iter`
-  /// learned it - lets a repeat `count` skip the scan.
-  pub(crate) fn cached_child_count(&self, anchor: u64, path: &[Segment]) -> Option<u64> {
-    self
-      .with_cache(|c| c.get(anchor, path)?.child_count())
-      .flatten()
-  }
-
   /// Run `f` against the cache under the lock, skipping when caching is off. The
   /// lock is never held across an `.await`.
   fn with_cache<R>(&self, f: impl FnOnce(&mut StructuralIndex) -> R) -> Option<R> {
@@ -519,7 +482,7 @@ impl Session {
 pub(crate) const MAX_BURST: u64 = 256;
 
 /// Adaptive doubling burst for drivers that don't know the value's extent up
-/// front (`run_locate`, `skip_value_at`, `next_child`, `count::children`).
+/// front (`run_locate`, `skip_value_at`, `next_child`).
 /// Stateful; use one per `Session::drive`.
 pub(crate) fn doubling_burst() -> impl FnMut(u64) -> u64 {
   let mut n = 1u64;
@@ -827,29 +790,6 @@ mod tests {
     );
   }
 
-  #[tokio::test]
-  async fn cache_repeat_count_issues_no_reads() {
-    let (s, reads) = counting_session(
-      big_array_doc(),
-      256,
-      DEFAULT_INDEX_CACHE_ENTRIES,
-      DEFAULT_OBJECT_MEMBER_CAP,
-      DEFAULT_ARRAY_INDEX_INTERVAL,
-    );
-    let path = [member("arr")];
-    let first = crate::count::at(&s, &path, 0, 0).await.unwrap();
-    assert_eq!(first, 100);
-    assert!(reads.load(Ordering::Relaxed) > 0, "cold count must read");
-    reads.store(0, Ordering::Relaxed);
-    let second = crate::count::at(&s, &path, 0, 0).await.unwrap();
-    assert_eq!(second, 100);
-    assert_eq!(
-      reads.load(Ordering::Relaxed),
-      0,
-      "a repeat count must be served from the cache with no reads"
-    );
-  }
-
   /// Pins the mechanism - which nodes and members a scan tables - complementing
   /// the read-count tests that prove the resulting benefit.
   #[tokio::test]
@@ -941,24 +881,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn cache_state_count_records_child_count() {
-    let (s, _reads) = counting_session(
-      big_array_doc(),
-      256,
-      DEFAULT_INDEX_CACHE_ENTRIES,
-      DEFAULT_OBJECT_MEMBER_CAP,
-      DEFAULT_ARRAY_INDEX_INTERVAL,
-    );
-    let arr = [member("arr")];
-    assert_eq!(crate::count::at(&s, &arr, 0, 0).await.unwrap(), 100);
-    assert_eq!(
-      s.cache.lock().unwrap().get(0, &arr).unwrap().child_count(),
-      Some(100),
-      "count must record the child count on the node"
-    );
-  }
-
-  #[tokio::test]
   async fn cache_disabled_still_resolves() {
     // budget 0 => no caching; results must still resolve.
     let (s, _reads) = counting_session(
@@ -972,11 +894,6 @@ mod tests {
     let path = [member("a"), member("b"), member("d")];
     let mut w = s.new_window();
     assert!(s.run_locate(&path, 0, 0, &mut w).await.unwrap().is_some());
-    // Repeat count is not short-circuited when disabled.
-    let n = crate::count::at(&s, &[member("a"), member("b")], 0, 0)
-      .await
-      .unwrap();
-    assert_eq!(n, 202);
     assert!(s.cache.lock().unwrap().get(0, &path).is_none());
   }
 

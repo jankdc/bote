@@ -219,7 +219,6 @@ test('lifecycle_use_after_close_throws_uniformly', async () => {
 
   await assert.rejects(() => cursor.get('users', 0, 'name'), /cursor is closed/);
   await assert.rejects(() => cursor.has('users'), /cursor is closed/);
-  await assert.rejects(() => cursor.count('users'), /cursor is closed/);
   await assert.rejects(() => cursor.hop('users'), /cursor is closed/);
   assert.throws(() => cursor.iter('users'), /cursor is closed/);
   // The escaped sub-cursor is invalidated by the root's close too.

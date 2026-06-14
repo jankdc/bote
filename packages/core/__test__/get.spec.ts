@@ -95,7 +95,7 @@ test('get_missing_returns_undefined_distinct_from_json_null', async () => {
 test('has_wrong_segment_kind_is_false_not_error', async (t) => {
   // Member-name against an array, or numeric index against an object: `has` is
   // the total presence predicate, so a shape-contradicting path is `false`, not
-  // a PathError (unlike get/count/hop/iter, which throw - see below).
+  // a PathError (unlike get/hop/iter, which throw - see below).
   const cursor = await open(memorySource(enc('{"xs":[10,20],"obj":{"k":"v"}}')));
   t.after(() => cursor.close());
   assert.equal(await cursor.has('xs', 'name'), false);

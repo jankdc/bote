@@ -166,9 +166,6 @@ test('transparency_small_index_cache_budget_stays_identical_under_constant_evict
     assert.equal(await tiny.get('rows', i, 'v'), i * 2);
     assert.equal(await tiny.get('rows', i, 'missing'), undefined);
   }
-  assert.equal(await tiny.count('rows'), n);
-  assert.equal(await dflt.count('rows'), n);
-  assert.equal(await off.count('rows'), n);
 });
 
 test('transparency_capped_object_members_resolve_past_the_cap_boundary', async (t) => {
@@ -187,7 +184,6 @@ test('transparency_disabled_cache_is_correct', async (t) => {
   assert.equal(await cursor.get('c'), 3);
   assert.equal(await cursor.get('a'), 1);
   assert.equal(await cursor.get('missing'), undefined);
-  assert.equal(await cursor.count(), 3);
 });
 
 test('effect_warm_sibling_get_faults_fewer_reads_than_cold', async (t) => {
@@ -273,16 +269,16 @@ test('effect_warm_scattered_revisit_faults_fewer_reads_than_cold', async (t) => 
   assert.ok(warmReads < coldReads, `warm scattered revisit (${warmReads} reads) should be < cold (${coldReads})`);
 });
 
-test('effect_repeat_count_issues_no_reads', async (t) => {
+test('effect_repeat_identical_hop_faults_zero_reads', async (t) => {
   const data = enc('{"xs":[' + Array.from({ length: 300 }, (_, i) => `${i}`).join(',') + ']}');
   const { source, reads } = countingSource(data, 256);
   const cursor = await open(source);
   t.after(() => cursor.close());
-  assert.equal(await cursor.count('xs'), 300);
-  assert.ok(reads.n > 0, 'the cold count must read');
+  assert.ok(await cursor.hop('xs'));
+  assert.ok(reads.n > 0, 'the cold hop must read');
   reads.n = 0;
-  assert.equal(await cursor.count('xs'), 300);
-  assert.equal(reads.n, 0, 'a repeat count must be served from the cache with no reads');
+  assert.ok(await cursor.hop('xs'));
+  assert.equal(reads.n, 0, 'a repeat identical hop must be served from the cache with no reads');
 });
 
 test('knobs_open_rejects_invalid_cache_knobs', async () => {

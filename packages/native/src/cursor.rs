@@ -80,19 +80,6 @@ impl Cursor {
       .map_err(map_err)
   }
 
-  #[napi(ts_args_type = "path: Array<string | number>")]
-  pub async fn count(&self, path: Vec<Either<String, u32>>) -> napi::Result<f64> {
-    crate::count::at(
-      &self.session,
-      &path::from_napi(path),
-      self.anchor_start(),
-      self.depth,
-    )
-    .await
-    .map(|n| n as f64)
-    .map_err(map_err)
-  }
-
   #[napi(ts_args_type = "path: Array<string | number>, options: IterArgs")]
   pub fn iter(&self, path: Vec<Either<String, u32>>, options: IterArgs) -> CursorIter {
     CursorIter::new(

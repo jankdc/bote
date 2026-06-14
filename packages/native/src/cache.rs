@@ -110,23 +110,6 @@ impl StructuralIndex {
     });
   }
 
-  #[allow(clippy::too_many_arguments)]
-  pub fn store_exhausted(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-    close: u64,
-  ) {
-    self.upsert(base_depth, anchor, path, kind, value_start, |node| {
-      node.child_count = Some(count);
-      node.close = Some(close);
-    });
-  }
-
   /// Write back an array scan: merge its `(index, offset)` array members into the
   /// node's sorted set.
   pub fn merge_array_scan(
@@ -195,20 +178,6 @@ impl StructuralIndex {
         }
       }
     }
-  }
-
-  pub fn store_child_count(
-    &mut self,
-    base_depth: u32,
-    anchor: u64,
-    path: &[Segment],
-    kind: ContainerKind,
-    value_start: u64,
-    count: u64,
-  ) {
-    self.upsert(base_depth, anchor, path, kind, value_start, |node| {
-      node.child_count = Some(count)
-    });
   }
 
   fn next_tick(&mut self) -> u64 {
@@ -307,7 +276,6 @@ impl StructuralIndex {
 pub struct ContainerNode {
   value_start: u64,
   close: Option<u64>,
-  child_count: Option<u64>,
   /// Document-tree depth (`base_depth + path.len()`). Primary eviction key:
   /// deepest evicted first.
   depth: u32,
@@ -321,7 +289,6 @@ impl ContainerNode {
     Self {
       value_start,
       close: None,
-      child_count: None,
       depth,
       last_used,
       body: ContainerBody::for_kind(kind, value_start),
@@ -334,10 +301,6 @@ impl ContainerNode {
       start: self.value_start,
       end,
     })
-  }
-
-  pub fn child_count(&self) -> Option<u64> {
-    self.child_count
   }
 
   /// Weight toward `slot_budget`: one slot for the node plus one per tabled object
@@ -743,12 +706,10 @@ mod tests {
   }
 
   #[test]
-  fn scalars_close_and_count_and_location() {
+  fn close_records_location() {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     c.store_close(0, 0, &[], ContainerKind::Array, 0, 42);
-    c.store_child_count(0, 0, &[], ContainerKind::Array, 0, 7);
     let node = c.get(0, &[]).unwrap();
-    assert_eq!(node.child_count(), Some(7));
     assert_eq!(node.location(), Some(ValueLocation { start: 0, end: 42 }));
   }
 

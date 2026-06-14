@@ -43,7 +43,6 @@ test('hop_chains_relative_to_the_previous_hop', async () => {
   assert.ok(b);
   const c = await b.hop('c');
   assert.ok(c);
-  assert.equal(await c.count(), 3);
   assert.equal(await c.get(2), 30);
 });
 
