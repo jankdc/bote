@@ -35,7 +35,7 @@ Given a **seekable** or **forward** source and a path, it retrieves values out o
 Here's a run (Apple M1 Pro 2021, default settings, RUNS=100):
 
 | method             | mean time (seconds) | mean peak footprint (MB) |
-| ------------------ | -----------------   | ------------------------ |
+| ------------------ | ------------------- | ------------------------ |
 | bote               | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
 | JSON.parse         | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
 | JSONStream         | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
@@ -47,10 +47,10 @@ For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 
 ## Features
 
-* Modern `AsyncIterator` API with helpers that emulate the [tc39 ones](https://github.com/tc39/proposal-async-iterator-helpers)
-* Validate with [Standard Schema](https://standardschema.dev/), avoiding those pesky `unknown`s
-* Supports multiple sources of data (e.g. file, network, stream) or write a custom one (see [example](./examples/))
-* For forward-only sources, there's support for replaying/buffering, allowing navigation to previous values
+- Modern `AsyncIterator` API with helpers that emulate the [tc39 ones](https://github.com/tc39/proposal-async-iterator-helpers)
+- Validate with [Standard Schema](https://standardschema.dev/), avoiding those pesky `unknown`s
+- Supports multiple sources of data (e.g. file, network, stream) or write a custom one. (see [sources.js](./examples/) for the built-in ones)
+- For forward-only sources, there's support for replaying/buffering, allowing navigation to previous values
 
 ## Documentation
 
