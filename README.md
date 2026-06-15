@@ -49,7 +49,7 @@ For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 
 - Modern `AsyncIterator` API with helpers that emulate the [tc39 ones](https://github.com/tc39/proposal-async-iterator-helpers)
 - Validate with [Standard Schema](https://standardschema.dev/), avoiding those pesky `unknown`s
-- Supports multiple sources of data (e.g. file, network, stream) or write a custom one. (see [sources.js](./examples/) for the built-in ones)
+- Supports multiple sources of data (e.g. file, network, stream) or write a custom one. (see [sources.js](./examples/sources.js) for the built-in ones)
 - For forward-only sources, there's support for replaying/buffering, allowing navigation to previous values
 
 ## Documentation
