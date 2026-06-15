@@ -4,18 +4,13 @@
 //! [`structural_word`] masks a structural byte's positions against the
 //! `in_string` mask from [`crate::simd::scan_block`].
 
-use std::simd::cmp::SimdPartialEq;
-use std::simd::Simd;
-
-use crate::simd::BLOCK_BYTES;
+use crate::simd::{eq_mask, BLOCK_BYTES};
 
 /// Bits set where `kind`'s byte occurs outside a string literal, masking out
 /// positions covered by `in_string` (closing-quote-exclusive, from
 /// [`crate::simd::scan_block`]).
 pub fn structural_word(block: &[u8; BLOCK_BYTES], in_string: u64, kind: Structural) -> u64 {
-  let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
-  let raw = v.simd_eq(Simd::splat(kind.byte())).to_bitmask();
-  raw & !in_string
+  eq_mask(block, kind.byte()) & !in_string
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

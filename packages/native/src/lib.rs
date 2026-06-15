@@ -1,5 +1,4 @@
 #![deny(clippy::all)]
-#![feature(portable_simd)]
 
 mod chunks;
 mod source;

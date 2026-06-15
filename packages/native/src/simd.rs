@@ -1,8 +1,5 @@
 //! Per-block SIMD core: derive structural bitmaps from a 64-byte window.
 
-use std::simd::cmp::SimdPartialEq;
-use std::simd::Simd;
-
 /// Width of one scan window, in bytes. One window produces 64 bitmap bits.
 pub const BLOCK_BYTES: usize = 64;
 
@@ -22,9 +19,8 @@ pub struct ScanCarry {
 /// the closing `"`. Use `!in_string` to mask string contents out of
 /// structural-character bitmaps.
 pub fn scan_block(block: &[u8; BLOCK_BYTES], carry: ScanCarry) -> (u64, ScanCarry) {
-  let v: Simd<u8, BLOCK_BYTES> = Simd::from_array(*block);
-  let quote = v.simd_eq(Simd::splat(b'"')).to_bitmask();
-  let backslash = v.simd_eq(Simd::splat(b'\\')).to_bitmask();
+  let quote = eq_mask(block, b'"');
+  let backslash = eq_mask(block, b'\\');
 
   let (escaped, prev_escaped) = find_escaped(backslash, carry.prev_escaped);
   let real_quote = quote & !escaped;
@@ -63,6 +59,93 @@ fn parity_prefix(mut x: u64) -> u64 {
   x ^= x << 16;
   x ^= x << 32;
   x
+}
+
+/// Bitmap of positions in `block` equal to `needle`: bit `i` is set iff
+/// `block[i] == needle`. Bit `i` maps to byte `i` (LSB = byte 0), the
+/// convention every word op in this module assumes.
+///
+/// Dispatches at runtime to the widest compare-to-mask the CPU has, falling
+/// back to a scalar loop. The scalar loop also doubles as the oracle the SIMD
+/// paths are fuzzed against (see `eq_mask_matches_scalar_oracle`).
+pub fn eq_mask(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  eq_mask_dispatch(block, needle)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn eq_mask_dispatch(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+    return unsafe { eq_mask_avx512(block, needle) };
+  }
+  if is_x86_feature_detected!("avx2") {
+    return unsafe { eq_mask_avx2(block, needle) };
+  }
+  eq_mask_scalar(block, needle)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn eq_mask_dispatch(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  // NEON is mandatory on AArch64, so no feature probe is needed.
+  unsafe { eq_mask_neon(block, needle) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn eq_mask_dispatch(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  eq_mask_scalar(block, needle)
+}
+
+/// AVX-512: one `vpcmpeqb` produces the 64-bit mask directly.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn eq_mask_avx512(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  use core::arch::x86_64::*;
+  let v = _mm512_loadu_epi8(block.as_ptr() as *const i8);
+  _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(needle as i8))
+}
+
+/// AVX2: two 32-byte `vpcmpeqb` + `vpmovmskb`, stitched into a u64.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn eq_mask_avx2(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  use core::arch::x86_64::*;
+  let dup = _mm256_set1_epi8(needle as i8);
+  let lo = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
+  let hi = _mm256_loadu_si256(block.as_ptr().add(32) as *const __m256i);
+  let lo_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(lo, dup)) as u32 as u64;
+  let hi_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(hi, dup)) as u32 as u64;
+  lo_mask | (hi_mask << 32)
+}
+
+/// NEON has no movemask: compare, AND each lane with its bit weight, then
+/// horizontally add the two 8-lane halves to pack 16 bits per 16-byte chunk.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn eq_mask_neon(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  use core::arch::aarch64::*;
+  let dup = vdupq_n_u8(needle);
+  let weights: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+  let weights = vld1q_u8(weights.as_ptr());
+  let mut mask = 0u64;
+  for chunk in 0..4 {
+    let v = vld1q_u8(block.as_ptr().add(chunk * 16));
+    let bits = vandq_u8(vceqq_u8(v, dup), weights);
+    let lo = vaddv_u8(vget_low_u8(bits)) as u64;
+    let hi = vaddv_u8(vget_high_u8(bits)) as u64;
+    mask |= (lo | (hi << 8)) << (chunk * 16);
+  }
+  mask
+}
+
+/// Portable fallback for targets without a specialized path.
+#[cfg(not(target_arch = "aarch64"))]
+fn eq_mask_scalar(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+  let mut mask = 0u64;
+  for (i, &b) in block.iter().enumerate() {
+    if b == needle {
+      mask |= 1u64 << i;
+    }
+  }
+  mask
 }
 
 #[cfg(test)]
@@ -236,6 +319,39 @@ mod tests {
                                       // bits 0,2 set -> prefix parity 0b011
     assert_eq!(parity_prefix(0b101), 0b011);
     assert_eq!(parity_prefix(1 << 63), 1 << 63);
+  }
+
+  #[test]
+  fn eq_mask_matches_scalar_oracle() {
+    fn oracle(block: &[u8; BLOCK_BYTES], needle: u8) -> u64 {
+      let mut m = 0u64;
+      for (i, &b) in block.iter().enumerate() {
+        if b == needle {
+          m |= 1u64 << i;
+        }
+      }
+      m
+    }
+
+    let alphabet: &[u8] = b"abc{}[],:\"\\ \n";
+    let mut state: u64 = 0x0123_4567_89ab_cdef;
+    for _ in 0..256 {
+      let block = fill_block(&mut state, alphabet);
+      for &needle in alphabet {
+        assert_eq!(
+          eq_mask(&block, needle),
+          oracle(&block, needle),
+          "needle {needle}"
+        );
+      }
+    }
+
+    let all_quotes = [b'"'; BLOCK_BYTES];
+    assert_eq!(eq_mask(&all_quotes, b'"'), !0u64);
+    assert_eq!(eq_mask(&all_quotes, b'x'), 0u64);
+    let mut last = [b' '; BLOCK_BYTES];
+    last[BLOCK_BYTES - 1] = b'z';
+    assert_eq!(eq_mask(&last, b'z'), 1u64 << 63);
   }
 
   #[test]
