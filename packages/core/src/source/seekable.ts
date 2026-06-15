@@ -23,7 +23,6 @@ export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptio
     seekable: true,
     open: () =>
       Promise.resolve({
-        seekable: true,
         size: view.byteLength,
         chunkBytes,
         read: (offset, length) => {
@@ -44,7 +43,6 @@ export function fromFile(path: string, options?: FactoryOptions): SeekableSource
       const size = stat.size;
       let closed = false;
       return {
-        seekable: true,
         size,
         chunkBytes,
         read: async (offset, length) => {
@@ -103,7 +101,6 @@ export function fromHttpRange(url: string, options?: HttpRangeOptions): Seekable
       }
       let closed = false;
       return {
-        seekable: true,
         size,
         chunkBytes,
         read: async (offset, length) => {

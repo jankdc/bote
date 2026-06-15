@@ -1,7 +1,7 @@
 /**
  * The bytes a `read` resolves to, plus an end-of-stream flag. `eof` is `true`
- * iff this read reached the end of the underlying stream. A seekable reader can
- * compute it from `size`; a forward reader discovers it as the stream drains.
+ * iff this read reached the end of the underlying stream. A seekable source can
+ * compute it from `size`; a forward source discovers it as the stream drains.
  */
 export interface ReadResult {
   readonly data: Uint8Array;
@@ -12,20 +12,9 @@ export interface ReadResult {
  * A handle on an opened byte stream. The reader owns whatever resources back the
  * stream (a file handle, a `fetch` body, an `AbortController`, etc.) and surfaces
  * them through `close()`. Constructed by `Source.open()`; never by callers directly.
- *
- * `seekable` declares the access model:
- *   - `true`: `read(offset, length)` may be called at any offset, in any order.
- *     `size` is required. This random access is what lets the structural-index
- *     cache resume scans near a target.
- *   - `false`: a single forward pass. `read` is called with non-decreasing
- *     offsets; the cache is forced off. `size` may be omitted (the end is found
- *     via `eof`). Rewinding to an earlier offset re-acquires the stream (see
- *     `fromReadable`'s `rewind` option) or throws {@link ForwardReplayError}.
  */
 export interface Reader {
-  /** Whether reads may target any offset/order (`true`) or a single forward pass (`false`). */
-  readonly seekable: boolean;
-  /** Total length in bytes. Required for seekable readers; optional for forward ones. */
+  /** Total length in bytes. Required for seekable sources; optional for forward ones. */
   readonly size?: number;
   /** Preferred read granularity in bytes. Must be a non-zero multiple of 64. */
   readonly chunkBytes?: number;
@@ -45,7 +34,16 @@ export interface Reader {
  * Provide your own object to plug in a custom backend.
  */
 export interface Source {
-  /** Mirrors {@link Reader.seekable}; lets `open()` enforce the right knobs at compile time. */
+  /**
+   * Declares the access model; lets `open()` enforce the right knobs at compile time.
+   *   - `true`: `read(offset, length)` may be called at any offset, in any order.
+   *     `size` is required. This random access is what lets the structural-index
+   *     cache resume scans near a target.
+   *   - `false`: a single forward pass. `read` is called with non-decreasing
+   *     offsets; the cache is forced off. `size` may be omitted (the end is found
+   *     via `eof`). Rewinding to an earlier offset re-acquires the stream (see
+   *     `fromReadable`'s `rewind` option) or throws {@link ForwardReplayError}.
+   */
   readonly seekable: boolean;
   /** Acquire the stream. Resolves to a `Reader` that owns any underlying resources. */
   open(): Promise<Reader>;

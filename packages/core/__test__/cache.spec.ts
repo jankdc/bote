@@ -13,7 +13,6 @@ function countingSource(data: Uint8Array, chunkBytes: number): { source: Seekabl
     seekable: true,
     open: () =>
       Promise.resolve({
-        seekable: true,
         size: data.length,
         chunkBytes,
         read: (offset, length) => {
@@ -46,7 +45,6 @@ test('reads_are_chunk_aligned_and_coalesce_into_multi_chunk_bursts', async () =>
     seekable: true,
     open: () =>
       Promise.resolve({
-        seekable: true,
         size: data.length,
         chunkBytes: 64,
         read: (offset, length) => {

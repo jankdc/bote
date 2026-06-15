@@ -62,7 +62,6 @@ const budgetNote = (): string =>
 function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
   const reads = { n: 0 };
   const reader: Reader = {
-    seekable: true,
     size: data.length,
     chunkBytes,
     read: (offset, length) => {
