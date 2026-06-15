@@ -20,7 +20,7 @@ import {
 function failingSource(message: string): SeekableSource {
   return {
     seekable: true,
-    open: () => Promise.resolve({ seekable: true, size: 64, read: () => Promise.reject(new Error(message)) }),
+    open: () => Promise.resolve({ size: 64, read: () => Promise.reject(new Error(message)) }),
   };
 }
 

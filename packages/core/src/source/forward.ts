@@ -221,7 +221,7 @@ async function makeForwardReader(produce: ReadableProducer, config: ForwardConfi
     await acquire();
   }
 
-  return { seekable: false, size, chunkBytes, read, close: release };
+  return { size, chunkBytes, read, close: release };
 }
 
 async function drainAll(

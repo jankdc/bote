@@ -70,7 +70,7 @@ export async function open(source: Source, options?: SeekableOpenOptions): Promi
 
   let native: NativeCursor;
   try {
-    if (reader.seekable && reader.size === undefined) {
+    if (source.seekable && reader.size === undefined) {
       throw new RangeError('open: a seekable source must report a size');
     }
     if (reader.size !== undefined && (!Number.isInteger(reader.size) || reader.size < 0)) {

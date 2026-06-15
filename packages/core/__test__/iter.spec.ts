@@ -10,7 +10,6 @@ function countingSource(data: Uint8Array, chunkBytes: number): { source: Seekabl
     seekable: true,
     open: () =>
       Promise.resolve({
-        seekable: true,
         size: data.length,
         chunkBytes,
         read: (offset, length) => {
