@@ -47,14 +47,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint .",
     "test": "cargo test",
-    "preversion": "napi build --platform && git add .",
-    "prepublishOnly": "napi prepublish -t npm --no-gh-release",
-    "version": "napi version"
+    "prepublishOnly": "napi prepublish -t npm --no-gh-release"
   },
   "devDependencies": {
     "@emnapi/core": "^1.5.0",
     "@emnapi/runtime": "^1.5.0",
-    "@napi-rs/cli": "^3.2.0",
+    "@napi-rs/cli": "3.7.0",
     "@tybys/wasm-util": "^0.10.0",
     "@types/node": "^22.0.0",
     "oxlint": "^1.14.0"
