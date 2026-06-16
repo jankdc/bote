@@ -428,6 +428,18 @@ test('iter_object_withKey_yields_name_value_pairs', async () => {
   ]);
 });
 
+test('iter_object_withKey_decodes_escaped_and_unicode_keys', async () => {
+  const pad = 'x'.repeat(40);
+  const source = `{"a\\"b":"${pad}","c\\\\d":"${pad}","caf\\u00e9":"${pad}","tab\\tkey":"${pad}"}`;
+  const expected = Object.entries(JSON.parse(source));
+  for (const chunkBytes of [64, 192, undefined]) {
+    const cursor = await open(memorySource(enc(source), chunkBytes));
+    const pairs = await cursor.iter({ withKey: true }).toArray();
+    assert.deepEqual(pairs, expected, `chunkBytes=${chunkBytes}`);
+    await cursor.close();
+  }
+});
+
 test('iter_object_withKey_preserves_duplicate_keys', async () => {
   // A source object can carry duplicate keys; tuple yields preserve every
   // occurrence (unlike JSON.parse, which keeps only the last). A desirable divergence.
