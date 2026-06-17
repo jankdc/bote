@@ -1,8 +1,23 @@
 {
   "name": "@botejs/core",
   "version": "0.9.1",
+  "description": "A fast, modern and low-memory approach to processing big JSON",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "json",
+    "json-parser",
+    "streaming",
+    "streaming-json",
+    "big-json",
+    "large-json",
+    "low-memory",
+    "json-query",
+    "json-stream",
+    "parser",
+    "rust",
+    "napi"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jankdc/bote.git",
