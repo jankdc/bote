@@ -125,7 +125,7 @@ test('error_argument_mistakes_stay_native_TypeError_RangeError', async (t) => {
   );
   // Out-of-range option: RangeError, not a BoteError.
   assert.throws(
-    () => cursor.iter('users', { batch: -1 }),
+    () => cursor.iter('users', { maxBatchCount: -1 }),
     (e) => e instanceof RangeError && !(e instanceof BoteError),
   );
 });

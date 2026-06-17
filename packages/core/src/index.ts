@@ -17,7 +17,14 @@ export {
 
 export { formatPath, type Path, type Segment } from './path.ts';
 
-export { DEFAULT_ITER_BATCH, MAX_ITER_BATCH, type Cursor, type RootCursor, type IterKey } from './cursor.ts';
+export {
+  MAX_BATCH_COUNT,
+  DEFAULT_MAX_BATCH_COUNT,
+  DEFAULT_MAX_BATCH_BYTES,
+  type Cursor,
+  type RootCursor,
+  type IterKey,
+} from './cursor.ts';
 
 export {
   type Source,

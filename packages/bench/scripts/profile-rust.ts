@@ -18,7 +18,7 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import { DEFAULT_ITER_BATCH, fromFile, open, type Cursor } from '@botejs/core';
+import { DEFAULT_MAX_BATCH_COUNT, fromFile, open, type Cursor } from '@botejs/core';
 import { heapProfilePeakBytes, heapProfileStart, heapProfileStop } from '@botejs/native';
 
 import { arg } from '#lib/cli.ts';
@@ -30,7 +30,7 @@ const PAD_WIDTH = 7;
 
 async function iterAll(cursor: Cursor): Promise<number> {
   let count = 0;
-  for await (const _name of cursor.iter('items', { select: ['name'], batch: DEFAULT_ITER_BATCH })) {
+  for await (const _name of cursor.iter('items', { select: ['name'], maxBatchCount: DEFAULT_MAX_BATCH_COUNT })) {
     count += 1;
   }
   return count;

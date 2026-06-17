@@ -7,7 +7,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { DEFAULT_ITER_BATCH, fromFile, open, type Path, type Cursor, type IterStream } from '@botejs/core';
+import { DEFAULT_MAX_BATCH_COUNT, fromFile, open, type Path, type Cursor, type IterStream } from '@botejs/core';
 
 import type { Cell, Consume, Result, Timing } from './cells.ts';
 import { buildFixture, type DocFixture } from './fixtures.ts';
@@ -43,14 +43,14 @@ async function invokeOnce(cursor: Cursor, cell: Cell, path: Path): Promise<numbe
     case 'iter': {
       if (cell.accessPattern === 'obj-iter-first') {
         // Time to the first item through the default item iterator (the path a
-        // caller actually writes); `batch: 1` makes the fetch yield it eagerly.
-        for await (const _item of cursor.iter(...path, { batch: 1 })) {
+        // caller actually writes); `maxBatchCount: 1` makes the fetch yield it eagerly.
+        for await (const _item of cursor.iter(...path, { maxBatchCount: 1 })) {
           return 1;
         }
         return 0;
       }
-      const batch = cell.batch ?? DEFAULT_ITER_BATCH;
-      const opts = cell.accessPattern === 'obj-iter-name' ? { batch, select: 'name' } : { batch };
+      const maxBatchCount = cell.batch ?? DEFAULT_MAX_BATCH_COUNT;
+      const opts = cell.accessPattern === 'obj-iter-name' ? { maxBatchCount, select: 'name' } : { maxBatchCount };
       if (cell.consume) {
         return consumeStream(cursor.iter(...path, opts), cell.consume, cell.docSize);
       }

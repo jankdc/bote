@@ -30,8 +30,17 @@ export declare function heapProfileStop(): void
 export interface IterArgs {
   /** Serialized projection IR (see `select.rs`); `None` yields the whole child. */
   selectIr?: string
-  /** Items yielded per iteration. */
-  batch: number
+  /**
+   * Upper bound on items per fetch. A fetch flushes when it reaches this many
+   * items or `max_batch_bytes`, whichever comes first.
+   */
+  maxBatchCount: number
+  /**
+   * Upper bound on serialized bytes per fetch (clamped to at least 1). At least
+   * one item is always emitted even if it alone exceeds this, so the stream
+   * always makes progress.
+   */
+  maxBatchBytes: number
   /**
    * Stitch each yield as a `[key, value]` tuple instead of a bare value. The key
    * is the member name for objects (a JSON string) and the element index for

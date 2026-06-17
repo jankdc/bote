@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { open, DEFAULT_ITER_BATCH, MAX_ITER_BATCH, PathError, type SeekableSource } from '../src/index.ts';
+import {
+  DEFAULT_MAX_BATCH_BYTES,
+  DEFAULT_MAX_BATCH_COUNT,
+  MAX_BATCH_COUNT,
+  PathError,
+  open,
+  type SeekableSource,
+} from '../src/index.ts';
+
 import { memorySource, enc, ORDERS } from './fixtures.ts';
 
 function countingSource(data: Uint8Array, chunkBytes: number): { source: SeekableSource; reads: { n: number } } {
@@ -34,7 +42,7 @@ test('iter_item_iteration_yields_items_in_order_across_batch_boundaries', async 
   const items = Array.from({ length: 25 }, (_, i) => i);
   const cursor = await open(memorySource(enc(JSON.stringify({ xs: items }))));
   const seen: number[] = [];
-  for await (const x of cursor.iter('xs', { batch: 4 })) {
+  for await (const x of cursor.iter('xs', { maxBatchCount: 4 })) {
     seen.push(x as number);
   }
   assert.deepEqual(seen, items);
@@ -60,11 +68,12 @@ test('iter_item_and_batches_agree_on_contents', async () => {
   assert.deepEqual(byItem, items);
 });
 
-test('iter_batches_default_batch_size_is_DEFAULT_ITER_BATCH', async () => {
-  // 2500 items at the default 1000-item batch -> sizes [1000, 1000, 500].
+test('iter_batches_default_count_is_DEFAULT_MAX_BATCH_COUNT', async () => {
+  // 2500 small items at the default 1000-item count -> sizes [1000, 1000, 500].
+  // The items are tiny, so the default byte budget never binds and count rules.
   // Also asserts the exported constant matches the value the native side
   // actually uses, so a mismatch surfaces here instead of a perf cliff.
-  assert.equal(DEFAULT_ITER_BATCH, 1000);
+  assert.equal(DEFAULT_MAX_BATCH_COUNT, 1000);
   const items = Array.from({ length: 2500 }, (_, i) => i);
   const cursor = await open(memorySource(enc(JSON.stringify({ xs: items }))));
   const sizes: number[] = [];
@@ -139,7 +148,7 @@ test('iter_select_batch_combined_byCountry_fold', async (t) => {
   for await (const rows of db
     .iter('orders', {
       select: { total: ['total'], country: ['customer', 'country'] },
-      batch: 1024,
+      maxBatchCount: 1024,
     })
     .raw()) {
     for (const row of rows as Array<{ total: number; country: string }>) {
@@ -158,7 +167,7 @@ test('iter_select_batch_with_small_chunks_stays_correct', async (t) => {
   const db = await open(memorySource(enc('[' + rows.join(',') + ']'), 256));
   t.after(() => db.close());
   let count = 0;
-  for await (const batch of db.iter({ select: ['id'], batch: 256 }).raw()) {
+  for await (const batch of db.iter({ select: ['id'], maxBatchCount: 256 }).raw()) {
     count += batch.length;
   }
   assert.equal(count, 4000);
@@ -223,30 +232,96 @@ test('iter_batches_override_yields_arrays', async (t) => {
   const db = await open(memorySource(enc(ORDERS)));
   t.after(() => db.close());
   const sizes: number[] = [];
-  for await (const batch of db.iter('orders', { select: ['id'], batch: 3 }).raw()) {
+  for await (const batch of db.iter('orders', { select: ['id'], maxBatchCount: 3 }).raw()) {
     sizes.push(batch.length);
   }
-  assert.deepEqual(sizes, [3, 2]); // 5 items, batch of 3
+  assert.deepEqual(sizes, [3, 2]); // 5 items, count of 3
 });
 
-test('iter_batch_rejects_non_positive', async (t) => {
+test('iter_maxBatchCount_rejects_non_positive', async (t) => {
   const db = await open(memorySource(enc(ORDERS)));
   t.after(() => db.close());
-  assert.throws(() => db.iter('orders', { batch: 0 }), RangeError);
-  assert.throws(() => db.iter('orders', { batch: -1 }), RangeError);
-  assert.throws(() => db.iter('orders', { batch: 1.5 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: 0 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: -1 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: 1.5 }), RangeError);
 });
 
-test('iter_batch_rejects_above_max', async (t) => {
-  // An unbounded batch reserves a native Vec of that capacity, so a huge value
+test('iter_maxBatchCount_rejects_above_max', async (t) => {
+  // An unbounded count reserves a native Vec of that capacity, so a huge value
   // could over-allocate or abort the process. The facade caps it first.
   const db = await open(memorySource(enc(ORDERS)));
   t.after(() => db.close());
-  assert.throws(() => db.iter('orders', { batch: MAX_ITER_BATCH + 1 }), RangeError);
-  assert.throws(() => db.iter('orders', { batch: 1e9 }), RangeError);
-  assert.throws(() => db.iter('orders', { batch: 2 ** 53 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: MAX_BATCH_COUNT + 1 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: 1e9 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchCount: 2 ** 53 }), RangeError);
   // The cap itself is accepted (constructing the iterator must not throw).
-  assert.doesNotThrow(() => db.iter('orders', { batch: MAX_ITER_BATCH }));
+  assert.doesNotThrow(() => db.iter('orders', { maxBatchCount: MAX_BATCH_COUNT }));
+});
+
+test('iter_maxBatchBytes_rejects_non_positive', async (t) => {
+  const db = await open(memorySource(enc(ORDERS)));
+  t.after(() => db.close());
+  // 0 is rejected rather than treated as a magic "disable" value: to let the
+  // count dominate, set the byte budget high instead.
+  assert.throws(() => db.iter('orders', { maxBatchBytes: 0 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchBytes: -1 }), RangeError);
+  assert.throws(() => db.iter('orders', { maxBatchBytes: 1.5 }), RangeError);
+});
+
+test('iter_maxBatchBytes_splits_batches_below_count', async () => {
+  const items = Array.from({ length: 500 }, (_, i) => ({ id: i, v: `value-${i}` }));
+  const doc = enc(JSON.stringify({ rows: items }));
+  const cursor = await open(memorySource(doc));
+  const sizes: number[] = [];
+  const seen: number[] = [];
+  for await (const batch of cursor.iter('rows', { maxBatchCount: 1000, maxBatchBytes: 256 }).raw()) {
+    sizes.push(batch.length);
+    for (const row of batch as Array<{ id: number }>) {
+      seen.push(row.id);
+    }
+  }
+  assert.deepEqual(
+    seen,
+    items.map((r) => r.id),
+  );
+  assert.ok(sizes.length > 1, 'the byte budget split the stream into multiple batches');
+  assert.ok(
+    sizes.every((n) => n < 1000),
+    'no batch reached the count cap; the byte budget bound first',
+  );
+});
+
+test('iter_maxBatchBytes_emits_oversized_item_alone', async () => {
+  // A single item larger than the whole byte budget must still come through: the
+  // cap is checked only after a full item is buffered, so the stream never stalls.
+  const big = 'x'.repeat(10_000);
+  const doc = enc(JSON.stringify({ rows: [{ v: big }, { v: 'small' }] }));
+  const cursor = await open(memorySource(doc));
+  const sizes: number[] = [];
+  for await (const batch of cursor.iter('rows', { maxBatchBytes: 64 }).raw()) {
+    sizes.push(batch.length);
+  }
+  assert.deepEqual(sizes, [1, 1], 'the oversized item flushes alone, then the small one');
+});
+
+test('iter_maxBatchBytes_large_budget_lets_count_bind', async () => {
+  assert.equal(DEFAULT_MAX_BATCH_BYTES, 256 * 1024);
+  const items = Array.from({ length: 500 }, (_, i) => ({ id: i, v: 'x'.repeat(600) }));
+  const doc = enc(JSON.stringify({ rows: items }));
+
+  const capped = await open(memorySource(doc));
+  const cappedSizes: number[] = [];
+  for await (const batch of capped.iter('rows').raw()) {
+    cappedSizes.push(batch.length);
+  }
+  assert.ok(cappedSizes.length > 1, 'the default byte budget splits the fat stream');
+
+  const cursor = await open(memorySource(doc));
+  const sizes: number[] = [];
+  for await (const batch of cursor.iter('rows', { maxBatchBytes: 10_000_000 }).raw()) {
+    sizes.push(batch.length);
+  }
+  assert.deepEqual(sizes, [500], 'one batch: byte budget too large to bind, count not reached');
 });
 
 test('iter_withKey_array_yields_index_value_tuples', async () => {
@@ -290,7 +365,7 @@ test('iter_withKey_batches_override_yields_arrays_of_tuples', async (t) => {
   const db = await open(memorySource(enc(ORDERS)));
   t.after(() => db.close());
   const batches: Array<Array<[unknown, unknown]>> = [];
-  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, batch: 3 }).raw()) {
+  for await (const batch of db.iter('orders', { select: ['total'], withKey: true, maxBatchCount: 3 }).raw()) {
     batches.push(batch as Array<[unknown, unknown]>);
   }
   assert.deepEqual(batches, [
@@ -395,7 +470,7 @@ test('iter_early_break_releases_scan_without_faulting_whole_doc', async () => {
   const partial = countingSource(data, 256);
   const pc = await open(partial.source);
   const got: unknown[] = [];
-  for await (const item of pc.iter('items', { batch: 1 })) {
+  for await (const item of pc.iter('items', { maxBatchCount: 1 })) {
     got.push(item);
     if (got.length === 3) {
       break;
@@ -617,7 +692,7 @@ test('iter_transform_batches_regroup_to_batch_size', async () => {
   const cursor = await open(memorySource(enc('{"xs":[1,2,3,4,5]}')));
   const sizes: number[] = [];
   for await (const batch of cursor
-    .iter('xs', { batch: 2 })
+    .iter('xs', { maxBatchCount: 2 })
     .map((x) => (x as number) + 1)
     .raw()) {
     sizes.push(batch.length);
@@ -633,7 +708,7 @@ test('iter_take_stops_faulting_chunks_early', async () => {
   await fullCursor.iter('xs').toArray();
   const taken = countingSource(data, 64);
   const takeCursor = await open(taken.source);
-  await takeCursor.iter('xs', { batch: 4 }).take(2).toArray();
+  await takeCursor.iter('xs', { maxBatchCount: 4 }).take(2).toArray();
   assert.ok(taken.reads.n < full.reads.n, `take faulted ${taken.reads.n} chunks, full walk faulted ${full.reads.n}`);
 });
 
@@ -645,7 +720,7 @@ test('iter_find_stops_faulting_chunks_after_match', async () => {
   await fullCursor.iter('xs').toArray();
   const found = countingSource(data, 64);
   const findCursor = await open(found.source);
-  const hit = await findCursor.iter('xs', { batch: 4 }).find((x) => (x as number) === 1);
+  const hit = await findCursor.iter('xs', { maxBatchCount: 4 }).find((x) => (x as number) === 1);
   assert.equal(hit, 1);
   assert.ok(found.reads.n < full.reads.n, `find faulted ${found.reads.n} chunks, full walk faulted ${full.reads.n}`);
 });
