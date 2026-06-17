@@ -71,7 +71,8 @@ playing around with it for now.
 
 Pre-1.0. Still in development and APIs may change based on feedback, bugs and holy divinations from the coding gods.
 
-I would say 90% satisfactory for MVP, but I'm getting there.
+After a lot of chaos, I'm finally-kinda-sorta happy with the public API. Major breaking changes seems to be slowing 
+down so feedback from the community and dogfooding on my end is what's next.
 
 ## License
 
