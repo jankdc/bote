@@ -8,7 +8,8 @@ await using cursor = await open(fromFile('./users.json'));
 // object as the last argument to tune what comes back. Hover over the properties
 // for more details.
 for await (const [index, user] of cursor.iter('users', {
-  batch: 100,
+  maxBatchCount: 100,
+  maxBatchBytes: 64 * 1024,
   select: { id: 'id', email: ['contact', 'email'] },
   schema: User,
   onInvalid: 'skip',
@@ -39,8 +40,9 @@ const firstFive = await cursor
 
 console.log(firstFive);
 
-// `.raw()` hands back one fetch's worth of items at a time (size = `batch`).
-// mainly used for advanced usages and you don't like the sugar.
-for await (const batch of cursor.iter('users', { batch: 50, withKey: true }).raw()) {
+// `.raw()` hands back one fetch's worth of items at a time (up to `maxBatchCount`
+// items, or fewer if `maxBatchBytes` binds first). mainly used for advanced usages
+// and you don't like the sugar.
+for await (const batch of cursor.iter('users', { maxBatchCount: 50, withKey: true }).raw()) {
   const userCursors = await Promise.all(batch.map(([index]) => cursor.hop('users', index)));
 }
