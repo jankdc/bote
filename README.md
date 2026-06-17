@@ -37,7 +37,7 @@ Here's a run (Apple M1 Pro 2021, default settings, RUNS=100):
 | method                      | mean time (seconds) | mean peak footprint (MB) |
 | --------------------------- | ------------------- | ------------------------ |
 | bote: v0.8                  | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
-| JSON.parse@v22              | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
+| JSON.parse: v22             | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
 | JSONStream: v1.3            | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
 | @streamparser/json: v0.0.22 | 5.103 ± 0.084 s     | 47.9 ± 2.3               |
 | oboe.js: v2.1               | 8.566 ± 0.295 s     | 100.0 ± 4.6              |
