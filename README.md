@@ -32,7 +32,7 @@ console.log([...byStreet].sort((a, b) => b[1] - a[1]).slice(0, 10));
 
 Given a **seekable** or **forward** source and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
 
-Here's a run (Apple M1 Pro 2021, default settings, RUNS=100):
+Here's a run of snippet above (Apple M1 Pro 2021, default settings, RUNS=100):
 
 | method                      | mean time (seconds) | mean peak footprint (MB) |
 | --------------------------- | ------------------- | ------------------------ |
