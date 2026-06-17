@@ -26,6 +26,9 @@ export abstract class BoteError extends Error {
   }
 }
 
+/** Raised when a `path` cannot be resolved against the document's actual shape -
+ *  e.g. it descends through a scalar, or a segment's kind (key vs index) does not
+ *  match the container it lands in. `path` is the offending path. */
 export class PathError extends BoteError {
   declare readonly code: PathFaultCode;
   readonly path: Path;
@@ -38,6 +41,9 @@ export class PathError extends BoteError {
   }
 }
 
+/** Raised when a value fails the Standard Schema passed to `get`/`iter` (and only
+ *  when the policy is to throw - `has` and `iter`'s `onInvalid: 'skip'` swallow it).
+ *  `issues` carries the schema's validation issues; `path` is where the value lived. */
 export class ValidationError extends BoteError {
   declare readonly code: 'validation';
   readonly issues: readonly StandardSchemaV1.Issue[];
@@ -51,6 +57,9 @@ export class ValidationError extends BoteError {
   }
 }
 
+/** Raised when the bytes at `path` are not valid JSON - either syntactically
+ *  malformed or truncated (`unexpected_eof`, e.g. a stream that ended mid-value).
+ *  Distinguish the two via {@link BoteError.code}. */
 export class MalformedJsonError extends BoteError {
   declare readonly code: JsonFaultCode;
   readonly path: Path;
@@ -63,6 +72,9 @@ export class MalformedJsonError extends BoteError {
   }
 }
 
+/** Raised when the underlying source fails to deliver bytes - a file read error,
+ *  a failed HTTP fetch, an aborted stream, etc. `detail` (in the message) carries
+ *  the backend's reason; the triggering error is attached as `cause`. */
 export class SourceReadError extends BoteError {
   declare readonly code: SourceFaultCode;
   readonly path: Path;
@@ -74,6 +86,11 @@ export class SourceReadError extends BoteError {
   }
 }
 
+/** Raised when a query on a forward-only source needs to re-read bytes before the
+ *  point the stream has already passed, and rewinding is forbidden (the default).
+ *  `offset` is the byte it wanted; `position` is where the stream had advanced to.
+ *  Opt into `rewind: 'replay'` or `'buffer'` (see `fromReadable`), or switch to a
+ *  seekable source, to allow the re-read. */
 export class ForwardReplayError extends BoteError {
   declare readonly code: 'forward_replay';
   readonly offset: number;
@@ -93,6 +110,9 @@ export class ForwardReplayError extends BoteError {
   }
 }
 
+/** Raised when any operation is attempted on a cursor whose root has been closed
+ *  (via `close()` or leaving an `await using` scope). Child cursors share the
+ *  root's lifetime, so they throw this too once the root is closed. */
 export class ClosedCursorError extends BoteError {
   declare readonly code: 'closed';
 

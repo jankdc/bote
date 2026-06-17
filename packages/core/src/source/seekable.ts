@@ -16,6 +16,9 @@ export interface HttpRangeOptions extends FactoryOptions {
   init?: RequestInit;
 }
 
+/**
+ * A seekable source over JSON already resident in memory.
+ */
 export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptions): SeekableSource {
   const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   const chunkBytes = options?.chunkBytes ?? DEFAULT_BUFFER_CHUNK_BYTES;
@@ -33,6 +36,13 @@ export function fromBuffer(buf: Uint8Array | ArrayBuffer, options?: FactoryOptio
   };
 }
 
+/**
+ * A seekable source over a local file. Opens a file handle on `open()` and reads
+ * byte ranges on demand via `pread`, so only the chunks a query touches are
+ * pulled into memory - large files never need to be fully read. Being seekable,
+ * it supports the structural-index cache and repeated, out-of-order queries; the
+ * cursor's `close()` releases the handle.
+ */
 export function fromFile(path: string, options?: FactoryOptions): SeekableSource {
   const chunkBytes = options?.chunkBytes ?? DEFAULT_FILE_CHUNK_BYTES;
   return {
@@ -69,6 +79,14 @@ export function fromFile(path: string, options?: FactoryOptions): SeekableSource
   };
 }
 
+/**
+ * A seekable source over a remote URL using HTTP range requests. A `HEAD`
+ * discovers the length and confirms the server advertises `Accept-Ranges: bytes`;
+ * each read then fetches only its byte range, so a query over a large remote
+ * document downloads just the chunks it touches. Being seekable, it supports the
+ * structural-index cache and repeated, out-of-order queries. For a single
+ * forward pass over a server that does not support ranges, use {@link fromHttpRequest}.
+ */
 export function fromHttpRange(url: string, options?: HttpRangeOptions): SeekableSource {
   const init = options?.init;
   const chunkBytes = options?.chunkBytes ?? DEFAULT_URL_CHUNK_BYTES;
