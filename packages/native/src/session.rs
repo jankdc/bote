@@ -150,7 +150,8 @@ impl Session {
     else {
       return Ok(None);
     };
-    let bytes = self.materialize(loc, &mut window).await?;
+    let mut bytes = Vec::new();
+    self.materialize(loc, &mut window, &mut bytes).await?;
     Ok(Some(bytes))
   }
 
@@ -191,12 +192,33 @@ impl Session {
       .await
   }
 
-  pub async fn materialize(
+  /// Append the value's source bytes in `[loc.start, loc.end)` to `out`.
+  pub(crate) async fn materialize(
     &self,
     loc: ValueLocation,
     window: &mut ChunkWindow,
-  ) -> Result<Vec<u8>, SessionError> {
-    self.read_range(loc.start, loc.end, window).await
+    out: &mut Vec<u8>,
+  ) -> Result<(), SessionError> {
+    let (from, to) = (loc.start, loc.end);
+    let chunk_bytes = self.chunk_bytes;
+    // The range is known, so fetch the rest in one shot on a miss. The drive
+    // restarts from `from` on each retry, so min_reachable is `from`: all the
+    // value's chunks must be resident together to copy them out. The walker
+    // rolls back any partial append on a miss, so the retry sees `out` as it was
+    // on entry.
+    let min_reachable = AtomicU64::new(from);
+    self
+      .drive(
+        window,
+        &min_reachable,
+        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
+        |walker| {
+          walker
+            .read_range(from, to, out)
+            .map_err(TraverseError::from)
+        },
+      )
+      .await
   }
 
   /// Open a child iterator over the container at `value_start`, or `Ok(None)` if
@@ -213,6 +235,34 @@ impl Session {
         &min_reachable,
         |_| 1,
         |walker| resolve::enter_container(walker, value_start),
+      )
+      .await
+  }
+
+  /// Borrow a member key's interior (the bytes between the quotes at `start` and
+  /// `close`) and hand it to `probe`, faulting in any missing chunks first. The
+  /// slice never escapes the closure, so a key comparison runs with no per-key
+  /// `Vec` - `read_slice` copies only when the key straddles a chunk seam, and
+  /// `probe` is re-run from a clean slate on a fault.
+  pub(crate) async fn probe_member_key<T>(
+    &self,
+    start: u64,
+    close: u64,
+    window: &mut ChunkWindow,
+    mut probe: impl FnMut(&[u8]) -> Result<T, TraverseError>,
+  ) -> Result<T, SessionError> {
+    let (from, to) = (start + 1, close);
+    let chunk_bytes = self.chunk_bytes;
+    let min_reachable = AtomicU64::new(from);
+    self
+      .drive(
+        window,
+        &min_reachable,
+        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
+        |walker| {
+          let key = walker.read_slice(from, to).map_err(TraverseError::from)?;
+          probe(&key)
+        },
       )
       .await
   }
@@ -266,7 +316,7 @@ impl Session {
         .cache
         .lock()
         .unwrap()
-        .apply_scan_record(base_depth, anchor_start, path, &scan_record);
+        .apply_scan_record(base_depth, anchor_start, path, scan_record);
     }
     match resolved {
       Resolved::Found(start) => Ok(Some(start)),
@@ -333,27 +383,6 @@ impl Session {
     };
     let end = self.skip_value_at(start, window).await?;
     Ok(Some(ValueLocation { start, end }))
-  }
-
-  pub(crate) async fn read_range(
-    &self,
-    from: u64,
-    to: u64,
-    window: &mut ChunkWindow,
-  ) -> Result<Vec<u8>, SessionError> {
-    let chunk_bytes = self.chunk_bytes;
-    // The range is known, so fetch the rest in one shot on a miss. It restarts
-    // from `from` on each retry, so min_reachable is `from`: all the value's
-    // chunks must be resident together to copy them out.
-    let min_reachable = AtomicU64::new(from);
-    self
-      .drive(
-        window,
-        &min_reachable,
-        move |off| to.saturating_sub(off).div_ceil(chunk_bytes).max(1),
-        |walker| walker.read_range(from, to).map_err(TraverseError::from),
-      )
-      .await
   }
 
   pub(crate) async fn skip_value_at(
@@ -1021,7 +1050,8 @@ mod tests {
         .unwrap()
         .expect("forward resolves");
       assert_eq!((rf.start, rf.end), (rs.start, rs.end), "chunk {chunk}");
-      let bytes = f.read_range(rf.start, rf.end, &mut wf).await.unwrap();
+      let mut bytes = Vec::new();
+      f.materialize(rf, &mut wf, &mut bytes).await.unwrap();
       assert_eq!(&bytes, b"30", "chunk {chunk}");
     }
   }

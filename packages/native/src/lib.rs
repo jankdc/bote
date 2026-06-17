@@ -7,6 +7,7 @@ mod source;
 mod bitmap;
 mod simd;
 
+mod keys;
 mod walker;
 
 mod path;

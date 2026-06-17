@@ -5,6 +5,7 @@
 
 use napi_derive::napi;
 
+use crate::keys;
 use crate::path::Segment;
 use crate::simd::ScanCarry;
 use crate::walker::{ArrayMemberSink, CommaStop, TraverseError, Walker};
@@ -164,9 +165,9 @@ impl ResolveState {
     }
   }
 
-  /// Lowest offset a resumed step might still read (a key `read_range` reads
-  /// behind the scan position but never behind the iteration's start). The
-  /// retention bound for the byte window.
+  /// Lowest offset a resumed step might still read (a key lookup reads behind
+  /// the scan position but never behind the iteration's start). The retention
+  /// bound for the byte window.
   pub fn min_reachable(&self) -> u64 {
     match &self.segment_scan {
       Some(ls) => ls.offset,
@@ -453,27 +454,29 @@ fn step_object(
       .next_string_close(offset + 1)?
       .ok_or(TraverseError::UnexpectedEof(offset))?;
 
-    let target_bytes = target.as_bytes();
-    let raw_len = (key_close - offset).saturating_sub(1) as usize;
-    // Collecting needs the decoded key for the cache table. Otherwise: JSON
-    // escapes only shrink a string's byte count, so a raw span shorter than the
-    // target can't match and the `read_range` allocation is skipped.
+    // The cache table needs the decoded key name, so collecting decodes every
+    // member. A plain lookup just compares the key against the target, borrowing
+    // its interior bytes in place (`read_slice` copies only across a chunk seam)
+    // and decoding solely when an escape is present.
     let mut decoded: Option<String> = None;
-    let matches = if !collecting {
-      if raw_len < target_bytes.len() {
-        false
+    let matches = {
+      let key = walker.read_slice(offset + 1, key_close)?;
+      if collecting {
+        let name = if keys::is_escaped(&key) {
+          keys::decode_escaped(&key)
+        } else {
+          keys::decode_simple(&key)
+        }
+        .map_err(|()| TraverseError::Malformed(offset))?;
+
+        let m = name == target;
+        decoded = Some(name);
+        m
       } else {
-        let raw = walker.read_range(offset, key_close + 1)?;
-        quoted_string_eq(&raw, target).map_err(|()| TraverseError::Malformed(offset))?
+        keys::compare(&key, target).map_err(|()| TraverseError::Malformed(offset))?
       }
-    } else {
-      let raw = walker.read_range(offset, key_close + 1)?;
-      let name: String =
-        serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(offset))?;
-      let m = name == target;
-      decoded = Some(name);
-      m
     };
+
     let value_start = member_value_start(walker, key_close)?;
     if matches {
       // Match commit point: no fallible call follows, so recording here is never
@@ -488,6 +491,7 @@ fn step_object(
     }
     let value_end = walker.skip_value(value_start)?;
     let after = walker.skip_whitespace(value_end)?;
+
     match walker.byte_at(after)? {
       Some(b',') => {
         // Skip commit point: `state` advances past this member. A mid-iteration
@@ -514,23 +518,6 @@ fn step_object(
       _ => return Err(TraverseError::Malformed(after)),
     }
   }
-}
-
-/// Compare a JSON-encoded string value's raw bytes (quotes included) to a `&str`.
-/// Escape-free interiors byte-compare directly; escaped ones go through
-/// `serde_json`. `Err(())` means the escaped interior failed to decode
-/// (malformed); the caller maps it to [`TraverseError::Malformed`].
-pub(crate) fn quoted_string_eq(value_raw: &[u8], target: &str) -> Result<bool, ()> {
-  if value_raw.len() < 2 || value_raw[0] != b'"' || value_raw[value_raw.len() - 1] != b'"' {
-    return Ok(false);
-  }
-  let interior = &value_raw[1..value_raw.len() - 1];
-  if !interior.contains(&b'\\') {
-    return Ok(interior == target.as_bytes());
-  }
-  serde_json::from_slice::<String>(value_raw)
-    .map(|s| s == target)
-    .map_err(|_| ())
 }
 
 /// From a member key's closing-quote offset, skip the `:` separator (and

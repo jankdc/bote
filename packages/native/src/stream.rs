@@ -2,12 +2,13 @@
 //! container's children. Sits above [`Session`] in the operations layer
 //! alongside [`crate::eval`].
 
+use std::io::Write;
+
 use crate::chunks::ChunkWindow;
 use crate::path::Segment;
 use crate::resolve::{ChildKey, ContainerCursor, ContainerKind, PathFault, ValueLocation};
 use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
-use crate::walker::TraverseError;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BatchLimits {
@@ -184,13 +185,6 @@ impl IterState {
             String::from_utf8_unchecked(buf)
           })));
         };
-        // Render the key before materialize/prune: a member's raw span sits
-        // behind the value, so its chunk is only guaranteed resident now.
-        let key_json = if with_key {
-          Some(render_key(session, child.key, window).await?)
-        } else {
-          None
-        };
         let loc = child.location;
         // Sample array landmarks on the absolute index grid so a later random
         // index resumes from the nearest one. Index 0 is the array's open, so
@@ -202,24 +196,26 @@ impl IterState {
             }
           }
         }
-        let value = match select {
-          Some(sel) => crate::eval::project(session, sel, loc.start, window).await?,
-          None => session.materialize(loc, window).await?,
-        };
-        session.prune_window(window, cursor.next_offset);
+        // Build each item straight into `buf`: no per-item key/value `Vec`. The
+        // separator and `[` go in first, so a later hard error just drops `buf`.
         if count > 0 {
           buf.push(b',');
         }
-        match &key_json {
-          Some(key) => {
-            buf.push(b'[');
-            buf.extend_from_slice(key);
-            buf.push(b',');
-            buf.extend_from_slice(&value);
-            buf.push(b']');
-          }
-          None => buf.extend_from_slice(&value),
+        if with_key {
+          buf.push(b'[');
+          // The key must be read before the value: a member's raw span sits
+          // behind it, so its chunk is only guaranteed resident now.
+          render_key_into(session, child.key, window, &mut buf).await?;
+          buf.push(b',');
         }
+        match select {
+          Some(sel) => crate::eval::project(session, sel, loc.start, window, &mut buf).await?,
+          None => session.materialize(loc, window, &mut buf).await?,
+        }
+        if with_key {
+          buf.push(b']');
+        }
+        session.prune_window(window, cursor.next_offset);
         count += 1;
         // Flush on whichever bound binds first. The byte check runs after a full
         // item is appended, so a single oversized item still flushes alone (with
@@ -283,28 +279,29 @@ impl IterState {
   }
 }
 
-async fn render_key(
+/// Append the JSON-encoded key to `out`.
+async fn render_key_into(
   session: &Session,
   key: ChildKey,
   window: &mut ChunkWindow,
-) -> Result<Vec<u8>, SessionError> {
+  out: &mut Vec<u8>,
+) -> Result<(), SessionError> {
   match key {
-    ChildKey::Index(index) => Ok(index.to_string().into_bytes()),
+    ChildKey::Index(index) => {
+      write!(out, "{index}").expect("writing to a Vec is infallible");
+      Ok(())
+    }
     ChildKey::Member { start, close } => {
-      let raw = session
+      session
         .materialize(
           ValueLocation {
             start,
             end: close + 1,
           },
           window,
+          out,
         )
-        .await?;
-      let name: String =
-        serde_json::from_slice(&raw).map_err(|_| TraverseError::Malformed(start))?;
-      let mut out = Vec::new();
-      serde_json::to_writer(&mut out, &name).expect("serializing a JSON string key is infallible");
-      Ok(out)
+        .await
     }
   }
 }

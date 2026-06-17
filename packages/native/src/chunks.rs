@@ -196,7 +196,7 @@ impl ChunkReader {
           break; // short read: the rest of this run is past end-of-source
         }
         let end = (rel + self.chunk_bytes as usize).min(buf.len());
-        out.push((off, Bytes::copy_from_slice(&buf[rel..end])));
+        out.push((off, buf.slice(rel..end)));
         off += cs;
       }
       if eof {

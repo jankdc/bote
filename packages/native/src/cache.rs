@@ -138,7 +138,7 @@ impl StructuralIndex {
     anchor: u64,
     path: &[Segment],
     value_start: u64,
-    members: &[(Box<str>, u64, u64)],
+    members: Vec<(Box<str>, u64, u64)>,
     resume: Option<u64>,
   ) {
     let cap = self.object_member_cap.min(self.member_ceiling());
@@ -148,7 +148,7 @@ impl StructuralIndex {
       path,
       ContainerKind::Object,
       value_start,
-      |node| node.body.merge_object(members, resume, cap),
+      move |node| node.body.merge_object(members, resume, cap),
     );
   }
 
@@ -159,22 +159,22 @@ impl StructuralIndex {
     base_depth: u32,
     anchor: u64,
     path: &[Segment],
-    scan_record: &ScanRecord,
+    scan_record: ScanRecord,
   ) {
-    for cs in &scan_record.containers {
+    for cs in scan_record.containers {
       let prefix = &path[..cs.seg];
-      match &cs.body {
+      match cs.body {
         RecordBody::Object { members, resume } => {
           if members.is_empty() && resume.is_none() {
             continue;
           }
-          self.merge_object_scan(base_depth, anchor, prefix, cs.value_start, members, *resume);
+          self.merge_object_scan(base_depth, anchor, prefix, cs.value_start, members, resume);
         }
         RecordBody::Array { members } => {
           if members.is_empty() {
             continue;
           }
-          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, members);
+          self.merge_array_scan(base_depth, anchor, prefix, cs.value_start, &members);
         }
       }
     }
@@ -454,28 +454,29 @@ impl ContainerBody {
   /// the high-water boundary (`resume_hint` = matched member's start, or the
   /// close). On hitting the cap the resume freezes at the first un-tabled member,
   /// keeping the table a dense prefix. No-op on an array body.
-  fn merge_object(&mut self, new: &[(Box<str>, u64, u64)], resume_hint: Option<u64>, cap: usize) {
+  fn merge_object(&mut self, new: Vec<(Box<str>, u64, u64)>, resume_hint: Option<u64>, cap: usize) {
     let ContainerBody::Object { members, resume } = self else {
       return;
     };
     let mut resume_off = *resume;
     let mut capped = false;
+    let last_start = new.last().map(|&(_, start, _)| start);
     for (name, key_start, value_start) in new {
       if members.contains_key(name.as_ref()) {
         continue; // already tabled (a prior scan's prefix)
       }
       if members.len() >= cap {
-        resume_off = resume_off.max(*key_start);
+        resume_off = resume_off.max(key_start);
         capped = true;
         break;
       }
-      members.insert(name.clone(), *value_start);
+      members.insert(name, value_start);
     }
     if !capped {
       if let Some(t) = resume_hint {
         resume_off = resume_off.max(t);
-      } else if let Some((_, last_start, _)) = new.last() {
-        resume_off = resume_off.max(*last_start);
+      } else if let Some(last_start) = last_start {
+        resume_off = resume_off.max(last_start);
       }
     }
     *resume = resume_off;
@@ -511,8 +512,8 @@ mod tests {
     let mut c = StructuralIndex::new(NO_EVICT, 64, 16);
     // {"a":1,"b":2,"c":3} - scan matched "c"; a,b skipped, c matched. Terminal is
     // c's member-start (the high-water).
-    let members = [member("a", 1, 5), member("b", 7, 11), member("c", 13, 17)];
-    c.merge_object_scan(0, 0, &[], 0, &members, Some(13));
+    let members = vec![member("a", 1, 5), member("b", 7, 11), member("c", 13, 17)];
+    c.merge_object_scan(0, 0, &[], 0, members, Some(13));
     let node = c.get(0, &[]).expect("node");
     assert_eq!(node.object_member("a"), Some(5));
     assert_eq!(node.object_member("b"), Some(11));
@@ -533,7 +534,7 @@ mod tests {
       0,
       &[],
       0,
-      &[member("a", 1, 5), member("b", 7, 11)],
+      vec![member("a", 1, 5), member("b", 7, 11)],
       Some(7),
     );
     assert_eq!(c.get(0, &[]).unwrap().object_resume(), 7);
@@ -543,7 +544,7 @@ mod tests {
       0,
       &[],
       0,
-      &[member("b", 7, 11), member("c", 13, 17), member("d", 19, 23)],
+      vec![member("b", 7, 11), member("c", 13, 17), member("d", 19, 23)],
       Some(19),
     );
     let node = c.get(0, &[]).unwrap();
@@ -564,7 +565,7 @@ mod tests {
     let members: Vec<_> = (0..cap + 10)
       .map(|i| member(&format!("k{i}"), (i * 10) as u64, (i * 10 + 4) as u64))
       .collect();
-    c.merge_object_scan(0, 0, &[], 0, &members, Some(99_999));
+    c.merge_object_scan(0, 0, &[], 0, members, Some(99_999));
     let node = c.get(0, &[]).unwrap();
     assert_eq!(
       node.object_member_count(),
@@ -582,7 +583,7 @@ mod tests {
     let members: Vec<_> = (0..500)
       .map(|i| member(&format!("k{i}"), (i * 10) as u64, (i * 10 + 4) as u64))
       .collect();
-    c.merge_object_scan(0, 0, &[], 0, &members, Some(99_999));
+    c.merge_object_scan(0, 0, &[], 0, members, Some(99_999));
     assert_eq!(
       c.get(0, &[]).unwrap().object_member_count(),
       500,
@@ -681,7 +682,7 @@ mod tests {
         },
       ],
     };
-    c.apply_scan_record(0, 0, &[], &rec);
+    c.apply_scan_record(0, 0, &[], rec);
     assert_eq!(c.node_count(), 0);
     assert_eq!(c.slots_used(), 0);
   }
@@ -700,7 +701,7 @@ mod tests {
         },
       }],
     };
-    c.apply_scan_record(0, 0, &[], &rec);
+    c.apply_scan_record(0, 0, &[], rec);
     let node = c.get(0, &[]).expect("an {} miss still parks its resume");
     assert_eq!(node.object_resume(), 12);
   }
@@ -718,13 +719,13 @@ mod tests {
     // Budget 0 disables regardless of the per-container caps.
     let mut c = StructuralIndex::new(0, 64, 16);
     assert!(!c.is_enabled());
-    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
+    c.merge_object_scan(0, 0, &[], 0, vec![member("a", 1, 4)], Some(1));
     c.store_close(0, 0, &[], ContainerKind::Object, 0, 10);
     assert!(c.get(0, &[]).is_none());
     // Both per-container caps 0 disables even with a budget (the off switch).
     let mut c = StructuralIndex::new(NO_EVICT, 0, 0);
     assert!(!c.is_enabled());
-    c.merge_object_scan(0, 0, &[], 0, &[member("a", 1, 4)], Some(1));
+    c.merge_object_scan(0, 0, &[], 0, vec![member("a", 1, 4)], Some(1));
     assert!(c.get(0, &[]).is_none());
   }
 
@@ -741,7 +742,7 @@ mod tests {
         i,
         &p,
         i * 100,
-        &[member("x", i * 100, i * 100 + 4)],
+        vec![member("x", i * 100, i * 100 + 4)],
         Some(i * 100),
       );
       assert!(
@@ -773,7 +774,7 @@ mod tests {
         i + 1,
         &[],
         i * 100,
-        &[member("name", i * 100, i * 100 + 7)],
+        vec![member("name", i * 100, i * 100 + 7)],
         Some(i * 100),
       );
       assert!(c.slots_used() <= budget);

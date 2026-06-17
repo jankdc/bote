@@ -13,6 +13,8 @@
 //! Resumable scans commit their `(offset, carry)` at a block boundary, so a
 //! chunk fault never rewinds work or loses the carry.
 
+use std::borrow::Cow;
+
 use napi_derive::napi;
 use thiserror::Error;
 
@@ -88,16 +90,45 @@ impl<'a> Walker<'a> {
     Ok(data.get((offset - chunk_start) as usize).copied())
   }
 
-  /// Copy bytes in `[from, to)` into an owned buffer, or `ChunkMiss` for the
-  /// first chunk that isn't resident.
-  pub fn read_range(&mut self, from: u64, to: u64) -> Result<Vec<u8>, ChunkMiss> {
+  pub fn read_slice(&mut self, from: u64, to: u64) -> Result<Cow<'a, [u8]>, ChunkMiss> {
+    let end = to.min(self.source_size());
+    let from = from.min(end);
+    if from == end {
+      return Ok(Cow::Borrowed(&[]));
+    }
+    let cs = self.chunk_bytes();
+    let chunk_start = (from / cs) * cs;
+    if end <= chunk_start + cs {
+      let data = self.chunk_slice(chunk_start)?;
+      let lo = (from - chunk_start) as usize;
+      let hi = ((end - chunk_start) as usize).min(data.len());
+      return Ok(Cow::Borrowed(&data[lo..hi]));
+    }
+    let mut out = Vec::new();
+    self.read_range(from, end, &mut out)?;
+    Ok(Cow::Owned(out))
+  }
+
+  /// Append `from..to` of the source to `out`, or `ChunkMiss` for the first
+  /// chunk that isn't resident. On a miss the bytes appended so far are rolled
+  /// back, so a `drive` retry re-appends from a clean slate - letting callers
+  /// stream a value straight into a shared buffer without an intermediate
+  /// per-value `Vec`.
+  pub fn read_range(&mut self, from: u64, to: u64, out: &mut Vec<u8>) -> Result<(), ChunkMiss> {
+    let start_len = out.len();
     let end = to.min(self.source_size());
     let cs = self.chunk_bytes();
-    let mut out = Vec::with_capacity(end.saturating_sub(from) as usize);
+    out.reserve(end.saturating_sub(from) as usize);
     let mut offset = from;
     while offset < end {
       let chunk_start = (offset / cs) * cs;
-      let data = self.chunk_slice(chunk_start)?;
+      let data = match self.chunk_slice(chunk_start) {
+        Ok(data) => data,
+        Err(miss) => {
+          out.truncate(start_len);
+          return Err(miss);
+        }
+      };
       let chunk_end = chunk_start + data.len() as u64;
       let local_start = (offset - chunk_start) as usize;
       let local_end = (end.min(chunk_start + cs).min(chunk_end) - chunk_start) as usize;
@@ -106,7 +137,7 @@ impl<'a> Walker<'a> {
       }
       offset = chunk_start + cs;
     }
-    Ok(out)
+    Ok(())
   }
 
   #[inline]
@@ -708,10 +739,36 @@ mod tests {
     let source: Vec<u8> = (0..200).map(|i| (i % 251) as u8).collect();
     let win = window(&source, 64);
     let mut w = Walker::new(&win);
-    assert_eq!(
-      w.read_range(50, 150).unwrap(),
-      (50..150).map(|i| (i % 251) as u8).collect::<Vec<_>>()
-    );
+    let mut out = Vec::new();
+    w.read_range(50, 150, &mut out).unwrap();
+    assert_eq!(out, (50..150).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+  }
+
+  #[test]
+  fn read_slice_borrows_within_chunk_copies_across_seam() {
+    let source: Vec<u8> = (0..200).map(|i| (i % 251) as u8).collect();
+    let win = window(&source, 64);
+    let mut w = Walker::new(&win);
+
+    // Wholly inside chunk 0: borrowed, no copy.
+    let within = w.read_slice(10, 40).unwrap();
+    assert!(matches!(within, Cow::Borrowed(_)));
+    assert_eq!(&within[..], &source[10..40]);
+
+    // Straddles the 64-byte seam: owned copy, same bytes.
+    let across = w.read_slice(50, 100).unwrap();
+    assert!(matches!(across, Cow::Owned(_)));
+    assert_eq!(&across[..], &source[50..100]);
+
+    // Empty range borrows nothing.
+    assert_eq!(&w.read_slice(40, 40).unwrap()[..], b"");
+  }
+
+  #[test]
+  fn read_slice_faults_on_absent_chunk() {
+    let win = ChunkWindow::new(64, 128);
+    let mut w = Walker::new(&win);
+    assert_eq!(w.read_slice(10, 40).unwrap_err(), ChunkMiss(0));
   }
 
   #[test]
