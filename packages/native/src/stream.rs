@@ -9,12 +9,35 @@ use crate::select::CompiledSelect;
 use crate::session::{Session, SessionError};
 use crate::walker::TraverseError;
 
+#[derive(Clone, Copy)]
+pub(crate) struct BatchLimits {
+  pub(crate) max_count: usize,
+  pub(crate) max_bytes: usize,
+}
+
+impl BatchLimits {
+  /// Count-only limits: the byte cap is set out of reach so only the count binds.
+  #[cfg(test)]
+  pub(crate) fn count(max_count: usize) -> Self {
+    Self {
+      max_count,
+      max_bytes: usize::MAX,
+    }
+  }
+}
+
+/// What one [`IterState::fill_batch`] inner pass produced: a full batch, or the
+/// end of the stream (with the final partial batch, if any).
+enum BatchFill {
+  Batch(String),
+  Exhausted(Option<String>),
+}
+
 /// State of one `iter` stream: the lazily-opened container cursor and its byte
 /// window, plus the projection, batching, and key-wrapping options.
 pub(crate) struct IterState {
   pub(crate) initialized: bool,
   pub(crate) path: Vec<Segment>,
-  pub(crate) batch: usize,
   pub(crate) with_key: bool,
   pub(crate) anchor_start: u64,
   /// Document depth of `anchor_start`; children sit at `base_depth + path.len() + 1`.
@@ -34,6 +57,10 @@ pub(crate) struct IterState {
   /// Set by [`IterState::initialize`]. `None` if the path didn't resolve, and
   /// again once the stream is exhausted or released (iteration yields nothing).
   pub(crate) child_cursor: Option<ContainerCursor>,
+  /// Upper bound on items per fetch.
+  pub(crate) max_batch_count: usize,
+  /// Upper bound on serialized bytes per fetch.
+  pub(crate) max_batch_bytes: usize,
 }
 
 impl IterState {
@@ -43,7 +70,7 @@ impl IterState {
     anchor_start: u64,
     base_depth: u32,
     select_ir: Option<String>,
-    batch: usize,
+    limits: BatchLimits,
     with_key: bool,
   ) -> Self {
     Self {
@@ -56,7 +83,8 @@ impl IterState {
       window: session.new_window(),
       select_ir,
       select: None,
-      batch,
+      max_batch_count: limits.max_count,
+      max_batch_bytes: limits.max_bytes,
       with_key,
     }
   }
@@ -121,7 +149,8 @@ impl IterState {
     let base_depth = self.base_depth;
     let base_value_start = *base_value_start;
     let select = select.as_ref();
-    let batch = self.batch;
+    let max_batch_count = self.max_batch_count;
+    let max_batch_bytes = self.max_batch_bytes;
     let with_key = self.with_key;
 
     let sampling_interval = session.array_landmark_sampling_interval();
@@ -192,7 +221,10 @@ impl IterState {
           None => buf.extend_from_slice(&value),
         }
         count += 1;
-        if count >= batch {
+        // Flush on whichever bound binds first. The byte check runs after a full
+        // item is appended, so a single oversized item still flushes alone (with
+        // its trailing `]`), keeping the stream making progress.
+        if count >= max_batch_count || buf.len() >= max_batch_bytes {
           buf.push(b']');
           // SAFETY: as above.
           return Ok(BatchFill::Batch(unsafe {
@@ -249,13 +281,6 @@ impl IterState {
     self.window.clear();
     self.child_cursor = None;
   }
-}
-
-/// What one [`IterState::fill_batch`] inner pass produced: a full batch, or the
-/// end of the stream (with the final partial batch, if any).
-enum BatchFill {
-  Batch(String),
-  Exhausted(Option<String>),
 }
 
 async fn render_key(

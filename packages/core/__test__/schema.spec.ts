@@ -207,7 +207,7 @@ test('schema_iter_batch_skip_shrinks_batches', async (t) => {
   const db = await open(memorySource(enc(MIXED)));
   t.after(() => db.close());
   const batches: number[][] = [];
-  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', batch: 2 }).raw()) {
+  for await (const b of db.iter('rows', { schema: numberN(), onInvalid: 'skip', maxBatchCount: 2 }).raw()) {
     batches.push(b.map((r) => r.n));
   }
   // native batches the raw rows [1,2],[bad,4]; skip drops `bad` -> [[1,2],[4]]
@@ -215,7 +215,7 @@ test('schema_iter_batch_skip_shrinks_batches', async (t) => {
 });
 
 test('schema_iter_batch_1_yields_each_valid_item_before_invalid_throws', async (t) => {
-  // `batch: 1` exposes per-item yield ordering: the iterator emits each
+  // `maxBatchCount: 1` exposes per-item yield ordering: the iterator emits each
   // user before validating the next, so Alice and Bob land in `seen`
   // before user 2 trips the validator. With the default batch all three
   // would be grouped into one batch and the throw would drop that
@@ -225,7 +225,7 @@ test('schema_iter_batch_1_yields_each_valid_item_before_invalid_throws', async (
   const seen: User[] = [];
   await assert.rejects(
     async () => {
-      for await (const u of cursor.iter('users', { schema: userSchema(), batch: 1 })) {
+      for await (const u of cursor.iter('users', { schema: userSchema(), maxBatchCount: 1 })) {
         seen.push(u);
       }
     },
@@ -253,7 +253,7 @@ test('schema_iter_object_failure_path_is_the_member_name_not_a_numeric_index', a
   t.after(() => cursor.close());
   await assert.rejects(
     async () => {
-      for await (const _ of cursor.iter('users', { schema: userSchema(), batch: 1 })) {
+      for await (const _ of cursor.iter('users', { schema: userSchema(), maxBatchCount: 1 })) {
         void _;
       }
     },
@@ -269,7 +269,7 @@ test('schema_iter_object_failure_path_is_the_member_name_not_a_numeric_index', a
 test('schema_iter_default_batch_throw_loses_partial', async (t) => {
   // Documents the tradeoff: when validation throws mid-batch, the batch is
   // never yielded - earlier-validated items in the same batch are not
-  // observable. Users who need per-item observability set `batch: 1`.
+  // observable. Users who need per-item observability set `maxBatchCount: 1`.
   const cursor = await open(memorySource(enc(USERS_WITH_INVALID)));
   t.after(() => cursor.close());
   const seen: User[] = [];
@@ -285,7 +285,7 @@ test('schema_iter_batch_throws_on_invalid', async (t) => {
   const db = await open(memorySource(enc(MIXED)));
   t.after(() => db.close());
   await assert.rejects(async () => {
-    for await (const _ of db.iter('rows', { schema: numberN(), batch: 2 })) {
+    for await (const _ of db.iter('rows', { schema: numberN(), maxBatchCount: 2 })) {
       void _;
     }
   }, ValidationError);
