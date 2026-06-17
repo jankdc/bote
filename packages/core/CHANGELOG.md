@@ -1,5 +1,11 @@
 # @botejs/core
 
+## 0.9.2
+
+### Patch Changes
+
+- 15f405a: Update description and keywords for npm
+
 ## 0.9.1
 
 ### Patch Changes

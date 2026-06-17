@@ -1,6 +1,6 @@
 {
   "name": "@botejs/core",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "A fast, modern and low-memory approach to processing big JSON",
   "type": "module",
   "license": "MIT",
