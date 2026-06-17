@@ -61,7 +61,6 @@ For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
   - Linux x64 (`x86_64`, glibc)
   - Windows x64 (`x86_64`, MSVC)
   - More if requested :)
-- **(Optional) [`@standard-schema/spec`](https://standardschema.dev/)**: If you want to validate via Standard Schema. Install it alongside your schema library (Zod, Valibot, ArkType, etc...).
 
 ## Documentation
 

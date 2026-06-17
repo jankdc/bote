@@ -36,22 +36,12 @@
     "prepublishOnly": "cp ../../README.md ./README.md && tsc"
   },
   "dependencies": {
-    "@botejs/native": "^0.9.0"
+    "@botejs/native": "^0.9.0",
+    "@standard-schema/spec": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "oxlint": "^1.14.0",
     "typescript": "^6.0.0"
-  },
-  "optionalDependencies": {
-    "@standard-schema/spec": "^1.0.0"
-  },
-  "peerDependencies": {
-    "@standard-schema/spec": "^1.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@standard-schema/spec": {
-      "optional": true
-    }
   }
 }
