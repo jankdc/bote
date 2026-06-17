@@ -19,8 +19,11 @@ type InferOutput<Sch> = Sch extends StandardSchemaV1<unknown, infer O> ? O : nev
 
 type SelectMapShape<S> = { -readonly [K in keyof S]: unknown };
 
+/** The key paired with each value when iterating with `withKey: true`: the member
+ *  name for an object, or the zero-based index for an array. */
 export type IterKey = string | number;
 
+/** The largest {@link IterOptions.maxBatchCount} `iter` accepts; a larger value is a `RangeError`. */
 export const MAX_BATCH_COUNT = 1_000_000;
 export const DEFAULT_MAX_BATCH_COUNT = 1000;
 export const DEFAULT_MAX_BATCH_BYTES = 256 * 1024;

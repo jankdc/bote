@@ -1,4 +1,10 @@
+/** One step in a path: a string selects an object member, a non-negative integer
+ *  selects an array index. The variadic `path` args of `get`/`has`/`hop`/`iter`
+ *  are sequences of these. */
 export type Segment = string | number;
+
+/** A location in a document, as the sequence of {@link Segment}s from the root.
+ *  Carried by every {@link BoteError} (as `path`) to mark where a fault occurred. */
 export type Path = readonly Segment[];
 
 /** Upper bound on numeric segments (napi takes them as `u32`). 2^32 - 1
@@ -20,6 +26,9 @@ export function validatePath(path: readonly unknown[]): asserts path is readonly
   }
 }
 
+/** Render a {@link Path} as a readable JS-accessor string for logging or error
+ *  messages, e.g. `['users', 0, 'first name']` -> `users[0]["first name"]`. The
+ *  empty path renders as `(root)`. */
 export function formatPath(path: Path): string {
   if (path.length === 0) {
     return '(root)';
