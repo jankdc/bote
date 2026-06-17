@@ -21,8 +21,9 @@ type SelectMapShape<S> = { -readonly [K in keyof S]: unknown };
 
 export type IterKey = string | number;
 
-export const DEFAULT_ITER_BATCH = 1000;
-export const MAX_ITER_BATCH = 1_000_000;
+export const MAX_BATCH_COUNT = 1_000_000;
+export const DEFAULT_MAX_BATCH_COUNT = 1000;
+export const DEFAULT_MAX_BATCH_BYTES = 256 * 1024;
 
 export interface Cursor {
   /**
@@ -140,9 +141,15 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
     iter(...args: VariadicPathArgs<StandardSchemaV1 | IterOptions>): IterStream<unknown> {
       ensureOpen(state);
       const { path, tail } = splitArgs<StandardSchemaV1 | IterOptions>(args);
-      const { schema, select, batch, onInvalid, withKey } = normalizeIterTail(tail);
-      if (batch !== undefined && (!Number.isInteger(batch) || batch <= 0 || batch > MAX_ITER_BATCH)) {
-        throw new RangeError(`iter: batch must be an integer in 1..=${MAX_ITER_BATCH}, got ${batch}`);
+      const { schema, select, maxBatchCount, maxBatchBytes, onInvalid, withKey } = normalizeIterTail(tail);
+      if (
+        maxBatchCount !== undefined &&
+        (!Number.isInteger(maxBatchCount) || maxBatchCount <= 0 || maxBatchCount > MAX_BATCH_COUNT)
+      ) {
+        throw new RangeError(`iter: maxBatchCount must be an integer in 1..=${MAX_BATCH_COUNT}, got ${maxBatchCount}`);
+      }
+      if (maxBatchBytes !== undefined && (!Number.isInteger(maxBatchBytes) || maxBatchBytes <= 0)) {
+        throw new RangeError(`iter: maxBatchBytes must be a positive integer, got ${maxBatchBytes}`);
       }
       if (withKey !== undefined && typeof withKey !== 'boolean') {
         throw new TypeError(`iter: withKey must be a boolean, got ${typeof withKey}`);
@@ -151,17 +158,23 @@ export function wrap(native: NativeCursor, state: CursorState): Cursor {
         throw new RangeError(`iter: onInvalid must be "throw" or "skip", got ${JSON.stringify(onInvalid)}`);
       }
 
-      const resolvedBatch = batch ?? DEFAULT_ITER_BATCH;
+      const resolvedCount = maxBatchCount ?? DEFAULT_MAX_BATCH_COUNT;
+      const resolvedBytes = maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES;
       const selectIr = select !== undefined ? serializeSelect(select) : undefined;
       const wantKey = withKey ?? false;
       const nativeWithKey = wantKey || schema !== undefined;
-      const inner = native.iter(path, { selectIr, batch: resolvedBatch, withKey: nativeWithKey });
+      const inner = native.iter(path, {
+        selectIr,
+        maxBatchCount: resolvedCount,
+        maxBatchBytes: resolvedBytes,
+        withKey: nativeWithKey,
+      });
 
       if (!schema) {
-        return nativeStream(inner, path, resolvedBatch, (raw) => parseValue(raw, path) as unknown[]);
+        return nativeStream(inner, path, resolvedCount, (raw) => parseValue(raw, path) as unknown[]);
       }
       const policy = onInvalid ?? 'throw';
-      return nativeStream(inner, path, resolvedBatch, async (raw) => {
+      return nativeStream(inner, path, resolvedCount, async (raw) => {
         const out: unknown[] = [];
         for (const [key, value] of parseValue(raw, path) as Array<[IterKey, unknown]>) {
           const result = await validateItem(schema, value, [...path, key], policy);

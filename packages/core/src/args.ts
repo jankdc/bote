@@ -7,14 +7,6 @@ export interface IterOptions {
    *  sub-value; a field map (`{ name: 'name', city: ['address', 'city'] }`)
    *  builds an object from several sub-paths. */
   select?: Segment | Path | Record<string, Segment | Path>;
-  /** How many items cross the native boundary per fetch, which also bounds the
-   *  resident memory to that batch and sets the array size yielded by `IterStream.raw()`.
-   *  The default item loop drains each fetch one item at a time, so this doesn't change
-   *  what item iteration yields, only how much is fetched and held at once.
-   *  Higher is faster but holds more in memory.
-   *
-   * Default is `1000`. */
-  batch?: number;
   /** Validate each yielded item against this schema (after `select`). */
   schema?: StandardSchemaV1;
   /** Yield `[key, value]` tuples instead of bare values. `key` is the member
@@ -22,6 +14,24 @@ export interface IterOptions {
   withKey?: boolean;
   /** Policy for items failing `schema`. Default `'throw'`; `'skip'` drops them. */
   onInvalid?: 'throw' | 'skip';
+  /** Upper bound on items that cross the native boundary per fetch. A fetch
+   *  flushes when it reaches this many items or `maxBatchBytes`, whichever binds
+   *  first, so neither alone is guaranteed - both are caps the fetch tries to
+   *  fill up to. Also sets the array size yielded by `IterStream.raw()`. The
+   *  default item loop drains each fetch one item at a time, so this only changes
+   *  how much is fetched and held at once, not what item iteration yields.
+   *
+   * Default is `1000`. */
+  maxBatchCount?: number;
+  /** Upper bound on serialized bytes held per fetch. Keeps peak memory bounded
+   *  when items are large (e.g. records with big nested arrays) regardless of
+   *  `maxBatchCount`: the fetch flushes once its buffer reaches this size. At
+   *  least one item is always fetched, so a single item larger than this still
+   *  makes progress. Must be a positive integer; to let `maxBatchCount` dominate,
+   *  set this higher.
+   *
+   * Default is `262144` (256 KiB). */
+  maxBatchBytes?: number;
 }
 
 export type VariadicPathArgs<TTail> = [...Segment[]] | [...Segment[], TTail];

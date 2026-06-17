@@ -16,7 +16,7 @@ use crate::path::{self, Segment};
 use crate::resolve::ValueLocation;
 use crate::session::{Session, SessionError};
 use crate::source::{SourceError, SourceFaultCode};
-use crate::stream::IterState;
+use crate::stream::{BatchLimits, IterState};
 use crate::walker::{JsonFaultCode, TraverseError};
 
 #[napi]
@@ -88,7 +88,10 @@ impl Cursor {
       self.anchor_start(),
       self.depth,
       options.select_ir,
-      (options.batch as usize).max(1),
+      BatchLimits {
+        max_count: (options.max_batch_count as usize).max(1),
+        max_bytes: (options.max_batch_bytes as usize).max(1),
+      },
       options.with_key.unwrap_or(false),
     )
   }
@@ -115,8 +118,13 @@ impl Cursor {
 pub struct IterArgs {
   /// Serialized projection IR (see `select.rs`); `None` yields the whole child.
   pub select_ir: Option<String>,
-  /// Items yielded per iteration.
-  pub batch: f64,
+  /// Upper bound on items per fetch. A fetch flushes when it reaches this many
+  /// items or `max_batch_bytes`, whichever comes first.
+  pub max_batch_count: f64,
+  /// Upper bound on serialized bytes per fetch (clamped to at least 1). At least
+  /// one item is always emitted even if it alone exceeds this, so the stream
+  /// always makes progress.
+  pub max_batch_bytes: f64,
   /// Stitch each yield as a `[key, value]` tuple instead of a bare value. The key
   /// is the member name for objects (a JSON string) and the element index for
   /// arrays (a JSON number).
@@ -136,7 +144,7 @@ impl CursorIter {
     anchor_start: u64,
     base_depth: u32,
     select_ir: Option<String>,
-    batch: usize,
+    limits: BatchLimits,
     with_key: bool,
   ) -> Self {
     let state = IterState::new(
@@ -145,7 +153,7 @@ impl CursorIter {
       anchor_start,
       base_depth,
       select_ir,
-      batch,
+      limits,
       with_key,
     );
     Self {
@@ -312,7 +320,7 @@ mod tests {
   async fn iter_withkey_reencodes_escaped_object_key() {
     let doc = br#"{"items":{"a\"b":{"name":"x"}}}"#.to_vec();
     let s = session(doc, 256);
-    let mut it = CursorIter::new(s, items_path(), 0, 0, None, 1, true);
+    let mut it = CursorIter::new(s, items_path(), 0, 0, None, BatchLimits::count(1), true);
     let batch = it.next(None).await.unwrap().expect("one member");
     assert_eq!(batch, r#"[["a\"b",{"name":"x"}]]"#);
   }
@@ -320,7 +328,15 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_released_on_complete() {
     let s = session(array_doc(500), 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1, false);
+    let mut it = CursorIter::new(
+      s.clone(),
+      items_path(),
+      0,
+      0,
+      None,
+      BatchLimits::count(1),
+      false,
+    );
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -339,7 +355,15 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_batch_early_break_releases() {
     let s = session(array_doc(500), 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 8, false);
+    let mut it = CursorIter::new(
+      s.clone(),
+      items_path(),
+      0,
+      0,
+      None,
+      BatchLimits::count(8),
+      false,
+    );
     assert!(it.next(None).await.unwrap().is_some());
     it.complete(None).await.unwrap();
     let guard = it.state.lock().await;
@@ -353,12 +377,20 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_complete_stops_reads_far_below_full_walk() {
     let (full, full_reads) = counting_session(array_doc(5000), 256);
-    let mut walk = CursorIter::new(full, items_path(), 0, 0, None, 1, false);
+    let mut walk = CursorIter::new(full, items_path(), 0, 0, None, BatchLimits::count(1), false);
     while walk.next(None).await.unwrap().is_some() {}
     let full_n = full_reads.load(Ordering::Relaxed);
 
     let (partial, partial_reads) = counting_session(array_doc(5000), 256);
-    let mut it = CursorIter::new(partial, items_path(), 0, 0, None, 1, false);
+    let mut it = CursorIter::new(
+      partial,
+      items_path(),
+      0,
+      0,
+      None,
+      BatchLimits::count(1),
+      false,
+    );
     for _ in 0..3 {
       assert!(it.next(None).await.unwrap().is_some());
     }
@@ -388,7 +420,7 @@ mod tests {
       0,
       0,
       Some(r#"{"one":["total"]}"#.to_string()),
-      64,
+      BatchLimits::count(64),
       false,
     );
     while it.next(None).await.unwrap().is_some() {
@@ -403,7 +435,15 @@ mod tests {
   #[tokio::test]
   async fn pins_iter_object_released_on_complete() {
     let s = session(object_doc(500), 256);
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1, true);
+    let mut it = CursorIter::new(
+      s.clone(),
+      items_path(),
+      0,
+      0,
+      None,
+      BatchLimits::count(1),
+      true,
+    );
     for _ in 0..3 {
       assert!(
         it.next(None).await.unwrap().is_some(),
@@ -432,7 +472,15 @@ mod tests {
   async fn pins_iter_object_withkey_window_bounded() {
     let s = session(object_doc(2000), 256);
     let bound = window_bound();
-    let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 64, true);
+    let mut it = CursorIter::new(
+      s.clone(),
+      items_path(),
+      0,
+      0,
+      None,
+      BatchLimits::count(64),
+      true,
+    );
     while it.next(None).await.unwrap().is_some() {
       let len = it.state.lock().await.window.len();
       assert!(
@@ -447,7 +495,15 @@ mod tests {
     let s = session(object_doc(2000), 256);
     let mut abandoned = Vec::new();
     for _ in 0..64 {
-      let mut it = CursorIter::new(s.clone(), items_path(), 0, 0, None, 1, true);
+      let mut it = CursorIter::new(
+        s.clone(),
+        items_path(),
+        0,
+        0,
+        None,
+        BatchLimits::count(1),
+        true,
+      );
       assert!(it.next(None).await.unwrap().is_some());
       it.complete(None).await.unwrap();
       assert!(it.state.lock().await.window.is_empty());
