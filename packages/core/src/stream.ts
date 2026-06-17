@@ -9,7 +9,8 @@
 export interface IterStream<T> extends AsyncIterable<T> {
   /**
    * Yield the underlying fetch batches (arrays of items) instead of individual
-   * items, exposing the batch boundary set by {@link IterOptions.batch}. Used
+   * items, exposing the batch boundary set by {@link IterOptions.maxBatchCount}
+   * (and {@link IterOptions.maxBatchBytes}). Used
    * for more advanced use cases or if you simply don't like all the sugar.
    */
   raw(): AsyncIterable<T[]>;
