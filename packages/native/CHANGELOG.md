@@ -1,5 +1,41 @@
 # @botejs/native
 
+## 0.9.0
+
+### Minor Changes
+
+- a102b48: iter batching is now bounded by bytes as well as count.
+
+  **Breaking:** the `iter` option `batch` is renamed to `maxBatchCount`, and the
+  exported constants `DEFAULT_ITER_BATCH` / `MAX_ITER_BATCH` become
+  `DEFAULT_MAX_BATCH_COUNT` / `MAX_BATCH_COUNT`.
+
+  **New:** `maxBatchBytes` caps the serialized bytes held per fetch (default
+  `262144`, 256 KiB; must be a positive integer). A fetch flushes when it reaches
+  `maxBatchCount` items or `maxBatchBytes` bytes, whichever binds first, so neither
+  is guaranteed - both are caps the fetch fills up to. At least one item is always
+  fetched, so a single item larger than the budget still makes progress.
+
+  This keeps peak memory bounded when items are large (e.g. records with big nested
+  arrays) regardless of count: on the 181 MB citylots GeoJSON, fully materializing
+  each feature drops from ~210 MB to ~50 MB of V8 heap at the same throughput. To
+  let the count dominate instead, set `maxBatchBytes` high.
+
+### Patch Changes
+
+- 1b78b1e: Cut per-value and per-key allocations on the read path.
+  - Values now stream straight into the caller's buffer. `materialize`,
+    `project`, and the `iter` item builder append into one shared `Vec` instead
+    of each returning a fresh `Vec` that is then copied in. `read_range` appends
+    and rolls back on a chunk fault, so a retry re-appends from a clean slate.
+  - Key comparison borrows the member-key interior in place rather than
+    allocating per key. The new `read_slice` returns a `Cow` that only copies
+    when a key straddles a chunk seam, and decoding runs solely when an escape is
+    present. Key matching/decoding moves into a dedicated `keys` module.
+  - The structural-index cache takes ownership of scanned members
+    (`apply_scan_record` / `merge_object`) instead of cloning them, and chunk
+    splitting reuses the source `Bytes` via `slice` rather than copying.
+
 ## 0.7.0
 
 ### Minor Changes
