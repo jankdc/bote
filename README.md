@@ -36,12 +36,12 @@ Here's a run (Apple M1 Pro 2021, default settings, RUNS=100):
 
 | method                      | mean time (seconds) | mean peak footprint (MB) |
 | --------------------------- | ------------------- | ------------------------ |
-| bote: v0.8                   | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
-| JSON.parse                   | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
-| JSONStream: v1.3             | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
-| @streamparser/json: v0.0.22  | 5.103 ± 0.084 s     | 47.9 ± 2.3               |
-| oboe.js: v2.1                | 8.566 ± 0.295 s     | 100.0 ± 4.6              |
-| stream-json: v3.4.0          | 13.346 ± 0.569 s    | 207.6 ± 8.4              |
+| bote: v0.8                  | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
+| JSON.parse@v22              | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
+| JSONStream: v1.3            | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
+| @streamparser/json: v0.0.22 | 5.103 ± 0.084 s     | 47.9 ± 2.3               |
+| oboe.js: v2.1               | 8.566 ± 0.295 s     | 100.0 ± 4.6              |
+| stream-json: v3.4.0         | 13.346 ± 0.569 s    | 207.6 ± 8.4              |
 
 For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 
@@ -51,6 +51,17 @@ For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 - Validate with [Standard Schema](https://standardschema.dev/), avoiding those pesky `unknown`s
 - Supports multiple sources of data (e.g. file, network, stream) or write a custom one. (see [sources.js](./examples/sources.js) for the built-in ones)
 - For forward-only sources, there's support for replaying/buffering, allowing navigation to previous values
+
+## Supported
+
+- **Node.js >= 22.18.0**
+- **ESM-only**
+- **Platforms**
+  - macOS (Apple Silicon `aarch64` and Intel `x86_64`)
+  - Linux x64 (`x86_64`, glibc)
+  - Windows x64 (`x86_64`, MSVC)
+  - More if requested :)
+- **(Optional) [`@standard-schema/spec`](https://standardschema.dev/)**: If you want to validate via Standard Schema. Install it alongside your schema library (Zod, Valibot, ArkType, etc...).
 
 ## Documentation
 
