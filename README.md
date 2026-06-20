@@ -36,13 +36,13 @@ Here's a run of snippet above (Apple M1 Pro 2021, default settings, RUNS=100, No
 
 | method                        | mean time        | mean peak footprint (MB) |
 | ----------------------------- | ---------------- | ------------------------ |
-| bote: v0.9                    | 0.474 ± 0.024 s  | 34.7 ± 3.0               |
-| JSON.parse                    | 0.872 ± 0.015 s  | 507.5 ± 2.6              |
-| @discoveryjs/json-ext: v1.1.0 | 1.278 ± 0.011 s  | 417.8 ± 8.2              |
-| JSONStream: v1.3              | 4.448 ± 0.012 s  | 63.1 ± 1.1               |
-| @streamparser/json: v0.0.22   | 4.980 ± 0.023 s  | 64.1 ± 1.4               |
-| oboe.js: v2.1                 | 8.074 ± 0.419 s  | 97.7 ± 1.7               |
-| stream-json: v3.4.0           | 12.206 ± 0.649 s | 156.9 ± 10.2             |
+| bote v0.9                     | 0.447 ± 0.002 s  | 34.1 ± 1.9               |
+| JSON.parse                    | 0.828 ± 0.023 s  | 508.9 ± 2.4              |
+| @discoveryjs/json-ext: v1.1.0 | 1.303 ± 0.012 s  | 397.4 ± 2.7              |
+| JSONStream: v1.3              | 4.448 ± 0.055 s  | 62.2 ± 0.7               |
+| @streamparser/json: v0.0.22   | 4.935 ± 0.021 s  | 60.1 ± 6.4               |
+| oboe.js: v2.1                 | 8.041 ± 0.340 s  | 97.0 ± 1.3               |
+| stream-json: v3.4.0           | 12.323 ± 0.876 s | 149.0 ± 6.7              |
 
 For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 
