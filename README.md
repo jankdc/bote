@@ -32,16 +32,17 @@ console.log([...byStreet].sort((a, b) => b[1] - a[1]).slice(0, 10));
 
 Given a **seekable** or **forward** source and a path, it retrieves values out of a JSON, without loading the whole thing in-memory.
 
-Here's a run of snippet above (Apple M1 Pro 2021, default settings, RUNS=100):
+Here's a run of snippet above (Apple M1 Pro 2021, default settings, RUNS=100, Node v26):
 
-| method                      | mean time (seconds) | mean peak footprint (MB) |
-| --------------------------- | ------------------- | ------------------------ |
-| bote: v0.8                  | 0.517 ± 0.018 s     | 40.3 ± 2.5               |
-| JSON.parse: v22             | 0.816 ± 0.031 s     | 648.9 ± 2.4              |
-| JSONStream: v1.3            | 4.452 ± 0.052 s     | 57.9 ± 3.9               |
-| @streamparser/json: v0.0.22 | 5.103 ± 0.084 s     | 47.9 ± 2.3               |
-| oboe.js: v2.1               | 8.566 ± 0.295 s     | 100.0 ± 4.6              |
-| stream-json: v3.4.0         | 13.346 ± 0.569 s    | 207.6 ± 8.4              |
+| method                        | mean time        | mean peak footprint (MB) |
+| ----------------------------- | ---------------- | ------------------------ |
+| bote: v0.9                    | 0.474 ± 0.024 s  | 34.7 ± 3.0               |
+| JSON.parse                    | 0.872 ± 0.015 s  | 507.5 ± 2.6              |
+| @discoveryjs/json-ext: v1.1.0 | 1.278 ± 0.011 s  | 417.8 ± 8.2              |
+| JSONStream: v1.3              | 4.448 ± 0.012 s  | 63.1 ± 1.1               |
+| @streamparser/json: v0.0.22   | 4.980 ± 0.023 s  | 64.1 ± 1.4               |
+| oboe.js: v2.1                 | 8.074 ± 0.419 s  | 97.7 ± 1.7               |
+| stream-json: v3.4.0           | 12.206 ± 0.649 s | 156.9 ± 10.2             |
 
 For comparison notes, go [here](https://github.com/jankdc/bote-comparison).
 
